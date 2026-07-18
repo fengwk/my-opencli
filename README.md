@@ -12,14 +12,14 @@ Personal OpenCLI plugins, installed via the official plugin mechanism.
 
 This plugin **requires an OpenCLI fork**, not stock upstream alone:
 
-| Component | Minimum | Why |
-|-----------|---------|-----|
-| CLI (`@jackwener/opencli`) | **`>=1.8.7`** (first planned fork package version: `1.8.7-fengwk.1`; git tag: `fork-v1.8.7-fengwk.1`) | `page.startWsCapture` / `page.readWsCapture`, hardened `page.setFileInput`, `Arg.repeatable` |
-| Browser extension | **`>=1.0.23`** (paired with that CLI) | CDP/WS capture + file-chooser behavior must match the CLI |
+| Component | Minimum | Current verified release | Why |
+|-----------|---------|--------------------------|-----|
+| CLI (`@jackwener/opencli`) | **`>=1.8.7`** | package `1.8.7-fengwk.2` (git tag `fork-v1.8.7-fengwk.2`) | `page.startWsCapture` / `page.readWsCapture`, hardened `page.setFileInput`, `Arg.repeatable` |
+| Browser Bridge / Extension | **`>=1.0.24`** | paired Extension **`1.0.24`** | CDP/WS capture + file-chooser behavior must match the CLI |
 
-Package version (`1.8.7-fengwk.1`) and git tag (`fork-v1.8.7-fengwk.1`) are related but not the same string — do not treat the package version as a tag name.
+Minimum ranges are the compatibility floor; the verified columns name the paired fork Release that has been published and checked. Package version (`1.8.7-fengwk.2`) and git tag (`fork-v1.8.7-fengwk.2`) are related but not the same string — do not treat the package version as a tag name.
 
-Install and reload **both** the forked CLI and its matching extension. Mismatched CLI/extension pairs will fail at runtime even if the plugin installs cleanly.
+Install and reload **both** the forked CLI and its matching Browser Bridge / Extension. Mismatched CLI/extension pairs will fail at runtime even if the plugin installs cleanly.
 
 See your OpenCLI fork’s `FORK.md` for packaging details.
 
