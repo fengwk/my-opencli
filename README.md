@@ -8,23 +8,34 @@ Personal OpenCLI plugins, installed via the official plugin mechanism.
 |------|------|-------------|
 | `chatgpt-agent` | `packages/chatgpt-agent` | Protocol-stream ChatGPT agent (WS text/files/images, sequential upload, DOM file download, official-style image export) |
 
-## Install (local dev)
+## Requirements (fork)
 
-Requires a host OpenCLI that supports:
+This plugin **requires an OpenCLI fork**, not stock upstream alone:
 
-- `page.startWsCapture` / `page.readWsCapture`
-- `page.setFileInput` (chooser intercept)
-- optional: `Arg.repeatable` for multi `--file`
+| Component | Minimum | Why |
+|-----------|---------|-----|
+| CLI (`@jackwener/opencli`) | **`>=1.8.7`** (first planned fork package version: `1.8.7-fengwk.1`; git tag: `fork-v1.8.7-fengwk.1`) | `page.startWsCapture` / `page.readWsCapture`, hardened `page.setFileInput`, `Arg.repeatable` |
+| Browser extension | **`>=1.0.23`** (paired with that CLI) | CDP/WS capture + file-chooser behavior must match the CLI |
 
-Typically your **fork** of OpenCLI (`~/proj/OpenCLI` on `dev`), installed globally.
+Package version (`1.8.7-fengwk.1`) and git tag (`fork-v1.8.7-fengwk.1`) are related but not the same string — do not treat the package version as a tag name.
+
+Install and reload **both** the forked CLI and its matching extension. Mismatched CLI/extension pairs will fail at runtime even if the plugin installs cleanly.
+
+See your OpenCLI fork’s `FORK.md` for packaging details.
+
+## Install
+
+### Local (development)
+
+Exact local install from the subplugin package path:
 
 ```bash
-# from anywhere
+# from this repo root (adjust clone path if different)
+REPO="$(pwd)"
+
 opencli plugin uninstall chatgpt-agent 2>/dev/null || true
-# install from this repo (clone path; adjust if different)
-opencli plugin install "$(pwd)/packages/chatgpt-agent"
-# or monorepo root if your opencli supports multi-plugin manifests:
-# opencli plugin install "$(pwd)"
+# Local installs use the standalone subplugin path (not the monorepo root).
+opencli plugin install "${REPO}/packages/chatgpt-agent"
 
 # verify
 opencli plugin list
@@ -32,6 +43,46 @@ opencli chatgpt-agent ask --help
 ```
 
 Re-install after plugin code changes when not using a live local path (see `opencli plugin list`).
+
+### Hub / remote (GitHub)
+
+Install the `chatgpt-agent` subplugin from this GitHub repo:
+
+```bash
+opencli plugin uninstall chatgpt-agent 2>/dev/null || true
+opencli plugin install github:fengwk/my-opencli/chatgpt-agent
+
+opencli plugin list
+opencli chatgpt-agent ask --help
+```
+
+Equivalent monorepo install (all enabled subplugins):
+
+```bash
+opencli plugin install github:fengwk/my-opencli
+```
+
+### Version pinning limitation (important)
+
+Official OpenCLI `plugin install` / `plugin update` currently clones/pulls the remote **default branch** only. There is **no supported way yet to pin a git tag or ref** for plugin sources.
+
+Consequences:
+
+- A Hub/remote install always tracks whatever is currently on the default branch tip.
+- **Fresh deployments are not reproducible** from a release tag alone until OpenCLI gains ref/tag support for plugins.
+- GitHub Releases / `v*` tags in this repo document a known-good tree for humans and CI, but they are **not** consumable as install pins today.
+
+Prefer a **local path install** when you need a fixed tree for development or production.
+
+### `plugins.lock.json`
+
+After install/update, OpenCLI records sources and the resolved **git commit** under `~/.opencli/plugins.lock.json`. `opencli plugin list` may show a short commit hash when that metadata exists.
+
+Notes:
+
+- The lock file is **host-local** (under `~/.opencli/`), not something this plugin repo publishes.
+- Commit hashes are observational — they describe what landed on the machine after following the default branch. They do **not** restore reproducibility across machines until install can target a ref.
+- Do not treat lock entries as a substitute for pinning; reinstall/update can move with the remote default branch.
 
 ## Usage
 
@@ -57,8 +108,28 @@ opencli chatgpt-agent ask '画一只猫' --op ~/Pictures/chatgpt-agent
 - Native Linux Chrome: no staging; paths used as-is.
 - Override: `OPENCLI_UPLOAD_STAGE=0` disable / `=1` force.
 
+## Develop / verify this repo
+
+Root is a **private** workspace package (not published to npm). Node `>=20`.
+
+```bash
+npm ci
+npm run check          # manifest + syntax validation, then unit tests
+npm test               # vitest only
+npm run validate       # opencli-plugin.json + package contracts + JS syntax
+npm run validate:manifest
+npm run validate:syntax
+```
+
+Release process (maintainers):
+
+1. Keep plugin / root versions at the intended release (currently **`0.1.0`** until a tag is published).
+2. Push tag **`v<opencli-plugin.json version>`** exactly (e.g. `v0.1.0`).
+3. GitHub Actions `release.yml` runs the same checks, verifies the tag string, then creates a **GitHub Release with generated notes**.
+4. No `npm publish` and no binary artifacts — consumers install from git/path only.
+
 ## Relation to OpenCLI fork
 
-Core runtime changes (WS capture, setFileInput harden, `repeatable` args) live in your OpenCLI **fork** (see that repo’s `FORK.md`).
+Core runtime changes (WS capture, setFileInput harden, `repeatable` args) live in the OpenCLI **fork**.
 
 This repo only holds **adapter plugins** that should stay out of upstream `clis/` when possible.

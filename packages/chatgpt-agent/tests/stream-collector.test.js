@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { StreamCollector, parseSseFrames, sanitizeOutputText } from './stream-collector.js';
+import { StreamCollector, parseSseFrames, sanitizeOutputText } from '../src/stream-collector.js';
 
 describe('parseSseFrames', () => {
   // Ensures multi-line SSE blocks inside encoded_item split correctly.

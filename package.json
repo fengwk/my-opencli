@@ -1,0 +1,20 @@
+{
+  "name": "my-opencli",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Personal OpenCLI plugins monorepo (validation + tests only at root)",
+  "engines": {
+    "node": ">=20"
+  },
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "validate:manifest": "node scripts/validate-repo.mjs --manifest-only",
+    "validate:syntax": "node scripts/validate-repo.mjs --syntax-only",
+    "validate": "node scripts/validate-repo.mjs",
+    "check": "npm run validate && npm test"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.4"
+  }
+}

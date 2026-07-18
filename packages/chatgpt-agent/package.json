@@ -5,6 +5,6 @@
   "type": "module",
   "description": "Protocol-stream ChatGPT agent for OpenCLI (WS text/files/images + human-like upload/download)",
   "peerDependencies": {
-    "@jackwener/opencli": ">=1.8.0"
+    "@jackwener/opencli": ">=1.8.7"
   }
 }

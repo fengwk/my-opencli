@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { collectExpectedFileNames, enrichFilesFromText } from './download-dom.js';
+import { collectExpectedFileNames, enrichFilesFromText } from '../src/download-dom.js';
 
 describe('download-dom helpers', () => {
   it('pulls file names only from sandbox protocol links', () => {

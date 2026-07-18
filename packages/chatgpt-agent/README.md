@@ -8,4 +8,31 @@ Protocol-first ChatGPT web adapter:
 4. Images: official-style DOM export (fetch/canvas → local files)  
 5. Uploads: sequential `setFileInput` (path) with DataTransfer fallback  
 
-Depends on host `@jackwener/opencli` and its built-in `clis/chatgpt/utils.js` (resolved at runtime via `host-chatgpt.js`).
+## Requirements
+
+| Host | Minimum |
+|------|---------|
+| `@jackwener/opencli` (fork) | `>=1.8.7` (package version `1.8.7-fengwk.1`; git tag `fork-v1.8.7-fengwk.1`) |
+| Paired browser extension | `>=1.0.23` |
+
+Needs fork APIs: `page.startWsCapture` / `page.readWsCapture`, hardened `page.setFileInput`, and optional `Arg.repeatable` for multi `--file`.
+
+Also depends on the host package’s built-in `clis/chatgpt/utils.js` (resolved at runtime via `host-chatgpt.js`).
+
+## Install
+
+**Local (exact path):**
+
+```bash
+opencli plugin install /path/to/my-opencli/packages/chatgpt-agent
+```
+
+**Hub / remote:**
+
+```bash
+opencli plugin install github:fengwk/my-opencli/chatgpt-agent
+```
+
+Official install/update follows the remote **default branch** only — tags/refs cannot be pinned yet, so remote installs are **not** bit-for-bit reproducible across time. Prefer a local path when you need a fixed tree. OpenCLI may record the resolved commit in `~/.opencli/plugins.lock.json` after install; that is machine-local metadata, not a pin.
+
+See the [repo root README](../../README.md) for full fork, lockfile, and release notes.
