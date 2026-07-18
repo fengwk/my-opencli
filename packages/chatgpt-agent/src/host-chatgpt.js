@@ -22,30 +22,41 @@ function existsPkg(root) {
   }
 }
 
+function findOpencliPackageRoot(entryPath) {
+  let dir = path.dirname(entryPath);
+  while (true) {
+    if (existsPkg(dir)) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+function resolveOpencliPackageRootFromExport(requireFromPlugin) {
+  try {
+    // package.json is intentionally not part of OpenCLI's public exports.
+    // registry is public and resolves through the installer-created host link.
+    return findOpencliPackageRoot(
+      requireFromPlugin.resolve('@jackwener/opencli/registry'),
+    );
+  } catch {
+    return null;
+  }
+}
+
 function resolveOpencliPackageRoot() {
   const candidates = [];
 
-  // 1) Normal Node resolution from this file (plugin node_modules symlink)
-  try {
-    candidates.push(path.dirname(require.resolve('@jackwener/opencli/package.json')));
-  } catch { /* ignore */ }
+  // 1) Normal Node resolution from this file (plugin node_modules symlink).
+  const linkedHost = resolveOpencliPackageRootFromExport(require);
+  if (linkedHost) candidates.push(linkedHost);
 
   // 2) opencli binary location (global npm link)
   try {
-    const opencliBin = process.argv[1] && path.resolve(process.argv[1]);
+    const opencliBin = process.argv[1] && fs.realpathSync(process.argv[1]);
     if (opencliBin) {
-      // .../node_modules/@jackwener/opencli/dist/src/main.js
-      // .../OpenCLI/dist/src/main.js
-      let dir = path.dirname(opencliBin);
-      for (let i = 0; i < 8; i += 1) {
-        if (existsPkg(dir)) {
-          candidates.push(dir);
-          break;
-        }
-        const parent = path.dirname(dir);
-        if (parent === dir) break;
-        dir = parent;
-      }
+      const hostRoot = findOpencliPackageRoot(opencliBin);
+      if (hostRoot) candidates.push(hostRoot);
     }
   } catch { /* ignore */ }
 
@@ -61,7 +72,8 @@ function resolveOpencliPackageRoot() {
   // 4) Global npm prefix
   try {
     const req = createRequire(path.join(process.cwd(), 'package.json'));
-    candidates.push(path.dirname(req.resolve('@jackwener/opencli/package.json')));
+    const globalHost = resolveOpencliPackageRootFromExport(req);
+    if (globalHost) candidates.push(globalHost);
   } catch { /* ignore */ }
 
   for (const c of candidates) {

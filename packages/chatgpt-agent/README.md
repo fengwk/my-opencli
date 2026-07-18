@@ -17,7 +17,7 @@ Protocol-first ChatGPT web adapter:
 
 Needs fork APIs: `page.startWsCapture` / `page.readWsCapture`, hardened `page.setFileInput`, and optional `Arg.repeatable` for multi `--file`.
 
-Also depends on the host package’s built-in `clis/chatgpt/utils.js` (resolved at runtime via `host-chatgpt.js`).
+Also depends on the host package’s built-in `clis/chatgpt/utils.js`. `host-chatgpt.js` resolves it through the public `@jackwener/opencli/registry` export, so it works with the host symlink created by the official plugin installer even when package metadata is not exported.
 
 ## Install
 
