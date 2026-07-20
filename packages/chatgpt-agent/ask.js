@@ -34,8 +34,10 @@ import { prepareLocalFiles, uploadComposerFiles } from './src/upload-dom.js';
 import { ensureHealthyChatSurface, probeChatSurface } from './src/page-health.js';
 import {
   exportNewImagesLikeOfficial,
+  resolveImageOutputDir,
   snapshotVisibleImageUrls,
 } from './src/image-export.js';
+import { collectDownloadsToOutputDir } from './src/artifact-collect.js';
 import {
   ensureNotGenerating,
   recoverChatSurfaceAfterFailure,
@@ -318,6 +320,9 @@ export const askCommand = cli({
       let downloads = [];
       const remainingMs = () => Math.max(0, timeoutMs - (Date.now() - t0));
       const fileNames = collectExpectedFileNames(artifacts);
+      // Managed output dir: Hub injects --op; local default remains ~/Pictures/chatgpt-agent.
+      const managedOutputDir = resolveImageOutputDir(kwargs.op);
+
       if (fileNames.length > 0) {
         await page.sleep(1.0);
         const downloadBudget = Math.min(20_000, Math.max(8_000, Math.floor(remainingMs() * 0.3)));
@@ -325,6 +330,8 @@ export const askCommand = cli({
           downloads = await downloadFilesViaDomClick(page, fileNames, {
             timeoutMs: downloadBudget,
           });
+          // Chrome downloads land outside --op; copy completed files into managed dir.
+          downloads = collectDownloadsToOutputDir(downloads, managedOutputDir);
         } else if (process.env.OPENCLI_VERBOSE) {
           console.error('[chatgpt-agent] skip file download: no time budget left');
         }
@@ -334,7 +341,7 @@ export const askCommand = cli({
         const imgDl = await exportNewImagesLikeOfficial(page, {
           beforeUrls: beforeImageUrls,
           expectedCount: artifacts.images.length,
-          outputDir: kwargs.op,
+          outputDir: managedOutputDir,
           settleMs: 1200,
         });
         downloads = downloads.concat(imgDl);
