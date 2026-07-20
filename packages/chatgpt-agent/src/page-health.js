@@ -35,7 +35,8 @@ export async function probeChatSurface(page) {
     const onConversation = /\\/c\\/[A-Za-z0-9-]+/.test(url);
     // Composer-only shell on an existing conversation = broken or still hydrating.
     const blankThread = onConversation && messages === 0 && mainLen < 120;
-    return { url, composer, messages, mainLen, errorish, onConversation, blankThread };
+    const generating = !!document.querySelector('[data-testid="stop-button"]');
+    return { url, composer, messages, mainLen, errorish, onConversation, blankThread, generating };
   })()`).catch(() => ({
     url: '',
     composer: false,
@@ -44,6 +45,7 @@ export async function probeChatSurface(page) {
     errorish: true,
     onConversation: false,
     blankThread: true,
+    generating: false,
   }));
 
   const broken = !!(
@@ -51,7 +53,7 @@ export async function probeChatSurface(page) {
     || !state.composer
     || state.blankThread
   );
-  return { ...state, broken };
+  return { ...state, generating: !!state.generating, broken };
 }
 
 /**

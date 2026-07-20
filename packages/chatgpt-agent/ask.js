@@ -1,7 +1,8 @@
 /**
  * chatgpt-agent ask — protocol-stream turn against ChatGPT web.
  *
- * Flow: boot session → startWsCapture → send → wait protocol end → resolve → return
+ * Flow: boot session → ensure idle → startWsCapture → send → wait protocol end → resolve → return
+ * On failure: stop generation and recover the shell so the next turn can submit.
  * No DOM content fallback. DOM only for composer send (and optional download probe).
  */
 
@@ -35,6 +36,10 @@ import {
   exportNewImagesLikeOfficial,
   snapshotVisibleImageUrls,
 } from './src/image-export.js';
+import {
+  ensureNotGenerating,
+  recoverChatSurfaceAfterFailure,
+} from './src/session-recovery.js';
 
 const DEFAULT_TIMEOUT_SEC = 300;
 /**
@@ -172,6 +177,18 @@ export const askCommand = cli({
       }
     }
 
+    // Previous failed turns may leave Thinking / stop-button active. Wait or stop
+    // before sending, otherwise the next prompt fills the composer but cannot submit.
+    const preSendGen = await ensureNotGenerating(page, {
+      timeoutSec: Math.min(45, timeoutSec),
+    });
+    if (preSendGen.stillGenerating) {
+      throw new CommandExecutionError(
+        'STILL_GENERATING: previous ChatGPT turn is still active after stop',
+        'Open the automation tab, stop generation or open chatgpt.com/new, then retry.',
+      );
+    }
+
     // Clear leftover composer text/attachments from a previous failed or partial turn
     // (official chatgpt image does the same via clearChatGPTDraft before upload).
     await clearChatGPTDraft(page);
@@ -217,6 +234,8 @@ export const askCommand = cli({
     // Always disarm capture after the turn so persistent site sessions do not
     // keep buffering WebSocket frames between commands (bounded ring, but still
     // holds requestId maps and keeps hasActiveNetworkCapture true).
+    // On failure, also stop generation and recover the shell so the next ask can submit.
+    let turnSucceeded = false;
     try {
       // Brief settle so Network.enable is live before the page opens stream sockets.
       await page.sleep(0.3);
@@ -328,7 +347,7 @@ export const askCommand = cli({
         );
       }
 
-      return [{
+      const result = [{
         conversationId,
         conversationUrl,
         text: artifacts.text || '',
@@ -340,9 +359,21 @@ export const askCommand = cli({
         source: 'ws',
         reason: waitResult.reason,
       }];
+      turnSucceeded = true;
+      return result;
     } finally {
       if (typeof page.stopWsCapture === 'function') {
         await page.stopWsCapture().catch(() => null);
+      }
+      if (!turnSucceeded) {
+        await recoverChatSurfaceAfterFailure(page, {
+          session,
+          hardReset: bootConversation,
+        }).catch((err) => {
+          if (process.env.OPENCLI_VERBOSE) {
+            console.error(`[chatgpt-agent] recovery after failure failed: ${err?.message || err}`);
+          }
+        });
       }
     }
   },
