@@ -259,10 +259,18 @@ export const askCommand = cli({
       const urlInfoPromise = waitForConversationId(page, urlWaitBudget);
 
       // --- Listen protocol stream ---
+      // Honor the user's --timeout for both the outer bound and the
+      // inner "no progress" budget so a long edit isn't cut off by the
+      // 60s default while the overall timeout is still well within range.
+      // The inner budget keeps a 30s cushion under the outer remaining time
+      // and never drops below the original 60s safety floor.
+      const wsBudgetMs = Math.max(1000, timeoutMs - (Date.now() - t0));
+      const wsNoProgressMs = Math.min(wsBudgetMs, Math.max(60_000, wsBudgetMs - 30_000));
       let waitResult;
       try {
         waitResult = await waitForProtocolStream(page, collector, {
-          timeoutMs: Math.max(1000, timeoutMs - (Date.now() - t0)),
+          timeoutMs: wsBudgetMs,
+          noProgressMs: wsNoProgressMs,
         });
       } catch (err) {
         if (err && err.code === 'STUCK_NO_WS_PROGRESS') {
