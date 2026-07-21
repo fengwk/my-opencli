@@ -1,13 +1,11 @@
 /**
  * Human-like ChatGPT composer attachment upload.
  *
- * Primary (Playwright-like / OpenCLI extension):
- *   page.setFileInput → CDP intercept file chooser → DOM.setFileInputFiles
- *   (does NOT show the OS file manager when intercept works)
- *
- * Fallback (same as official clis/chatgpt uploadChatGPTImages):
- *   DataTransfer + React onChange on input[type=file]
- *   Still uses the page file input — not a silent backend upload API.
+ * Only transport: page.setFileInput → CDP intercept file chooser → DOM.setFileInputFiles.
+ * The OpenCLI extension intercepts the chooser, so this never shows the OS file manager
+ * when interception works. No DataTransfer / base64 fallback: the native CDP path is the
+ * only supported way to attach local files, and any non-selector failure is fatal and
+ * surfaced verbatim (filename, selector, exact underlying error).
  */
 
 import fs from 'node:fs';
@@ -195,7 +193,6 @@ export function prepareLocalFiles(fileArg) {
     // Stage onto a Windows-visible path so setFileInput works (official path).
     const staged = stageForBrowserUpload(nodePath);
     files.push({
-      // nodePath: path Node can still read for DataTransfer fallback
       nodePath: staged.nodePath,
       sourcePath: nodePath,
       browserPath: staged.browserPath,
@@ -235,18 +232,36 @@ async function dismissMenus(page) {
 }
 
 /**
- * Upload attachments one-by-one (human-like).
- * Avoids bulk base64 payloads that blow the evaluate channel on multi large images.
+ * Upload attachments one-by-one (human-like) using only page.setFileInput.
+ *
+ * - Each file is sent through page.setFileInput with the local browser-visible path
+ *   (stageForBrowserUpload handles WSL/Windows staging upstream).
+ * - Selector-not-found (CDP DOM.querySelector returned no node) advances to the next
+ *   candidate selector. Any other failure (attach/transport/CDP/path/chooser) is fatal
+ *   and surfaced verbatim.
+ * - No DataTransfer / base64 fallback is attempted anywhere in this flow.
  *
  * @param {object} page
  * @param {Array<{ nodePath: string, browserPath: string, name: string }>} preparedFiles
+ * @returns {Promise<
+ *   { ok: true, files: string[] } |
+ *   { ok: false, reason: string, files: string[] }
+ * >}
  */
 export async function uploadComposerFiles(page, preparedFiles) {
   if (!preparedFiles?.length) return { ok: true, files: [] };
 
-  const basenames = preparedFiles.map((f) => f.name);
   await dismissMenus(page);
   await ensureFileInputsMounted(page);
+
+  if (typeof page.setFileInput !== 'function') {
+    await dismissMenus(page);
+    return {
+      ok: false,
+      reason: 'page.setFileInput is not available on the active browser backend',
+      files: [],
+    };
+  }
 
   const done = [];
   for (let i = 0; i < preparedFiles.length; i += 1) {
@@ -256,102 +271,50 @@ export async function uploadComposerFiles(page, preparedFiles) {
       console.error(`[chatgpt-agent] upload-one ${i + 1}/${preparedFiles.length} name=${file.name}`);
     }
 
-    let okOne = false;
-    let lastErr = '';
+    const isImage = String(mimeFromPath(file.nodePath)).startsWith('image/');
+    const selectors = isImage
+      ? ['#upload-photos', 'input[type="file"][accept*="image"]', '#upload-files', 'input[type="file"]']
+      : ['#upload-files', 'form input[type="file"]', 'input[type="file"]'];
 
-    // 1) setFileInput single file (official CDP path)
-    if (typeof page.setFileInput === 'function') {
-      const isImage = String(mimeFromPath(file.nodePath)).startsWith('image/');
-      const selectors = isImage
-        ? ['#upload-photos', 'input[type="file"][accept*="image"]', '#upload-files', 'input[type="file"]']
-        : ['#upload-files', 'form input[type="file"]', 'input[type="file"]'];
-      for (const selector of selectors) {
-        try {
-          await page.setFileInput([file.browserPath], selector);
-          okOne = true;
-          if (process.env.OPENCLI_VERBOSE) {
-            console.error(`[chatgpt-agent] setFileInput ok selector=${selector} name=${file.name}`);
-          }
-          break;
-        } catch (err) {
-          lastErr = err instanceof Error ? err.message : String(err);
+    /** @type {Array<{ selector: string, message: string }>} */
+    const selectorMisses = [];
+    let okOne = false;
+
+    for (const selector of selectors) {
+      try {
+        await page.setFileInput([file.browserPath], selector);
+        okOne = true;
+        if (process.env.OPENCLI_VERBOSE) {
+          console.error(`[chatgpt-agent] setFileInput ok selector=${selector} name=${file.name}`);
         }
+        break;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (isSelectorNotFound(message)) {
+          selectorMisses.push({ selector, message });
+          if (process.env.OPENCLI_VERBOSE) {
+            console.error(`[chatgpt-agent] setFileInput selector-miss selector=${selector} name=${file.name}`);
+          }
+          continue;
+        }
+        // Any non-selector failure (attach/transport/CDP/path/chooser) is fatal.
+        await dismissMenus(page);
+        return {
+          ok: false,
+          reason: `setFileInput failed for filename=${file.name} selector=${selector}: ${message}`,
+          files: done,
+        };
       }
     }
 
-    // 2) DataTransfer single file (small evaluate payload)
     if (!okOne) {
-      if (process.env.OPENCLI_VERBOSE) {
-        console.error(`[chatgpt-agent] upload-one DataTransfer name=${file.name} (${lastErr || 'no setFileInput'})`);
-      }
-      const item = {
-        name: file.name,
-        mime: mimeFromPath(file.nodePath),
-        base64: fs.readFileSync(file.nodePath).toString('base64'),
-      };
-      if (item.base64.length > 8 * 1024 * 1024) {
-        await dismissMenus(page);
-        return {
-          ok: false,
-          reason: `file too large for DataTransfer fallback: ${file.name} (${(item.base64.length / 1024 / 1024).toFixed(1)} MB b64). setFileInput failed: ${lastErr}`,
-          files: done,
-        };
-      }
-      const isImage = String(item.mime).startsWith('image/');
-      const fallback = await page.evaluate(`(() => {
-        const item = ${JSON.stringify(item)};
-        const isImage = ${isImage ? 'true' : 'false'};
-        const input = (isImage && document.querySelector('#upload-photos, input[type="file"][accept*="image"]'))
-          || document.querySelector('#upload-files')
-          || document.querySelector('form input[type="file"]')
-          || document.querySelector('input[type="file"]');
-        if (!(input instanceof HTMLInputElement)) return { ok: false, reason: 'file input not found' };
-        const binary = atob(item.base64);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
-        const dt = new DataTransfer();
-        // Keep already-selected files if browser exposes them (usually empty for security).
-        try {
-          if (input.files && input.files.length) {
-            for (const f of Array.from(input.files)) dt.items.add(f);
-          }
-        } catch (_) {}
-        dt.items.add(new File([bytes], item.name, { type: item.mime }));
-        input.files = dt.files;
-        const propsKey = Object.keys(input).find((key) => key.startsWith('__reactProps$'));
-        if (propsKey && input[propsKey] && typeof input[propsKey].onChange === 'function') {
-          const nativeEvent = new Event('change', { bubbles: true });
-          input[propsKey].onChange({
-            target: input,
-            currentTarget: input,
-            nativeEvent,
-            preventDefault() {},
-            stopPropagation() {},
-            isDefaultPrevented() { return false; },
-            isPropagationStopped() { return false; },
-            persist() {},
-          });
-        } else {
-          input.dispatchEvent(new Event('input', { bubbles: true }));
-          input.dispatchEvent(new Event('change', { bubbles: true }));
-        }
-        return { ok: true, mode: 'datatransfer-one', inputId: input.id || '', count: dt.files.length };
-      })()`).catch((err) => ({
+      const tried = selectorMisses.map((m) => m.selector).join(', ');
+      await dismissMenus(page);
+      return {
         ok: false,
-        reason: err instanceof Error ? err.message : String(err),
-      }));
-      if (process.env.OPENCLI_VERBOSE) {
-        console.error(`[chatgpt-agent] upload-one-fallback=${JSON.stringify(fallback)}`);
-      }
-      if (!fallback?.ok) {
-        await dismissMenus(page);
-        return {
-          ok: false,
-          reason: fallback?.reason || lastErr || `upload failed: ${file.name}`,
-          files: done,
-        };
-      }
-      okOne = true;
+        reason: `setFileInput could not find a file input for filename=${file.name} (tried: ${tried})`,
+        files: done,
+      };
     }
 
     const ready = await waitForAttachmentPreview(page, expectNames, {
@@ -373,6 +336,15 @@ export async function uploadComposerFiles(page, preparedFiles) {
 
   await dismissMenus(page);
   return { ok: true, files: done, mode: 'sequential' };
+}
+
+/**
+ * Selector-not-found errors are the only ones we recover from by trying another
+ * selector. The CDP/extension setFileInput implementation throws this exact prefix
+ * when DOM.querySelector returns no node (or Runtime.evaluate finds no match).
+ */
+function isSelectorNotFound(message) {
+  return typeof message === 'string' && message.startsWith('No element found matching selector:');
 }
 
 async function ensureFileInputsMounted(page) {

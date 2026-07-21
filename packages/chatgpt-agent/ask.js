@@ -195,7 +195,7 @@ export const askCommand = cli({
     // (official chatgpt image does the same via clearChatGPTDraft before upload).
     await clearChatGPTDraft(page);
 
-    // --- Optional attachments (setFileInput / DataTransfer on composer file input) ---
+    // --- Optional attachments (setFileInput on composer file input) ---
     let uploads = [];
     const prepared = prepareLocalFiles(kwargs.file);
     if (!prepared.ok) {
