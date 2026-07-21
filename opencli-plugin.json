@@ -1,13 +1,13 @@
 {
   "name": "my-opencli",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "opencli": ">=1.8.7",
   "description": "Personal OpenCLI plugins (chatgpt-agent and future adapters)",
   "plugins": {
     "chatgpt-agent": {
       "path": "packages/chatgpt-agent",
       "description": "Protocol-stream ChatGPT agent: WS capture, sequential upload, file/image export",
-      "version": "0.1.4",
+      "version": "0.1.5",
       "opencli": ">=1.8.7"
     }
   }

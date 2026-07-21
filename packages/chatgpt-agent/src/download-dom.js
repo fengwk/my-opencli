@@ -135,7 +135,8 @@ export async function downloadFilesViaDomClick(page, fileNames, opts = {}) {
   const results = [];
   const names = [...new Set((fileNames || []).map((n) => normalizeFileName(n) || n).filter(Boolean))];
 
-  for (const name of names) {
+  for (let fileIndex = 0; fileIndex < names.length; fileIndex += 1) {
+    const name = names[fileIndex];
     const entry = {
       name,
       opened: false,
@@ -152,86 +153,89 @@ export async function downloadFilesViaDomClick(page, fileNames, opts = {}) {
       if (!chip?.found) {
         entry.error = 'no-file-chip';
         results.push(entry);
-        continue;
-      }
-
-      // 2) Click chip first — may expand flyout (preview) or download directly.
-      const openMeta = await page.evaluate(`(() => {
-        ${chipScript()}
-        return clickFileChip(${JSON.stringify(name)});
-      })()`);
-      entry.opened = !!openMeta?.ok;
-      entry.openMeta = openMeta;
-      if (!openMeta?.ok) {
-        entry.error = openMeta?.reason || 'chip-click-failed';
-        results.push(entry);
-        continue;
-      }
-
-      // 3) Poll: flyout may animate open (stage-thread-flyout width).
-      //    Only treat as "chip-direct" if NO flyout appears at all.
-      let panelState = { hasFlyout: false, hasDownload: false };
-      for (let i = 0; i < 24; i += 1) {
-        await page.sleep(0.25);
-        panelState = await page.evaluate(`(() => {
-          ${panelScript()}
-          return inspectFlyout(${JSON.stringify(name)});
-        })()`);
-        if (panelState?.hasDownload) break;
-        // Flyout visible but Download not ready yet — keep waiting.
-        if (panelState?.hasFlyout && i < 20) continue;
-      }
-
-      const waitPromise = typeof page.waitForDownload === 'function'
-        ? page.waitForDownload('', timeoutMs)
-        : null;
-      await page.sleep(0.1);
-
-      let panelClicked = { ok: false, reason: 'no-flyout' };
-      if (panelState?.hasDownload) {
-        panelClicked = await page.evaluate(`(() => {
-          ${panelScript()}
-          return clickFlyoutDownload(${JSON.stringify(name)});
-        })()`);
-        entry.panel = panelClicked;
-        entry.clicked = !!panelClicked?.ok;
-        entry.clickMeta = panelClicked?.ok
-          ? panelClicked
-          : { mode: 'panel-miss', ...panelClicked };
-      } else if (panelState?.hasFlyout) {
-        // Flyout open but no Download control — report, still try close later.
-        entry.panel = { ok: false, reason: 'flyout-without-download', ...panelState };
-        entry.clicked = false;
-        entry.error = 'flyout-without-download';
       } else {
-        // Truly no panel: non-preview file may download from chip alone.
-        entry.clicked = true;
-        entry.clickMeta = { mode: 'chip-direct', ...openMeta };
-        entry.panel = { ok: false, reason: 'no-flyout' };
+        // 2) Click chip first — may expand flyout (preview) or download directly.
+        const openMeta = await page.evaluate(`(() => {
+          ${chipScript()}
+          return clickFileChip(${JSON.stringify(name)});
+        })()`);
+        entry.opened = !!openMeta?.ok;
+        entry.openMeta = openMeta;
+        if (!openMeta?.ok) {
+          entry.error = openMeta?.reason || 'chip-click-failed';
+          results.push(entry);
+        } else {
+          // 3) Poll: flyout may animate open (stage-thread-flyout width).
+          //    Only treat as "chip-direct" if NO flyout appears at all.
+          let panelState = { hasFlyout: false, hasDownload: false };
+          for (let i = 0; i < 24; i += 1) {
+            await page.sleep(0.25);
+            panelState = await page.evaluate(`(() => {
+              ${panelScript()}
+              return inspectFlyout(${JSON.stringify(name)});
+            })()`);
+            if (panelState?.hasDownload) break;
+            // Flyout visible but Download not ready yet — keep waiting.
+            if (panelState?.hasFlyout && i < 20) continue;
+          }
+
+          const waitPromise = typeof page.waitForDownload === 'function'
+            ? page.waitForDownload('', timeoutMs)
+            : null;
+          await page.sleep(0.1);
+
+          let panelClicked = { ok: false, reason: 'no-flyout' };
+          if (panelState?.hasDownload) {
+            panelClicked = await page.evaluate(`(() => {
+              ${panelScript()}
+              return clickFlyoutDownload(${JSON.stringify(name)});
+            })()`);
+            entry.panel = panelClicked;
+            entry.clicked = !!panelClicked?.ok;
+            entry.clickMeta = panelClicked?.ok
+              ? panelClicked
+              : { mode: 'panel-miss', ...panelClicked };
+          } else if (panelState?.hasFlyout) {
+            // Flyout open but no Download control — report, still try close later.
+            entry.panel = { ok: false, reason: 'flyout-without-download', ...panelState };
+            entry.clicked = false;
+            entry.error = 'flyout-without-download';
+          } else {
+            // Truly no panel: non-preview file may download from chip alone.
+            entry.clicked = true;
+            entry.clickMeta = { mode: 'chip-direct', ...openMeta };
+            entry.panel = { ok: false, reason: 'no-flyout' };
+          }
+
+          let waitResult = waitPromise
+            ? await waitPromise.catch((e) => ({ downloaded: false, error: String(e?.message || e) }))
+            : { downloaded: false, error: 'waitForDownload unavailable' };
+
+          entry.downloaded = !!waitResult?.downloaded;
+          entry.path = waitResult?.filename || waitResult?.path || waitResult?.url || '';
+          entry.state = waitResult?.state || '';
+          if (!entry.downloaded) {
+            entry.error = waitResult?.error || 'download-not-completed';
+          }
+
+          // Always try close if flyout is open (even when download failed).
+          const closed = await page.evaluate(`(() => {
+            ${panelScript()}
+            return closeFlyout(${JSON.stringify(name)});
+          })()`).catch(() => ({ ok: false }));
+          entry.closed = !!closed?.ok;
+          entry.closeMeta = closed;
+          results.push(entry);
+        }
       }
-
-      let waitResult = waitPromise
-        ? await waitPromise.catch((e) => ({ downloaded: false, error: String(e?.message || e) }))
-        : { downloaded: false, error: 'waitForDownload unavailable' };
-
-      entry.downloaded = !!waitResult?.downloaded;
-      entry.path = waitResult?.filename || waitResult?.path || waitResult?.url || '';
-      entry.state = waitResult?.state || '';
-      if (!entry.downloaded) {
-        entry.error = waitResult?.error || 'download-not-completed';
-      }
-
-      // Always try close if flyout is open (even when download failed).
-      const closed = await page.evaluate(`(() => {
-        ${panelScript()}
-        return closeFlyout(${JSON.stringify(name)});
-      })()`).catch(() => ({ ok: false }));
-      entry.closed = !!closed?.ok;
-      entry.closeMeta = closed;
-      results.push(entry);
     } catch (err) {
       entry.error = err instanceof Error ? err.message : String(err);
       results.push(entry);
+    }
+
+    // Fixed gap between files so multi-download is not a zero-interval click burst.
+    if (fileIndex < names.length - 1) {
+      await page.sleep(0.4);
     }
   }
 
