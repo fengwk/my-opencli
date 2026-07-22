@@ -123,8 +123,8 @@ npm run validate:syntax
 
 Release process (maintainers):
 
-1. Keep plugin / root versions at the intended release (currently **`0.1.7`** for the next tag).
-2. Push tag **`v<opencli-plugin.json version>`** exactly (e.g. `v0.1.7`). Do **not** move an existing published tag such as `v0.1.0`.
+1. Keep plugin / root versions at the intended release (currently **`0.1.8`** for the next tag).
+2. Push tag **`v<opencli-plugin.json version>`** exactly (e.g. `v0.1.8`). Do **not** move an existing published tag such as `v0.1.0`.
 3. GitHub Actions `release.yml` runs the same checks, verifies the tag string, then creates a **GitHub Release with generated notes**.
 4. No `npm publish` and no binary artifacts — consumers install from git/path only. Remote install still follows the default branch (see **Version pinning limitation** above); tags document known-good trees but are not install pins.
 
