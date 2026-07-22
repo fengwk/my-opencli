@@ -1,6 +1,6 @@
 {
   "name": "my-opencli",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "private": true,
   "description": "Personal OpenCLI plugins monorepo (validation + tests only at root)",
   "engines": {
