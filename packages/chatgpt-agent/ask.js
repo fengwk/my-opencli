@@ -353,6 +353,22 @@ export const askCommand = cli({
           expectedCount: artifacts.images.length,
           outputDir: managedOutputDir,
           settleMs: 1200,
+          // Caller owns route validation: build the reload hook only for a
+          // verified /c/<id> conversation URL. At most one reload happens in
+          // the dedicated automation tab when the first visual export has no
+          // valid asset (e.g. ChatGPT still shows a sparse transparent
+          // placeholder for the generated image).
+          reloadConversation: conversationUrl && /\/(?:g\/g-p-[^/]+\/)?c\/[A-Za-z0-9_-]{8,}/.test(conversationUrl)
+            ? async () => {
+              await openChatGPTConversation(page, conversationUrl);
+              await page.sleep(2);
+            }
+            : null,
+          // Don't add a navigation reload unless there is enough remaining
+          // user-timeout for reload + settle + a second polling pass
+          // (~25s in practice). Below that the reload itself risks
+          // exceeding the outer bound.
+          canRetry: () => remainingMs() >= 25_000,
         });
         downloads = downloads.concat(imgDl);
       }

@@ -4,7 +4,7 @@
  * Stateless relative to product features: exit on strong lifecycle + settled
  * text/images, or immediately classify a strong lifecycle with empty text.
  * Image gen often delivers final assets via conversation-update after an early
- * turn-stream complete — keep draining while an actual image pointer is pending.
+ * turn-stream complete — keep draining while image generation is pending.
  */
 
 export const STREAM_DEFAULTS = {
@@ -39,16 +39,14 @@ export async function waitForProtocolStream(page, collector, opts) {
   const verbose = !!process.env.OPENCLI_VERBOSE;
 
   function settleMsForCollector() {
-    if (collector.imagePointers.length > 0) {
+    if (collector.imagePointers.length > 0 || collector.pendingImageGen) {
       return imageSettleMs;
     }
     return textSettleMs;
   }
 
-  function isPendingImageBatch() {
-    return collector.imagePointers.length > 0
-      && collector.pendingImageGen
-      && !collector.imageGenFinalSeen;
+  function isPendingImageGeneration() {
+    return collector.pendingImageGen && !collector.imageGenFinalSeen;
   }
 
   async function drainOnce() {
@@ -97,12 +95,12 @@ export async function waitForProtocolStream(page, collector, opts) {
     }
 
     // A fixed terminal signal with empty text is a phase boundary, not a
-    // last-progress quiet heuristic. Preserve an already-started multi-image
-    // batch until its final marker (or the pointer-specific safety valve).
+    // last-progress quiet heuristic. A pending image tool has not completed
+    // until its final marker, even before its first pointer arrives.
     if (collector.hasAnyStrongLifecycle() && collector.text.length === 0) {
-      if (!isPendingImageBatch()) {
+      if (!isPendingImageGeneration()) {
         await graceDrain();
-        if (collector.text.length > 0 || isPendingImageBatch()) continue;
+        if (collector.text.length > 0 || isPendingImageGeneration()) continue;
         if (collector.needsPostStreamResolve()) {
           return { reason: 'stream-ended-await-post', text: '' };
         }
@@ -125,9 +123,8 @@ export async function waitForProtocolStream(page, collector, opts) {
       return { reason: 'protocol-complete', text: collector.text };
     }
 
-    // Non-empty text may still be settling. Pending image generation without an
-    // actual pointer is not an output expectation, but still waits for a fixed
-    // lifecycle or the outer timeout when no terminal signal has arrived.
+    // Non-empty text may still be settling. A pending image tool remains open
+    // because its visible asset is delivered by a later protocol update.
     if (collector.hasAnyStrongLifecycle() || collector.pendingImageGen) {
       await page.sleep(pollMs / 1000);
       continue;

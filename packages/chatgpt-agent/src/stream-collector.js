@@ -238,13 +238,14 @@ export class StreamCollector {
 
   /**
    * Strong lifecycle + settled content.
-   * A pending image generation only gates completion when an image pointer has
-   * already arrived; it must not block a settled assistant text error/result.
+   * A pending image generation gates completion even before its first pointer:
+   * ChatGPT can emit image-tool arguments as an assistant message and only add
+   * the final sediment pointer much later through conversation-update.
    */
   canExit(quietMs) {
-    // Once an image pointer exists, keep the multi-image quiet/final safety.
+    if (this.pendingImageGen && !this.imageGenFinalSeen) return false;
+    if (!this.hasAnyStrongLifecycle() && this.imagePointers.length === 0) return false;
     if (this.imagePointers.length > 0) {
-      if (this.pendingImageGen && !this.imageGenFinalSeen) return false;
       if (this.lastProgressAt == null) return false;
       return Date.now() - this.lastProgressAt >= quietMs;
     }
@@ -267,6 +268,8 @@ export class StreamCollector {
       frameCount: this.frameCount,
       eventCount: this.eventCount,
       toolInvoked: this.toolInvoked,
+      pendingImageGen: this.pendingImageGen,
+      imageGenFinalSeen: this.imageGenFinalSeen,
       strongLifecycle: { ...this.strongLifecycle },
       fileRefs: this.fileRefs.map((r) => ({ ...r })),
       imagePointers: this.imagePointers.map((p) => ({ ...p })),
@@ -343,7 +346,11 @@ function extractTurnIdFromTopic(topicId) {
 
 function applyProtocolTextState(collector, event, now) {
   if (!event || typeof event !== 'object') return;
-  const nextRaw = assistantRawText(event, collector.rawText || '');
+  const nextRaw = assistantRawText(
+    event,
+    collector.rawText || '',
+    collector.pendingImageGen && !collector.imageGenFinalSeen,
+  );
   const nextText = sanitizeOutputText(nextRaw);
   if (nextRaw === collector.rawText && nextText === collector.text) return;
   collector.rawText = nextRaw;
@@ -351,43 +358,52 @@ function applyProtocolTextState(collector, event, now) {
   collector.lastTextChangeAt = now;
 }
 
-function assistantRawText(event, currentText) {
+function assistantRawText(event, currentText, suppressImageToolPlan) {
   for (const candidate of [event, event && event.v]) {
     if (!candidate || typeof candidate !== 'object') continue;
     const message = candidate.message;
     if (!message || typeof message !== 'object') continue;
     const role = String(((message.author || {}).role) || '').trim().toLowerCase();
     if (role !== 'assistant') continue;
-    const text = assistantMessageText(message);
+    if (!isVisibleAssistantMessage(message)) continue;
+    const text = assistantMessageText(message, suppressImageToolPlan);
     if (text) return text;
   }
-  return applyTextPatch(event, currentText || '');
+  return applyTextPatch(event, currentText || '', suppressImageToolPlan);
 }
 
-function assistantMessageText(message) {
+function isVisibleAssistantMessage(message) {
+  const metadata = message.metadata || {};
+  if (metadata.is_visually_hidden_from_conversation === true) return false;
+  const recipient = String(message.recipient || '').trim().toLowerCase();
+  return !recipient || recipient === 'all';
+}
+
+function assistantMessageText(message, suppressImageToolPlan) {
   const content = message.content || {};
   const parts = Array.isArray(content.parts) ? content.parts : [];
-  const text = parts.map(toDisplayableTextPart).filter(Boolean).join('');
-  if (text) return text;
-  return toDisplayableTextPart(content.text) || '';
+  const partText = parts.filter((part) => typeof part === 'string').join('');
+  if (partText) return toDisplayableTextPart(partText, suppressImageToolPlan);
+  return toDisplayableTextPart(content.text, suppressImageToolPlan) || '';
 }
 
-function applyTextPatch(event, currentText) {
+function applyTextPatch(event, currentText, suppressImageToolPlan) {
   if (!event || typeof event !== 'object') return currentText || '';
   if (String(event.p || '') === '/message/content/parts/0') {
-    return applyTextPatchOp(event, currentText || '');
+    return applyTextPatchOp(event, currentText || '', suppressImageToolPlan);
   }
 
   const operations = event.v;
   if (typeof operations === 'string' && currentText && !event.p && !event.o) {
-    const textPart = toDisplayableTextPart(operations);
-    return textPart ? currentText + textPart : currentText;
+    return toDisplayableTextPart(currentText + operations, suppressImageToolPlan);
   }
 
   if (event.o === 'patch' && Array.isArray(operations)) {
     let text = currentText || '';
     for (const item of operations) {
-      if (item && typeof item === 'object') text = applyTextPatch(item, text);
+      if (item && typeof item === 'object') {
+        text = applyTextPatch(item, text, suppressImageToolPlan);
+      }
     }
     return text;
   }
@@ -395,32 +411,45 @@ function applyTextPatch(event, currentText) {
   if (!Array.isArray(operations)) return currentText || '';
   let text = currentText || '';
   for (const item of operations) {
-    if (item && typeof item === 'object') text = applyTextPatch(item, text);
+    if (item && typeof item === 'object') {
+      text = applyTextPatch(item, text, suppressImageToolPlan);
+    }
   }
   return text;
 }
 
-function applyTextPatchOp(operation, currentText) {
+function applyTextPatchOp(operation, currentText, suppressImageToolPlan) {
   const op = String(operation.o || '');
-  const value = toDisplayableTextPart(operation.v);
-  if (op === 'append') return currentText + value;
-  if (op === 'replace') return value || currentText;
+  if (typeof operation.v !== 'string') return currentText;
+  if (op === 'append') {
+    return toDisplayableTextPart(currentText + operation.v, suppressImageToolPlan);
+  }
+  if (op === 'replace') {
+    if (!operation.v) return currentText;
+    return toDisplayableTextPart(operation.v, suppressImageToolPlan);
+  }
   return currentText;
 }
 
-function toDisplayableTextPart(value) {
+function toDisplayableTextPart(value, suppressImageToolPlan = false) {
   if (typeof value !== 'string') return '';
-  // Skip structured tool-plan JSON blobs that are not user-visible prose.
   const trimmed = value.trim();
-  if (trimmed.startsWith('{') && /"tool"|"search"|"browser"/.test(trimmed) && trimmed.length > 80) {
-    try {
-      JSON.parse(trimmed);
-      return '';
-    } catch {
-      // keep as text
-    }
-  }
+  if (isStructuredToolPlan(trimmed, suppressImageToolPlan)) return '';
   return value;
+}
+
+function isStructuredToolPlan(value, includeImageGenerationPlan) {
+  if (!value.startsWith('{') || value.length < 2) return false;
+  try {
+    const parsed = JSON.parse(value);
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') return false;
+    if ('tool' in parsed || 'search' in parsed || 'browser' in parsed) return true;
+    return includeImageGenerationPlan
+      && typeof parsed.prompt === 'string'
+      && (Array.isArray(parsed.reference_image_paths) || typeof parsed.aspect_ratio === 'string');
+  } catch {
+    return false;
+  }
 }
 
 function collectFileRef(collector, payload) {

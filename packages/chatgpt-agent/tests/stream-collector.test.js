@@ -109,6 +109,93 @@ describe('StreamCollector', () => {
     }]);
   });
 
+  it('does not expose image tool arguments as assistant text while image generation is pending', () => {
+    const c = new StreamCollector();
+    c.pendingImageGen = true;
+    const imageToolArguments = JSON.stringify({
+      prompt: 'Edit the provided image.',
+      reference_image_paths: ['/mnt/data/source.png'],
+      aspect_ratio: '1:1',
+    });
+
+    c.ingestFramePayload(JSON.stringify(conversationUpdate([{
+      id: 'assistant-tool-args',
+      author: { role: 'assistant' },
+      content: { parts: [imageToolArguments] },
+    }])));
+
+    expect(c.rawText).toBe('');
+    expect(c.text).toBe('');
+  });
+
+  it('clears a replaced image tool argument patch instead of preserving stale text', () => {
+    const c = new StreamCollector();
+    c.pendingImageGen = true;
+    c.rawText = 'stale assistant text';
+    c.text = 'stale assistant text';
+    const imageToolArguments = JSON.stringify({
+      prompt: 'Edit the provided image.',
+      reference_image_paths: ['/mnt/data/source.png'],
+      aspect_ratio: '1:1',
+    });
+    const patch = {
+      p: '/message/content/parts/0',
+      o: 'replace',
+      v: imageToolArguments,
+    };
+
+    c.ingestFramePayload(JSON.stringify([streamItem(`data: ${JSON.stringify(patch)}\n\n`)]));
+
+    expect(c.rawText).toBe('');
+    expect(c.text).toBe('');
+  });
+
+  it('ignores hidden and tool-recipient assistant messages from conversation updates', () => {
+    const c = new StreamCollector();
+    c.ingestFramePayload(JSON.stringify(conversationUpdate([
+      {
+        id: 'assistant-hidden',
+        author: { role: 'assistant' },
+        content: { parts: ['internal planning text'] },
+        metadata: { is_visually_hidden_from_conversation: true },
+      },
+      {
+        id: 'assistant-tool-call',
+        author: { role: 'assistant' },
+        recipient: 't2uay3k.sj1i4kz',
+        content: { content_type: 'code', text: '{"prompt":"internal tool arguments"}' },
+      },
+    ])));
+
+    expect(c.rawText).toBe('');
+    expect(c.text).toBe('');
+
+    c.ingestFramePayload(JSON.stringify(conversationUpdate([
+      {
+        id: 'assistant-visible',
+        author: { role: 'assistant' },
+        recipient: 'all',
+        content: { parts: ['visible final response'] },
+      },
+    ])));
+
+    expect(c.rawText).toBe('visible final response');
+    expect(c.text).toBe('visible final response');
+  });
+
+  it('keeps an ordinary JSON assistant response when no image generation is pending', () => {
+    const c = new StreamCollector();
+    const jsonResponse = JSON.stringify({ prompt: 'The user asked for this JSON value.' });
+
+    c.ingestFramePayload(JSON.stringify(conversationUpdate([{
+      id: 'assistant-json',
+      author: { role: 'assistant' },
+      content: { parts: [jsonResponse] },
+    }])));
+
+    expect(c.text).toBe(jsonResponse);
+  });
+
   // Both producer roles can carry downloadable sandbox links in raw add-messages.
   it('collects tool and assistant sandbox refs from conversation-update add-messages', () => {
     const c = new StreamCollector();

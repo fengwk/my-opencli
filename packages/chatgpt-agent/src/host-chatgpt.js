@@ -90,6 +90,17 @@ const opencliRoot = resolveOpencliPackageRoot();
 const utilsUrl = pathToFileURL(path.join(opencliRoot, 'clis/chatgpt/utils.js')).href;
 const utils = await import(utilsUrl);
 
+function fallbackUnwrapEvaluateResult(payload) {
+  if (payload && !Array.isArray(payload) && typeof payload === 'object' && 'session' in payload && 'data' in payload) {
+    return payload.data;
+  }
+  return payload;
+}
+
+export const unwrapEvaluateResult = typeof utils.unwrapEvaluateResult === 'function'
+  ? utils.unwrapEvaluateResult
+  : fallbackUnwrapEvaluateResult;
+
 export const {
   CHATGPT_DOMAIN,
   CHATGPT_URL,

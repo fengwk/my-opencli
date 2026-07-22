@@ -59,6 +59,10 @@ describe('host-chatgpt host package resolution', () => {
 
       const hostChatGpt = await import(`${pathToFileURL(pluginSource).href}?fixture=${Date.now()}`);
       expect(hostChatGpt.CHATGPT_DOMAIN).toBe('chatgpt.com');
+      expect(hostChatGpt.unwrapEvaluateResult({
+        session: 'bridge-session',
+        data: { inspected: true },
+      })).toEqual({ inspected: true });
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }

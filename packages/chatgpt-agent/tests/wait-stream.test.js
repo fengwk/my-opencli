@@ -31,6 +31,30 @@ function idlePage() {
   };
 }
 
+function queuedPage(batches) {
+  let reads = 0;
+  return {
+    page: {
+      readWsCapture: async () => {
+        reads += 1;
+        return batches.shift() || [];
+      },
+      sleep: async () => {},
+    },
+    readCount: () => reads,
+  };
+}
+
+function conversationUpdate(messages) {
+  return {
+    type: 'conversation-update',
+    payload: {
+      update_type: 'add-messages',
+      update_content: { messages },
+    },
+  };
+}
+
 function immediateWaitOptions(overrides = {}) {
   return {
     timeoutMs: 50,
@@ -62,37 +86,80 @@ function pendingImageMessage(parts = []) {
 const streamComplete = { type: 'message_stream_complete' };
 
 describe('waitForProtocolStream phase semantics', () => {
-  // A stale image-tool placeholder must not hide a settled assistant error/result.
-  it('completes settled assistant text despite pending image generation without a pointer', async () => {
-    const collector = new StreamCollector();
-    ingestStreamEvents(collector, [pendingImageMessage(), streamComplete]);
-    collector.ingestFramePayload(JSON.stringify({
-      type: 'conversation-update',
-      payload: {
-        update_type: 'add-messages',
-        update_content: {
-          messages: [{
-            id: 'assistant-error',
-            author: { role: 'assistant' },
-            content: { parts: ['图像生成工具出错了，请重试。'] },
-          }],
+  it('waits for a final pointer when an image tool emits assistant JSON arguments first', async () => {
+    const imageToolArguments = JSON.stringify({
+      prompt: 'Edit the provided image.',
+      reference_image_paths: ['/mnt/data/source.png'],
+      aspect_ratio: '1:1',
+    });
+    const { page, readCount } = queuedPage([
+      [
+        {
+          direction: 'received',
+          payload: JSON.stringify([streamItem([pendingImageMessage(), streamComplete])]),
         },
-      },
-    }));
-    collector.lastTextChangeAt = Date.now() - 5000;
-
-    expect(collector.pendingImageGen).toBe(true);
-    expect(collector.imagePointers).toHaveLength(0);
+        {
+          direction: 'received',
+          payload: JSON.stringify(conversationUpdate([{
+            id: 'assistant-tool-args',
+            author: { role: 'assistant' },
+            content: { parts: [imageToolArguments] },
+          }])),
+        },
+      ],
+      [{
+        direction: 'received',
+        payload: JSON.stringify(conversationUpdate([{
+          id: 'image-tool',
+          author: { role: 'tool', name: 'image_gen' },
+          content: {
+            parts: [{
+              content_type: 'image_asset_pointer',
+              asset_pointer: 'sediment://final_image',
+            }],
+          },
+          metadata: { ghostrider: { status: 'final' } },
+        }])),
+      }],
+    ]);
+    const collector = new StreamCollector();
     const result = await waitForProtocolStream(
-      idlePage(),
+      page,
       collector,
       immediateWaitOptions(),
     );
 
-    expect(result).toEqual({
-      reason: 'protocol-complete',
-      text: '图像生成工具出错了，请重试。',
-    });
+    expect(readCount()).toBeGreaterThanOrEqual(2);
+    expect(collector.text).toBe('');
+    expect(collector.imagePointers).toEqual([
+      { type: 'sediment', id: 'final_image', messageId: 'image-tool' },
+    ]);
+    expect(result).toEqual({ reason: 'stream-ended-await-post', text: '' });
+  });
+
+  it('returns assistant error text after an explicit image-generation final marker', async () => {
+    const collector = new StreamCollector();
+    ingestStreamEvents(collector, [pendingImageMessage(), streamComplete]);
+    collector.ingestFramePayload(JSON.stringify(conversationUpdate([
+      {
+        id: 'image-tool',
+        author: { role: 'tool', name: 'image_gen' },
+        content: { parts: [] },
+        metadata: { ghostrider: { status: 'final' } },
+      },
+      {
+        id: 'assistant-error',
+        author: { role: 'assistant' },
+        content: { parts: ['图像生成工具出错了，请重试。'] },
+      },
+    ])));
+    collector.lastTextChangeAt = Date.now() - 5000;
+
+    expect(collector.pendingImageGen).toBe(false);
+    expect(collector.imageGenFinalSeen).toBe(true);
+    const result = await waitForProtocolStream(idlePage(), collector, immediateWaitOptions());
+
+    expect(result).toEqual({ reason: 'protocol-complete', text: '图像生成工具出错了，请重试。' });
   });
 
   // A fixed terminal signal hands protocol file metadata to post-stream resolution immediately.
