@@ -238,16 +238,13 @@ export class StreamCollector {
 
   /**
    * Strong lifecycle + settled content.
-   * Image gen: wait for asset pointers (conversation-update) when pending.
+   * A pending image generation only gates completion when an image pointer has
+   * already arrived; it must not block a settled assistant text error/result.
    */
   canExit(quietMs) {
-    // Still generating more images (multi-gen) — never exit mid-batch.
-    if (this.pendingImageGen && !this.imageGenFinalSeen) {
-      return false;
-    }
-    if (!this.hasAnyStrongLifecycle() && this.imagePointers.length === 0) return false;
+    // Once an image pointer exists, keep the multi-image quiet/final safety.
     if (this.imagePointers.length > 0) {
-      // After final (or no pending), require quiet so late siblings can still land.
+      if (this.pendingImageGen && !this.imageGenFinalSeen) return false;
       if (this.lastProgressAt == null) return false;
       return Date.now() - this.lastProgressAt >= quietMs;
     }
@@ -259,9 +256,7 @@ export class StreamCollector {
   needsPostStreamResolve() {
     return this.fileRefs.length > 0
       || this.imagePointers.length > 0
-      || this.toolInvoked === true
-      || this.pendingImageGen === true
-      || this.sources.length > 0;
+      || this.toolInvoked === true;
   }
 
   snapshot() {

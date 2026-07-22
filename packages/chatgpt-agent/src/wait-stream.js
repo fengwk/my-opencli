@@ -2,9 +2,9 @@
  * Poll OpenCLI page.readWsCapture into a StreamCollector until protocol end.
  *
  * Stateless relative to product features: exit on strong lifecycle + settled
- * text/images, or empty after a quiet window following last progress.
+ * text/images, or immediately classify a strong lifecycle with empty text.
  * Image gen often delivers final assets via conversation-update after an early
- * turn-stream complete — keep draining while pendingImageGen.
+ * turn-stream complete — keep draining while an actual image pointer is pending.
  */
 
 export const STREAM_DEFAULTS = {
@@ -16,11 +16,6 @@ export const STREAM_DEFAULTS = {
   IMAGE_SETTLE_MS: 12_000,
   /** After canExit, keep draining briefly so late citation/image patches arrive. */
   GRACE_MS: 4000,
-  /**
-   * After strong lifecycle with still-empty text/images, keep listening this long
-   * past lastProgress (image_gen / tools may still land via conversation-update).
-   */
-  EMPTY_AFTER_PROGRESS_MS: 120_000,
   /** Safety: if pendingImageGen never sees ghostrider final, stop after this quiet. */
   PENDING_IMAGE_MAX_QUIET_MS: 45_000,
   NO_PROGRESS_MS: 60_000,
@@ -30,7 +25,7 @@ export const STREAM_DEFAULTS = {
 /**
  * @param {object} page OpenCLI IPage
  * @param {import('./stream-collector.js').StreamCollector} collector
- * @param {{ timeoutMs: number, textSettleMs?: number, noProgressMs?: number, pollMs?: number, graceMs?: number, emptyAfterProgressMs?: number }} opts
+ * @param {{ timeoutMs: number, textSettleMs?: number, noProgressMs?: number, pollMs?: number, graceMs?: number, pendingImageMaxQuietMs?: number, imageSettleMs?: number }} opts
  */
 export async function waitForProtocolStream(page, collector, opts) {
   const timeoutMs = opts.timeoutMs;
@@ -39,16 +34,21 @@ export async function waitForProtocolStream(page, collector, opts) {
   const noProgressMs = opts.noProgressMs ?? STREAM_DEFAULTS.NO_PROGRESS_MS;
   const pollMs = opts.pollMs ?? STREAM_DEFAULTS.POLL_MS;
   const graceMs = opts.graceMs ?? STREAM_DEFAULTS.GRACE_MS;
-  const emptyAfterProgressMs = opts.emptyAfterProgressMs ?? STREAM_DEFAULTS.EMPTY_AFTER_PROGRESS_MS;
   const pendingImageMaxQuietMs = opts.pendingImageMaxQuietMs ?? STREAM_DEFAULTS.PENDING_IMAGE_MAX_QUIET_MS;
   const start = Date.now();
   const verbose = !!process.env.OPENCLI_VERBOSE;
 
   function settleMsForCollector() {
-    if (collector.imagePointers.length > 0 || collector.pendingImageGen) {
+    if (collector.imagePointers.length > 0) {
       return imageSettleMs;
     }
     return textSettleMs;
+  }
+
+  function isPendingImageBatch() {
+    return collector.imagePointers.length > 0
+      && collector.pendingImageGen
+      && !collector.imageGenFinalSeen;
   }
 
   async function drainOnce() {
@@ -96,8 +96,25 @@ export async function waitForProtocolStream(page, collector, opts) {
       }
     }
 
+    // A fixed terminal signal with empty text is a phase boundary, not a
+    // last-progress quiet heuristic. Preserve an already-started multi-image
+    // batch until its final marker (or the pointer-specific safety valve).
+    if (collector.hasAnyStrongLifecycle() && collector.text.length === 0) {
+      if (!isPendingImageBatch()) {
+        await graceDrain();
+        if (collector.text.length > 0 || isPendingImageBatch()) continue;
+        if (collector.needsPostStreamResolve()) {
+          return { reason: 'stream-ended-await-post', text: '' };
+        }
+        return { reason: 'protocol-complete-text-empty', text: '' };
+      }
+    }
+
     if (collector.canExit(settleMs)) {
       await graceDrain();
+      // Grace may have delivered a late image pointer/text patch. Re-check with
+      // the collector's new artifact-specific settle rule before terminating.
+      if (!collector.canExit(settleMsForCollector())) continue;
       if (verbose) {
         console.error(
           `[chatgpt-agent] protocol-complete textLen=${collector.text.length} `
@@ -108,35 +125,12 @@ export async function waitForProtocolStream(page, collector, opts) {
       return { reason: 'protocol-complete', text: collector.text };
     }
 
-    // Strong lifecycle / pending async image but not canExit yet.
-    if (
-      (collector.hasAnyStrongLifecycle() || collector.pendingImageGen)
-      && !collector.canExit(settleMs)
-    ) {
-      const last = collector.lastProgressAt || collector.firstProgressAt || start;
-      const quiet = Date.now() - last;
-      // Image gen: keep waiting while pending (multi-image siblings still coming).
-      if (collector.pendingImageGen) {
-        await page.sleep(pollMs / 1000);
-        continue;
-      }
-      if (quiet < emptyAfterProgressMs) {
-        await page.sleep(pollMs / 1000);
-        continue;
-      }
-
-      if (collector.needsPostStreamResolve()) {
-        await graceDrain();
-        return { reason: 'stream-ended-await-post', text: collector.text };
-      }
-
-      await graceDrain();
-      return {
-        reason: collector.text || collector.imagePointers.length
-          ? 'protocol-complete'
-          : 'protocol-complete-text-empty',
-        text: collector.text,
-      };
+    // Non-empty text may still be settling. Pending image generation without an
+    // actual pointer is not an output expectation, but still waits for a fixed
+    // lifecycle or the outer timeout when no terminal signal has arrived.
+    if (collector.hasAnyStrongLifecycle() || collector.pendingImageGen) {
+      await page.sleep(pollMs / 1000);
+      continue;
     }
 
     if (collector.firstProgressAt === null && Date.now() - start >= noProgressMs) {

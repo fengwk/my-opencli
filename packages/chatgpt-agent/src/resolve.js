@@ -5,6 +5,13 @@
  * Like a real user: stream delivers content; DOM is only for send/click/download.
  */
 
+/** Returnable protocol output for success/timeout decisions (sources alone are metadata). */
+export function hasReturnableArtifacts(artifacts) {
+  return Boolean(String(artifacts?.text || '').trim())
+    || (Array.isArray(artifacts?.files) && artifacts.files.length > 0)
+    || (Array.isArray(artifacts?.images) && artifacts.images.length > 0);
+}
+
 /**
  * @param {import('./stream-collector.js').StreamCollector} collector
  * @param {object} _page unused (kept for call-site stability)

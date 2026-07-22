@@ -24,7 +24,7 @@ import {
 } from './src/host-chatgpt.js';
 import { StreamCollector } from './src/stream-collector.js';
 import { waitForProtocolStream } from './src/wait-stream.js';
-import { resolveArtifacts } from './src/resolve.js';
+import { hasReturnableArtifacts, resolveArtifacts } from './src/resolve.js';
 import {
   collectExpectedFileNames,
   downloadFilesViaDomClick,
@@ -290,7 +290,13 @@ export const askCommand = cli({
         conversationUrl = `${CHATGPT_URL}/c/${conversationId}`;
       }
 
-      if (waitResult.reason === 'wait-timeout') {
+      // --- Package protocol artifacts only (no extra backend HTTP) ---
+      let artifacts = await resolveArtifacts(collector, page, { conversationId });
+      artifacts = enrichFilesFromText(artifacts);
+
+      // A timeout is only fatal when protocol resolution produced no actual
+      // text/file/image output. Preserve partial artifacts instead of discarding them.
+      if (waitResult.reason === 'wait-timeout' && !hasReturnableArtifacts(artifacts)) {
         const partial = (collector.text || '').trim();
         throw new TimeoutError(
           'chatgpt-agent ask',
@@ -300,10 +306,6 @@ export const askCommand = cli({
             : 'No protocol stream completion before timeout.',
         );
       }
-
-      // --- Package protocol artifacts only (no extra backend HTTP) ---
-      let artifacts = await resolveArtifacts(collector, page, { conversationId });
-      artifacts = enrichFilesFromText(artifacts);
 
       if (process.env.OPENCLI_VERBOSE) {
         console.error(
@@ -315,7 +317,7 @@ export const askCommand = cli({
         );
       }
 
-      if (!artifacts.text && artifacts.files.length === 0 && artifacts.images.length === 0) {
+      if (!hasReturnableArtifacts(artifacts)) {
         throw new CommandExecutionError(
           'EMPTY_REPLY: stream finished without text/files/images',
           `reason=${waitResult.reason}; frames=${collector.frameCount}`,
