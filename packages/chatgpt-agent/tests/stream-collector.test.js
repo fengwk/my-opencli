@@ -26,6 +26,17 @@ describe('StreamCollector', () => {
     };
   }
 
+  function conversationUpdate(messages, conversationId = '') {
+    return {
+      type: 'conversation-update',
+      payload: {
+        ...(conversationId ? { conversation_id: conversationId } : {}),
+        update_type: 'add-messages',
+        update_content: { messages },
+      },
+    };
+  }
+
   it('appends text patches and exits after strong lifecycle + settle', () => {
     const c = new StreamCollector();
     const append = JSON.stringify({
@@ -70,6 +81,66 @@ describe('StreamCollector', () => {
     expect(c.fileRefs).toHaveLength(1);
     expect(c.fileRefs[0].fileName).toBe('report.csv');
     expect(c.fileRefs[0].messageId).toBe('m1');
+  });
+
+  // A raw assistant-only update must use the same full-message text and source collectors as SSE.
+  it('collects assistant text and sources from conversation-update add-messages', () => {
+    const c = new StreamCollector();
+    c.ingestFramePayload(JSON.stringify(conversationUpdate([{
+      id: 'assistant-update',
+      author: { role: 'assistant' },
+      content: { parts: ['来自 conversation-update 的回答'] },
+      metadata: {
+        content_references: [{
+          title: 'Protocol reference',
+          url: 'https://example.com/protocol',
+          matched_text: 'reference',
+        }],
+      },
+    }], 'cid-update')));
+
+    expect(c.text).toBe('来自 conversation-update 的回答');
+    expect(c.rawText).toBe('来自 conversation-update 的回答');
+    expect(c.conversationId).toBe('cid-update');
+    expect(c.sources).toEqual([{
+      title: 'Protocol reference',
+      url: 'https://example.com/protocol',
+      ref: 'reference',
+    }]);
+  });
+
+  // Both producer roles can carry downloadable sandbox links in raw add-messages.
+  it('collects tool and assistant sandbox refs from conversation-update add-messages', () => {
+    const c = new StreamCollector();
+    c.ingestFramePayload(JSON.stringify(conversationUpdate([
+      {
+        id: 'tool-file',
+        author: { role: 'tool' },
+        content: { parts: ['created sandbox:/mnt/data/tool-output.csv'] },
+      },
+      {
+        id: 'assistant-file',
+        author: { role: 'assistant' },
+        content: { parts: ['Download [summary](sandbox:/mnt/data/summary.md)'] },
+      },
+    ])));
+
+    expect(c.fileRefs).toEqual([
+      {
+        messageId: 'tool-file',
+        sandboxPath: '/mnt/data/tool-output.csv',
+        fileName: 'tool-output.csv',
+        status: 'in_progress',
+        role: 'tool',
+      },
+      {
+        messageId: 'assistant-file',
+        sandboxPath: '/mnt/data/summary.md',
+        fileName: 'summary.md',
+        status: 'in_progress',
+        role: 'assistant',
+      },
+    ]);
   });
 
   it('collects image pointers from image_gen tool messages', () => {

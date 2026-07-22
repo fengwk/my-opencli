@@ -134,7 +134,12 @@ export class StreamCollector {
     if (updateType !== 'add-messages') return;
     const messages = Array.isArray(content.messages) ? content.messages : [];
     for (const msg of messages) {
+      if (!msg || typeof msg !== 'object') continue;
+      const messageAdd = { o: 'add', v: { message: msg } };
+      applyProtocolTextState(this, messageAdd, now);
+      collectFileRef(this, messageAdd);
       collectImageFromRawMessage(this, msg);
+      collectSourcesFromEvent(this, messageAdd);
     }
   }
 
