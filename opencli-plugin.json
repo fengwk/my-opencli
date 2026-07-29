@@ -9,6 +9,12 @@
       "description": "Protocol-stream ChatGPT agent: WS capture, sequential upload, file/image export",
       "version": "0.1.10",
       "opencli": ">=1.8.7"
+    },
+    "jimeng-agent": {
+      "path": "packages/jimeng-agent",
+      "description": "Prepare-only Jimeng Agent video references and rich @ mentions without submitting generation",
+      "version": "0.1.10",
+      "opencli": ">=1.8.7"
     }
   }
 }

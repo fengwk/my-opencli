@@ -7,6 +7,7 @@ Personal OpenCLI plugins, installed via the official plugin mechanism.
 | Name | Path | Description |
 |------|------|-------------|
 | `chatgpt-agent` | `packages/chatgpt-agent` | Protocol-stream ChatGPT agent (WS text/files/images, sequential upload, DOM file download, official-style image export) |
+| `jimeng-agent` | `packages/jimeng-agent` | Prepare-only Jimeng Agent video references and rich `@` mentions; never submits generation |
 
 ## Requirements (fork)
 
@@ -100,6 +101,15 @@ opencli chatgpt-agent ask '读这两个附件并概括' \
 
 # images export dir
 opencli chatgpt-agent ask '画一只猫' --op ~/Pictures/chatgpt-agent
+
+# prepare a Jimeng Agent draft without submitting generation
+opencli jimeng-agent ask \
+  --workspace <workspace-id> \
+  --image ./人物.png \
+  --prompt '请以@图片1作为人物形象参考。' \
+  --duration 5 \
+  --ratio 16:9 \
+  --model_version seedance2.0
 ```
 
 ### WSL + Windows Chrome

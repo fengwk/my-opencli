@@ -1,0 +1,181 @@
+import { describe, expect, it } from 'vitest';
+import { ArgumentError } from '@jackwener/opencli/errors';
+
+import {
+  JIMENG_GENERATE_URL,
+  buildEnterKeyEvents,
+  buildMentionSegments,
+  buildWorkspaceUrl,
+  chooseRetryPlan,
+  resolveMentionDebugOptions,
+} from '../src/agent-dom.js';
+
+const assets = [
+  {
+    label: '图片1',
+    filename: 'hero.png',
+    mentionName: 'hero',
+    browserPath: 'C:\\assets\\hero.png',
+  },
+  {
+    label: '视频1',
+    filename: 'move.mp4',
+    mentionName: 'move',
+    browserPath: 'C:\\assets\\move.mp4',
+  },
+];
+
+describe('jimeng-agent/agent-dom — workspace URL', () => {
+  it('builds the visible Jimeng generate workspace URL and encodes the workspace value', () => {
+    expect(buildWorkspaceUrl('  id/with space  ')).toBe(
+      `${JIMENG_GENERATE_URL}?workspace=id%2Fwith%20space`,
+    );
+  });
+
+  it('rejects a missing or blank workspace before browser work', () => {
+    expect(() => buildWorkspaceUrl('')).toThrow(ArgumentError);
+    expect(() => buildWorkspaceUrl('  ')).toThrow(ArgumentError);
+    expect(() => buildWorkspaceUrl(null)).toThrow(ArgumentError);
+  });
+});
+
+describe('jimeng-agent/agent-dom — rich mention segmentation', () => {
+  it('preserves ordinary text while replacing every resource placeholder with its asset', () => {
+    const parts = buildMentionSegments('start @图片1 then @视频1 end', assets);
+    expect(parts.map((part) => part.type)).toEqual([
+      'text',
+      'mention',
+      'text',
+      'mention',
+      'text',
+    ]);
+    expect(parts[1]).toMatchObject({ label: '图片1', asset: assets[0] });
+    expect(parts[3]).toMatchObject({ label: '视频1', asset: assets[1] });
+    expect(parts[0].value).toBe('start ');
+    expect(parts[4].value).toBe(' end');
+  });
+
+  it('keeps repeated references as separate rich-mention operations', () => {
+    const parts = buildMentionSegments('@图片1 / @图片1', assets);
+    const mentions = parts.filter((part) => part.type === 'mention');
+    expect(mentions).toHaveLength(2);
+    expect(mentions[0].asset).toBe(assets[0]);
+    expect(mentions[1].asset).toBe(assets[0]);
+  });
+
+  it('does not invent a plaintext fallback when a required upload is absent', () => {
+    expect(() => buildMentionSegments('@音频1', assets)).toThrow(ArgumentError);
+  });
+});
+
+describe('jimeng-agent/agent-dom — guarded mention selection', () => {
+  it('builds complete Chromium Enter events recognized by ProseMirror keymaps', () => {
+    expect(buildEnterKeyEvents()).toEqual([
+      {
+        type: 'rawKeyDown',
+        key: 'Enter',
+        code: 'Enter',
+        windowsVirtualKeyCode: 13,
+        nativeVirtualKeyCode: 13,
+        modifiers: 0,
+      },
+      {
+        type: 'keyUp',
+        key: 'Enter',
+        code: 'Enter',
+        windowsVirtualKeyCode: 13,
+        nativeVirtualKeyCode: 13,
+        modifiers: 0,
+      },
+    ]);
+  });
+});
+
+describe('jimeng-agent/agent-dom — retry policy', () => {
+  it('stops when the configured retry budget is exhausted', () => {
+    expect(chooseRetryPlan({
+      retriesUsed: 0,
+      retryBudget: 0,
+      priorInPlaceRetry: false,
+      errorPhase: 'upload',
+      failedAssetIndex: 0,
+      surface: { ready: true, fileInputCount: 1 },
+    })).toEqual({ kind: 'stop' });
+  });
+
+  it('prefers exactly one in-page resume for a healthy failed upload', () => {
+    expect(chooseRetryPlan({
+      retriesUsed: 0,
+      retryBudget: 2,
+      priorInPlaceRetry: false,
+      errorPhase: 'upload',
+      failedAssetIndex: 1,
+      surface: { ready: true, fileInputCount: 1 },
+    })).toEqual({ kind: 'resume', startAssetIndex: 1 });
+  });
+
+  it('uses a fresh workspace for unrecoverable state or after an in-page retry', () => {
+    const common = {
+      retriesUsed: 0,
+      retryBudget: 2,
+      errorPhase: 'upload',
+      failedAssetIndex: 0,
+    };
+    expect(chooseRetryPlan({
+      ...common,
+      priorInPlaceRetry: false,
+      surface: { ready: false, fileInputCount: 0 },
+    })).toEqual({ kind: 'fresh', startAssetIndex: 0 });
+    expect(chooseRetryPlan({
+      ...common,
+      priorInPlaceRetry: true,
+      surface: { ready: true, fileInputCount: 1 },
+    })).toEqual({ kind: 'fresh', startAssetIndex: 0 });
+    expect(chooseRetryPlan({
+      ...common,
+      priorInPlaceRetry: false,
+      errorPhase: 'mention',
+      surface: { ready: true, fileInputCount: 1 },
+    })).toEqual({ kind: 'fresh', startAssetIndex: 0 });
+  });
+});
+
+describe('jimeng-agent/agent-dom — mention debug options', () => {
+  it('keeps mention diagnostics disabled unless explicitly requested', () => {
+    expect(resolveMentionDebugOptions({})).toEqual({
+      enabled: false,
+      sleepMs: 0,
+      artifactRoot: null,
+    });
+  });
+
+  it('parses an explicit visual pause and artifact root for one-click diagnostics', () => {
+    expect(resolveMentionDebugOptions({
+      OPENCLI_JIMENG_MENTION_DEBUG: 'true',
+      OPENCLI_JIMENG_MENTION_DEBUG_SLEEP_MS: '2500',
+      OPENCLI_JIMENG_MENTION_DEBUG_ROOT: '/tmp/jimeng-debug',
+    })).toEqual({
+      enabled: true,
+      sleepMs: 2500,
+      artifactRoot: '/tmp/jimeng-debug',
+      stopPhase: 'after-click',
+    });
+  });
+
+  it('rejects an unsafe or malformed debug pause', () => {
+    expect(() => resolveMentionDebugOptions({
+      OPENCLI_JIMENG_MENTION_DEBUG: '1',
+      OPENCLI_JIMENG_MENTION_DEBUG_SLEEP_MS: '30001',
+    })).toThrow(ArgumentError);
+  });
+
+  it('supports stopping before the candidate click for a manual comparison', () => {
+    expect(resolveMentionDebugOptions({
+      OPENCLI_JIMENG_MENTION_DEBUG: '1',
+      OPENCLI_JIMENG_MENTION_DEBUG_STOP: 'before-click',
+    })).toMatchObject({
+      enabled: true,
+      stopPhase: 'before-click',
+    });
+  });
+});
