@@ -2,7 +2,8 @@
  * Visible-UI Jimeng Agent preparation, checkpoint, and optional submit.
  *
  * Flow:
- *   clear draft
+ *   dock composer (回到底部 / scroll-to-bottom, idempotent)
+ *   -> clear draft
  *   -> Agent/Auto/video configuration
  *   -> pre-input controls check (mode/preference only)
  *   -> upload refs -> write prompt/mentions
@@ -198,6 +199,9 @@ export async function prepareJimengAgentAsk(page, canonical, preparedAssets) {
 
   while (true) {
     try {
+      // Always dock first. Safe when already at bottom (idempotent).
+      // Covers the common "scrolled history up → composer collapsed" state.
+      await ensureComposerDocked(page);
       await waitForAgentSurface(page);
       if (startAssetIndex === 0) {
         await clearInitialDraftState(page);
@@ -212,6 +216,7 @@ export async function prepareJimengAgentAsk(page, canonical, preparedAssets) {
       // Jimeng may insert an uploaded reference chip at the document start.
       // Match the established flow: clear that platform-added draft state
       // before writing the canonical prompt and its explicit @ mentions.
+      await ensureComposerDocked(page);
       await clearComposer(page, 'clear-after-upload');
       await fillPromptWithRichMentions(page, canonical.agentPrompt, preparedAssets, mentionDebug);
 
@@ -373,12 +378,97 @@ async function openWorkspace(page, workspaceUrl, { fresh }) {
   await page.goto(workspaceUrl);
 }
 
+/**
+ * Bring the Agent composer dock into view.
+ *
+ * Idempotent: safe to call when already at the bottom. Handles the common
+ * "history scrolled up → floating 回到底部 → composer collapsed" state by:
+ *   1. clicking the visible 「回到底部」 control when present
+ *   2. scrolling main overflow containers to the bottom
+ *   3. focusing the prompt editor when it is already mounted
+ *
+ * This is part of the standard CLI prepare path, not an optional recovery.
+ */
+async function ensureComposerDocked(page) {
+  // 1) Click 「回到底部」 if visible (floating pill after scrolling history up).
+  const backToBottom = await page.evaluate(`(() => {
+    const visible = (el) => {
+      if (!(el instanceof HTMLElement)) return false;
+      const style = window.getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+      const rect = el.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+    const compact = (el) => ((el.getAttribute('aria-label') || '') + ' ' + (el.innerText || el.textContent || ''))
+      .replace(/\\s+/g, '');
+    const candidates = [...document.querySelectorAll('button, [role="button"], div, span, a')]
+      .filter(visible)
+      .filter((el) => compact(el).includes('回到底部'));
+    // Prefer the smallest leaf-like control (the floating pill, not a huge parent).
+    candidates.sort((a, b) => {
+      const ar = a.getBoundingClientRect();
+      const br = b.getBoundingClientRect();
+      return (ar.width * ar.height) - (br.width * br.height);
+    });
+    const target = candidates[0] || null;
+    if (!target) return { ok: false, reason: 'not-found' };
+    const rect = target.getBoundingClientRect();
+    target.setAttribute(${JSON.stringify(TARGET_ATTR)}, 'back-to-bottom');
+    return {
+      ok: true,
+      x: Math.round(rect.left + rect.width / 2),
+      y: Math.round(rect.top + rect.height / 2),
+      text: compact(target).slice(0, 32),
+    };
+  })()`);
+
+  if (backToBottom?.ok && typeof page.nativeClick === 'function') {
+    await page.nativeClick(backToBottom.x, backToBottom.y);
+    await page.sleep(0.25);
+  } else if (backToBottom?.ok) {
+    await page.click(`[${TARGET_ATTR}="back-to-bottom"]`).catch(() => null);
+    await page.sleep(0.25);
+  }
+
+  // 2) Scroll window + overflow containers to bottom (no-op when already there).
+  await page.evaluate(`(() => {
+    try { window.scrollTo(0, document.documentElement.scrollHeight || document.body.scrollHeight || 0); } catch {}
+    const nodes = [...document.querySelectorAll('div, main, section, aside')];
+    for (const el of nodes) {
+      if (!(el instanceof HTMLElement)) continue;
+      if (el.scrollHeight <= el.clientHeight + 40) continue;
+      const style = window.getComputedStyle(el);
+      if (!/(auto|scroll)/.test(style.overflowY) && !/(auto|scroll)/.test(style.overflow)) continue;
+      // Prefer large vertical scrollers (history / chat body).
+      if (el.clientHeight < 120) continue;
+      try { el.scrollTop = el.scrollHeight; } catch {}
+    }
+  })()`);
+  await page.sleep(0.2);
+
+  // 3) Soft-focus the editor if already mounted (does not throw if missing).
+  await page.evaluate(`(() => {
+    ${buildPromptEditorLocatorScript()}
+    const editor = findPromptEditor();
+    if (!editor) return false;
+    try { editor.focus(); } catch {}
+    return true;
+  })()`).catch(() => null);
+  await page.sleep(0.15);
+}
+
 async function waitForAgentSurface(page, timeoutMs = 25_000) {
   const deadline = Date.now() + timeoutMs;
   let last = null;
+  let dockTick = 0;
   while (Date.now() < deadline) {
     last = await probeJimengAgentSurface(page);
     if (last.ready) return last;
+    // Periodically re-dock while waiting — history scroll can re-collapse it.
+    dockTick += 1;
+    if (dockTick % 4 === 0) {
+      await ensureComposerDocked(page).catch(() => null);
+    }
     await page.sleep(0.25);
   }
   throw phaseError(
@@ -864,66 +954,175 @@ function createMentionDebugSession(options) {
   };
 }
 
+/**
+ * Rewind keystrokes typed in the current mention attempt.
+ * phase 'at'    → Backspace x1  (only '@')
+ * phase 'label' → Backspace x(label.length + 1)  (label + '@')
+ *
+ * Escape first to close the picker, then restore caret, then backspace.
+ * Does not rely on full-text baseline matching.
+ */
+/** Small pause between discrete key/input ops so Jimeng can settle. */
+const MENTION_KEY_GAP_S = 0.2;
+
+async function pressKeyWithGap(page, key, gapSeconds = MENTION_KEY_GAP_S) {
+  await page.nativeKeyPress(key);
+  await page.sleep(gapSeconds);
+}
+
+async function rewindMentionKeystrokes(page, label, phase) {
+  await pressKeyWithGap(page, 'Escape', 0.12);
+  try {
+    await ensurePromptEditorCaret(page);
+  } catch {
+    await placeCaretAtPromptEditorEnd(page).catch(() => null);
+  }
+  await page.sleep(MENTION_KEY_GAP_S);
+  let n = 0;
+  if (phase === 'at') n = 1;
+  else if (phase === 'label') n = 1 + Array.from(String(label || '')).length;
+  // Each Backspace is spaced out — rapid-fire deletes race Jimeng's editor.
+  for (let i = 0; i < n; i += 1) {
+    await pressKeyWithGap(page, 'Backspace');
+  }
+  // Safety: never leave a bare trailing '@'.
+  for (let i = 0; i < 3; i += 1) {
+    const endsWithAt = await page.evaluate(`(() => {
+      ${buildPromptEditorLocatorScript()}
+      const editor = findPromptEditor();
+      if (!editor) return false;
+      const text = (editor.innerText || editor.textContent || '').replace(/[\\u00a0\\u200b\\s]+$/g, '');
+      return /@$/.test(text);
+    })()`);
+    if (!endsWithAt) break;
+    await pressKeyWithGap(page, 'Backspace');
+  }
+  await page.sleep(MENTION_KEY_GAP_S);
+}
+
+/**
+ * Pure DOM read of the mention picker.
+ *
+ * IMPORTANT: This does NOT click, focus, or dispatch input. It only queries
+ * option nodes via page.evaluate, so the composer caret and the open picker
+ * stay intact (no focus loss from the check itself).
+ *
+ * A "visible picker" means at least one real 图片N / 视频N / 音频N option is
+ * on screen — not arbitrary list widgets.
+ */
 async function isMentionPickerVisible(page) {
   return page.evaluate(`(() => {
-    const visible = (el) => {
-      if (!(el instanceof HTMLElement)) return false;
-      const style = window.getComputedStyle(el);
-      const rect = el.getBoundingClientRect();
-      return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-    };
-    return [...document.querySelectorAll(${JSON.stringify(MENTION_OPTION_SELECTOR)})].some(visible);
+    ${buildPromptEditorLocatorScript()}
+    const options = [...document.querySelectorAll(${JSON.stringify(MENTION_OPTION_SELECTOR)})]
+      .filter(visible)
+      .filter((el) => {
+        const text = ((el.getAttribute('aria-label') || '') + ' ' + (el.innerText || el.textContent || ''))
+          .replace(/\\s+/g, '');
+        return /(?:图片|视频|音频)\\d+/.test(text);
+      });
+    return options.length > 0;
   })()`);
 }
 
+/**
+ * Insert one rich @mention chip.
+ *
+ * Flow (as specified):
+ *   1. type '@' → wait 0.5s → check picker visible
+ *      - invisible: Backspace '@', re-type '@' (max 3). Fail hard if still invisible.
+ *   2. type label (e.g. 图片1) → wait → check picker still visible
+ *      - invisible: rewind (label.length + 1) and full-retry from step 1 (max 3)
+ *   3. picker still visible → Enter on unique candidate → verify chip committed
+ *      - fail: rewind (label.length + 1) and full-retry (max 3)
+ *
+ * Between '@' and Enter we never click the editor (would steal focus / close picker).
+ * Visibility checks are pure evaluate and do not move focus.
+ */
 async function insertRichMention(page, asset, expectedMentionCount, mentionDebug) {
-  const maxAttempts = mentionDebug.enabled ? 1 : 5;
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+  const maxAtAttempts = mentionDebug.enabled ? 1 : 3;
+  const maxFullAttempts = mentionDebug.enabled ? 1 : 3;
+  const label = asset.label;
+
+  for (let fullAttempt = 0; fullAttempt < maxFullAttempts; fullAttempt += 1) {
     const before = await getMentionState(page, asset);
-    await page.nativeKeyPress('Escape');
-    await page.sleep(0.12);
-    // Establish a real caret before @ typing. Native click is best-effort;
-    // JS caret placement is the source of truth after mention re-renders.
+
+    // Prepare a clean caret only at the start of a full attempt.
+    await pressKeyWithGap(page, 'Escape', 0.12);
     await ensurePromptEditorCaret(page);
+    await page.sleep(MENTION_KEY_GAP_S);
+
     await captureMentionDebug(page, mentionDebug, 'before-at', asset, {
-      attempt: attempt + 1,
+      fullAttempt: fullAttempt + 1,
       expectedMentionCount,
+      before,
     });
-    await typeMentionQuery(page, '@');
-    await page.sleep(0.5);
-    await captureMentionDebug(page, mentionDebug, 'after-at', asset, {
-      attempt: attempt + 1,
+
+    // ---------- Phase 1: type '@', require picker ----------
+    let atOpened = false;
+    for (let atAttempt = 0; atAttempt < maxAtAttempts; atAttempt += 1) {
+      await typeMentionQuery(page, '@');
+      await page.sleep(0.5);
+      await captureMentionDebug(page, mentionDebug, 'after-at', asset, {
+        fullAttempt: fullAttempt + 1,
+        atAttempt: atAttempt + 1,
+      });
+
+      if (await isMentionPickerVisible(page)) {
+        atOpened = true;
+        break;
+      }
+
+      // '@' did not open picker → remove this '@' and re-try '@'.
+      // Prefer single Backspace; fall back to caret restore if focus was lost.
+      await pressKeyWithGap(page, 'Backspace');
+      const caretOk = await isCaretInPromptEditor(page).catch(() => false);
+      if (!caretOk) {
+        await ensurePromptEditorCaret(page);
+        await page.sleep(MENTION_KEY_GAP_S);
+      }
+    }
+
+    if (!atOpened) {
+      // Hard fail: '@' never opened a real mention picker.
+      await stripTrailingBareAt(page);
+      throw phaseError(
+        'mention',
+        `Rich @ mention picker did not open after ${maxAtAttempts} '@' attempt${maxAtAttempts === 1 ? '' : 's'} for ${label} (${asset.filename})`,
+        `Ensure Jimeng is focused and reference assets are uploaded before typing '@${label}'.`,
+      );
+    }
+
+    // ---------- Phase 2: type label, require picker still visible ----------
+    // Do NOT click/refocus the editor here — that can close the picker.
+    await page.sleep(MENTION_KEY_GAP_S);
+    await typeMentionQuery(page, label);
+    await page.sleep(0.55);
+    await captureMentionDebug(page, mentionDebug, 'after-label', asset, {
+      fullAttempt: fullAttempt + 1,
       expectedMentionCount,
     });
 
-    // If @ did not open the picker (lost focus / swallowed key), delete @ and retry.
     if (!(await isMentionPickerVisible(page))) {
-      await page.nativeKeyPress('Backspace');
-      await page.sleep(0.15);
-      await ensurePromptEditorCaret(page);
+      // Label typing lost the picker → rewind (label chars + '@') and full-retry.
+      await rewindMentionKeystrokes(page, label, 'label');
       continue;
     }
 
-    await typeMentionQuery(page, asset.label);
-    await page.sleep(1);
-    await captureMentionDebug(page, mentionDebug, 'after-label', asset, {
-      attempt: attempt + 1,
-      expectedMentionCount,
-    });
-
-    const marker = nextMarker(`mention-${asset.label}`);
+    // ---------- Phase 3: unique candidate + Enter ----------
+    await page.sleep(MENTION_KEY_GAP_S);
+    const marker = nextMarker(`mention-${label}`);
     const candidate = await waitForMarker(
       page,
       marker,
       buildMentionCandidateExpression(asset, marker),
       3_000,
     );
+
+    let committed = false;
     if (candidate.ok) {
-      // Soft inspect: do not throw on center-obscured. Unique visible candidates
-      // are selected via guarded Enter, not mouse click.
       const candidateTarget = await inspectMentionCandidateTarget(page, marker, asset);
-      await captureMentionDebug(page, mentionDebug, 'before-click', asset, {
-        attempt: attempt + 1,
+      await captureMentionDebug(page, mentionDebug, 'before-enter', asset, {
+        fullAttempt: fullAttempt + 1,
         expectedMentionCount,
         candidate,
         candidateTarget,
@@ -931,81 +1130,162 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
       if (mentionDebug.enabled && mentionDebug.stopPhase === 'before-click') {
         throw phaseError(
           'mention',
-          `Mention debug checkpoint reached before selecting ${asset.label}; inspect ${mentionDebug.directory}`,
+          `Mention debug checkpoint reached before selecting ${label}; inspect ${mentionDebug.directory}`,
           'No generation was submitted. The unique candidate remains open for a manual mouse click.',
         );
       }
-      // Only hard-block when the unique candidate disappeared / text mismatch.
-      if (
-        candidateTarget?.ok
-        || candidateTarget?.reason === 'candidate-center-obscured'
-      ) {
-        const enterGuard = await selectMentionCandidateWithGuardedEnter(page, marker, asset);
-        await page.sleep(0.3);
-        const after = await getMentionState(page, asset);
-        await captureMentionDebug(page, mentionDebug, 'after-click', asset, {
-          attempt: attempt + 1,
-          expectedMentionCount,
-          candidate,
-          candidateTarget,
-          enterGuard,
-          before,
-          after,
-        });
-        if (mentionDebug.enabled && mentionDebug.stopPhase === 'after-click') {
-          throw phaseError(
-            'mention',
-            `Mention debug checkpoint reached after selecting ${asset.label}; inspect ${mentionDebug.directory}`,
-            'No generation was submitted. The first selection result was intentionally preserved without retry or rollback.',
-          );
-        }
-        if (
-          !after.menuVisible
-          && !after.hasRaw
-          && after.matchingMentionCount > before.matchingMentionCount
-          && (await probeJimengAgentSurface(page)).mentionCount >= expectedMentionCount
-        ) {
-          // Settle after a successful rich-mention commit so the next text /
-          // mention keystrokes do not race Jimeng's editor re-render.
-          await page.sleep(0.5);
-          await ensurePromptEditorCaret(page);
-          return;
+
+      // Unique visible candidate is enough. Do not re-click the editor before Enter.
+      if (candidateTarget?.ok || candidateTarget?.reason === 'candidate-center-obscured') {
+        try {
+          await page.sleep(MENTION_KEY_GAP_S);
+          const enterGuard = await selectMentionCandidateWithGuardedEnter(page, marker, asset);
+          await page.sleep(0.4);
+          if (enterGuard?.status === 'allowed') {
+            await pressKeyWithGap(page, 'Escape', 0.12);
+          }
+          const after = await getMentionState(page, asset);
+          await captureMentionDebug(page, mentionDebug, 'after-enter', asset, {
+            fullAttempt: fullAttempt + 1,
+            expectedMentionCount,
+            candidate,
+            candidateTarget,
+            enterGuard,
+            before,
+            after,
+          });
+          if (mentionDebug.enabled && mentionDebug.stopPhase === 'after-click') {
+            throw phaseError(
+              'mention',
+              `Mention debug checkpoint reached after selecting ${label}; inspect ${mentionDebug.directory}`,
+              'No generation was submitted.',
+            );
+          }
+          // Success:
+          //  - chip count for this asset increased, OR
+          //  - Enter allowed and raw @label gone (repeat mention may not add a 2nd chip)
+          if (
+            after.matchingMentionCount > before.matchingMentionCount
+            || (enterGuard?.status === 'allowed' && !after.hasRaw)
+          ) {
+            committed = true;
+          }
+        } catch (err) {
+          if (mentionDebug.enabled && mentionDebug.stopPhase === 'after-click') throw err;
+          await captureMentionDebug(page, mentionDebug, 'enter-failed', asset, {
+            fullAttempt: fullAttempt + 1,
+            error: err?.message || String(err),
+          });
         }
       }
     }
 
-    await page.nativeKeyPress('Escape');
-    await page.sleep(0.2);
-    // Always try to strip a failed raw @label so the next attempt starts clean.
-    const rolled = await rollbackFailedMention(page, asset.label);
-    if (!rolled) {
-      // Also strip a lone leftover '@' when the picker never opened fully.
-      await ensurePromptEditorCaret(page);
-      const strippedAt = await page.evaluate(`(() => {
-        ${buildPromptEditorLocatorScript()}
-        const editor = findPromptEditor();
-        if (!editor) return false;
-        const text = (editor.innerText || editor.textContent || '').replace(/\\u00a0/g, ' ');
-        return /@$/.test(text.slice(-8).replace(/\\s+$/g, ''));
-      })()`);
-      if (strippedAt) {
-        await page.nativeKeyPress('Backspace');
-        await page.sleep(0.1);
-      } else if (attempt === maxAttempts - 1) {
-        throw phaseError(
-          'mention',
-          `Rich @ mention insertion failed and could not be safely rolled back for ${asset.label}`,
-          'No generation was submitted. Check the visible composer and uploaded reference card.',
-        );
+    // Double-check: chip may have landed even if Enter status was noisy.
+    if (!committed) {
+      const check = await getMentionState(page, asset);
+      if (check.matchingMentionCount > before.matchingMentionCount) {
+        committed = true;
+      } else if (!check.hasRaw && before.hasRaw === false && check.matchingMentionCount >= 1) {
+        // Repeat mention of same asset: raw token gone, at least one chip present.
+        // (before.hasRaw is typically false at the start of an attempt.)
+      }
+      // Repeat-mention case: Enter consumed @label without adding a second chip node.
+      if (!committed && !check.hasRaw) {
+        const stillHasRawQuery = await page.evaluate(`(() => {
+          ${buildPromptEditorLocatorScript()}
+          const editor = findPromptEditor();
+          if (!editor) return false;
+          const text = (editor.innerText || editor.textContent || '').replace(/\\u00a0/g, ' ');
+          return text.includes(${JSON.stringify(`@${label}`)});
+        })()`);
+        if (!stillHasRawQuery && check.matchingMentionCount >= 1) {
+          // Only accept if we no longer have the raw token and had a successful Enter path
+          // or the picker closed after our attempt (best-effort for duplicate labels).
+          committed = true;
+        }
       }
     }
+
+    if (committed) {
+      // Jimeng sometimes leaves a bare '@' glyph next to the chip.
+      await stripTrailingBareAt(page);
+      await page.sleep(0.3);
+      // Safe to re-focus only AFTER the chip is committed.
+      await ensurePromptEditorCaret(page);
+      return;
+    }
+
+    // Enter/commit failed → rewind (label + '@') and full-retry.
+    await rewindMentionKeystrokes(page, label, 'label');
   }
 
+  await rewindMentionKeystrokes(page, label, 'label');
+  await stripTrailingBareAt(page);
   throw phaseError(
     'mention',
-    `Rich @ mention insertion failed after ${maxAttempts} attempt${maxAttempts === 1 ? '' : 's'} for ${asset.label} (${asset.filename})`,
-    `Ensure Jimeng exposes a unique @ candidate for '${asset.label}'.`,
+    `Rich @ mention insertion failed after ${maxFullAttempts} full attempt${maxFullAttempts === 1 ? '' : 's'} for ${label} (${asset.filename})`,
+    `Ensure Jimeng exposes a unique @ candidate for '${label}'.`,
   );
+}
+
+/**
+ * Remove orphan bare '@' text left beside a committed mention chip.
+ * Jimeng sometimes converts only the label into a chip and leaves the '@' glyph.
+ * Prefer DOM text-node surgery (select the orphan @ then Backspace) over end-of-editor backspaces.
+ */
+async function stripTrailingBareAt(page) {
+  await page.nativeKeyPress('Escape');
+  await page.sleep(0.08);
+
+  for (let i = 0; i < 4; i += 1) {
+    const selected = await page.evaluate(`(() => {
+      ${buildPromptEditorLocatorScript()}
+      const editor = findPromptEditor();
+      if (!editor) return { ok: false, reason: 'no-editor' };
+      const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        const v = node.nodeValue || '';
+        // Lone '@' node, or a text node ending with '@' that is not part of a raw @图片N token.
+        const lone = v === '@' || v.trim() === '@';
+        const trailing = /@$/.test(v) && !/@(?:图片|视频|音频)\\d*$/.test(v.replace(/\\s+$/, ''));
+        if (!lone && !trailing) continue;
+        const atIndex = v.lastIndexOf('@');
+        if (atIndex < 0) continue;
+        const range = document.createRange();
+        range.setStart(node, atIndex);
+        range.setEnd(node, atIndex + 1);
+        const sel = window.getSelection();
+        if (!sel) return { ok: false, reason: 'no-selection' };
+        sel.removeAllRanges();
+        sel.addRange(range);
+        editor.focus();
+        return { ok: true, value: v, atIndex };
+      }
+      return { ok: false, reason: 'none' };
+    })()`);
+
+    if (!selected?.ok) break;
+    await pressKeyWithGap(page, 'Backspace');
+  }
+
+  // Fallback: if a bare '@' is still the last non-space char, delete from end once.
+  try {
+    await ensurePromptEditorCaret(page);
+  } catch {
+    await placeCaretAtPromptEditorEnd(page).catch(() => null);
+  }
+  await page.sleep(MENTION_KEY_GAP_S);
+  const endsWithAt = await page.evaluate(`(() => {
+    ${buildPromptEditorLocatorScript()}
+    const editor = findPromptEditor();
+    if (!editor) return false;
+    const text = (editor.innerText || editor.textContent || '').replace(/[\\u00a0\\u200b\\s]+$/g, '');
+    return /@$/.test(text);
+  })()`);
+  if (endsWithAt) {
+    await pressKeyWithGap(page, 'Backspace');
+  }
 }
 
 async function captureMentionDebug(page, debug, phase, asset, extra = {}) {
@@ -1181,11 +1461,13 @@ async function selectMentionCandidateWithGuardedEnter(page, marker, asset) {
       );
       const activeInEditor = !!editor
         && (document.activeElement === editor || editor.contains(document.activeElement));
+      // Unique visible candidate + editor ownership is enough for Enter.
+      // Do not require activeElement/suggestion extras — CJK insertText can
+      // briefly blur the editor while the picker is still valid.
       return {
         safe: candidateVisible
           && candidateMatches
-          && selectionInEditor
-          && (suggestionMatches || activeInEditor),
+          && (selectionInEditor || activeInEditor || suggestionMatches),
         candidateVisible,
         candidateHit,
         candidateMatches,
@@ -1224,11 +1506,14 @@ async function selectMentionCandidateWithGuardedEnter(page, marker, asset) {
   })()`);
 
   if (!initial.safe) {
-    throw phaseError(
-      'mention',
-      `Refused to press Enter because the ${asset.label} mention picker was not safely armed`,
-      'No generation was submitted. Confirm the unique candidate, active suggestion, and editor selection are all visible.',
-    );
+    // Soft failure: let the attempt loop restore to pre-@ and retry.
+    // Hard-throwing here previously left a dangling '@' in the composer.
+    await page.evaluate(`(() => {
+      const guard = window[${JSON.stringify(guardKey)}];
+      guard?.abortController?.abort();
+      delete window[${JSON.stringify(guardKey)}];
+    })()`).catch(() => null);
+    return { status: 'not-armed', initial };
   }
 
   await dispatchEnterKey(page);
@@ -1247,14 +1532,12 @@ async function selectMentionCandidateWithGuardedEnter(page, marker, asset) {
     };
   })()`);
   if (outcome.status !== 'allowed' || outcome.keydown?.safe !== true) {
-    const failedChecks = Object.entries(outcome.keydown || {})
-      .filter(([key, value]) => key !== 'safe' && value === false)
-      .map(([key]) => key);
-    throw phaseError(
-      'mention',
-      `Enter was blocked because the ${asset.label} mention picker became unsafe (status=${outcome.status}${failedChecks.length > 0 ? `; ${failedChecks.join(', ')}` : ''})`,
-      'No generation was submitted. The candidate or editor selection changed before the keydown event.',
-    );
+    // Soft failure for the attempt loop (restore pre-@ + retry).
+    return {
+      status: outcome.status || 'blocked',
+      keydown: outcome.keydown,
+      safe: false,
+    };
   }
   return outcome;
 }
@@ -1587,7 +1870,8 @@ async function typeMentionQuery(page, text) {
       // characters. Once @ has opened the picker, this updates its filter.
       await insertNativeText(page, char);
     }
-    await page.sleep(0.02);
+    // Space out each character so Jimeng's mention filter can keep up.
+    await page.sleep(MENTION_KEY_GAP_S);
   }
 }
 
@@ -1708,6 +1992,7 @@ async function inspectMentionCandidateTarget(page, marker, asset) {
 async function getMentionState(page, asset) {
   return page.evaluate(`(() => {
     ${buildPromptEditorLocatorScript()}
+    // \`visible\` comes from buildPromptEditorLocatorScript().
     const editor = findPromptEditor();
     if (!editor) return { hasRaw: false, matchingMentionCount: 0, menuVisible: false };
     const compact = (value) => String(value || '').replace(/\\u200b/g, '').replace(/\\s+/g, '').toLocaleLowerCase();
@@ -1737,12 +2022,16 @@ async function getMentionState(page, asset) {
       hasRaw: tail.includes(compact('@' + ${JSON.stringify(asset.label)})),
       matchingMentionCount,
       menuVisible,
+      mentionTotal: mentionNodes.length,
     };
   })()`);
 }
 
+/** @deprecated Prefer restoreComposerToBaseline(page, baselineTakenBeforeAt). */
 async function rollbackFailedMention(page, label) {
-  await focusPromptEditorEnd(page);
+  await page.nativeKeyPress('Escape');
+  await page.sleep(0.1);
+  await ensurePromptEditorCaret(page);
   const hasRaw = await page.evaluate(`(() => {
     ${buildPromptEditorLocatorScript()}
     const editor = findPromptEditor();
@@ -1750,7 +2039,21 @@ async function rollbackFailedMention(page, label) {
     const text = (editor.innerText || editor.textContent || '').replace(/\\u00a0/g, ' ');
     return text.slice(-${Math.max(160, label.length * 8)}).includes(${JSON.stringify(`@${label}`)});
   })()`);
-  if (!hasRaw) return false;
+  if (!hasRaw) {
+    // Strip a bare trailing @ if present.
+    const bareAt = await page.evaluate(`(() => {
+      ${buildPromptEditorLocatorScript()}
+      const editor = findPromptEditor();
+      if (!editor) return false;
+      const text = (editor.innerText || editor.textContent || '').replace(/[\\u00a0\\u200b\\s]+$/g, '');
+      return /@$/.test(text);
+    })()`);
+    if (bareAt) {
+      await page.nativeKeyPress('Backspace');
+      return true;
+    }
+    return false;
+  }
   for (let i = 0; i < label.length + 1; i += 1) {
     await page.nativeKeyPress('Backspace');
   }
