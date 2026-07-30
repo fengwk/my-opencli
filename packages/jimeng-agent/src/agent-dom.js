@@ -1,8 +1,16 @@
 /**
- * Visible-UI preparation flow for Jimeng Agent mode.
+ * Visible-UI Jimeng Agent preparation, checkpoint, and optional submit.
  *
- * This module deliberately stops after the prompt and rich @ mentions are in
- * the composer. It never clicks a generation/submission control.
+ * Flow:
+ *   clear draft
+ *   -> Agent/Auto/video configuration
+ *   -> pre-input controls check (mode/preference only)
+ *   -> upload refs -> write prompt/mentions
+ *   -> content checkpoint (references + prompt only)
+ *   -> optional formal submit (--submit 1) only when content checkpoint passes
+ *
+ * Mention selection uses guarded Enter. Generation is never submitted unless
+ * the content checkpoint is green and the caller explicitly requests submit.
  */
 
 import fs from 'node:fs';
@@ -10,6 +18,14 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { ArgumentError, CommandExecutionError } from '@jackwener/opencli/errors';
+
+import {
+  buildCheckpointExpectations,
+  evaluateContentCheckpoint,
+  evaluatePreInputControls,
+  normalizePromptValidationLines as normalizeCheckpointLines,
+  normalizePromptValidationText as normalizeCheckpointText,
+} from './checkpoint.js';
 
 export const JIMENG_DOMAIN = 'jimeng.jianying.com';
 export const JIMENG_GENERATE_URL = `https://${JIMENG_DOMAIN}/ai-tool/generate`;
@@ -183,10 +199,15 @@ export async function prepareJimengAgentAsk(page, canonical, preparedAssets) {
   while (true) {
     try {
       await waitForAgentSurface(page);
+      if (startAssetIndex === 0) {
+        await clearInitialDraftState(page);
+      }
       await selectAgentMode(page);
       await configureAutoVideoPreference(page);
+      // Preference panel is still the source of truth for Auto/Video. Verify it
+      // here, then close it before any upload/prompt typing.
+      await runPreInputControlsCheck(page);
       await closeVisiblePreferenceTooltip(page);
-      await clearComposer(page, 'clear-before-upload');
       await uploadReferenceAssets(page, preparedAssets, uploads, startAssetIndex);
       // Jimeng may insert an uploaded reference chip at the document start.
       // Match the established flow: clear that platform-added draft state
@@ -194,24 +215,28 @@ export async function prepareJimengAgentAsk(page, canonical, preparedAssets) {
       await clearComposer(page, 'clear-after-upload');
       await fillPromptWithRichMentions(page, canonical.agentPrompt, preparedAssets, mentionDebug);
 
-      const finalSurface = await probeJimengAgentSurface(page);
-      const expectedMentions = buildMentionSegments(canonical.agentPrompt, preparedAssets)
-        .filter((part) => part.type === 'mention').length;
-      if (finalSurface.mentionCount < expectedMentions) {
-        throw phaseError(
-          'mention',
-          `Expected ${expectedMentions} rich @ mention node(s), found ${finalSurface.mentionCount}`,
-        );
+      const checkpoint = await runContentCheckpoint(
+        page,
+        canonical.agentPrompt,
+        preparedAssets,
+        { requireSubmitArmed: !!canonical.submit },
+      );
+      let submitted = false;
+      if (canonical.submit) {
+        await submitPreparedGeneration(page);
+        submitted = true;
       }
 
       return {
-        status: 'prepared',
+        status: submitted ? 'submitted' : 'prepared',
         workspace: canonical.workspace,
         workspaceUrl,
         uploaded: uploads.map((asset) => asset.filename),
-        mentions: expectedMentions,
+        mentions: checkpoint.expected.mentions,
+        assetId: canonical.assetId,
         retryUsed: retriesUsed,
-        submitted: false,
+        submitted,
+        checkpointOk: true,
       };
     } catch (err) {
       const failure = normalizePreparationError(err, uploads.length);
@@ -219,9 +244,9 @@ export async function prepareJimengAgentAsk(page, canonical, preparedAssets) {
         ready: false,
         fileInputCount: 0,
       }));
-      if (failure.phase === 'clear-before-upload' && !clearRefreshUsed) {
+      if (failure.phase === 'clear-initial' && !clearRefreshUsed) {
         // A stale controlled editor can reject the first keyboard clear. Refresh
-        // before upload so the recovery cannot duplicate any reference assets.
+        // before mode selection/upload so recovery cannot duplicate references.
         clearRefreshUsed = true;
         priorInPlaceRetry = false;
         startAssetIndex = 0;
@@ -274,6 +299,7 @@ export async function probeJimengAgentSurface(page) {
     const editors = [...document.querySelectorAll(${JSON.stringify(EDITOR_SELECTOR)})].filter(visible);
     const editor = findPromptEditor();
     const fileInputs = [...document.querySelectorAll(${JSON.stringify(FILE_INPUT_SELECTOR)})];
+    const referenceCount = document.querySelectorAll('[data-reference-remove-button="true"]').length;
     const comboboxes = [...document.querySelectorAll('[role="combobox"]')].filter(visible);
     const modeText = comboboxes.map(readable).join(' | ');
     const preferenceTooltips = [...document.querySelectorAll('[role="tooltip"]')]
@@ -309,6 +335,7 @@ export async function probeJimengAgentSurface(page) {
       editorReady: !!editor,
       editorText: editor ? (editor.innerText || editor.textContent || '').replace(/\\u00a0/g, ' ') : '',
       fileInputCount: fileInputs.length,
+      referenceCount,
       fileInputs: fileInputs.map((input, index) => ({
         id: input.id || '',
         accept: input.accept || '',
@@ -534,36 +561,123 @@ async function markPreferenceControl(page, marker) {
   })()`);
 }
 
+async function clearInitialDraftState(page) {
+  await clearComposer(page, 'clear-initial');
+  await clearReferenceAssets(page);
+  const composer = await getComposerClearState(page);
+  const surface = await probeJimengAgentSurface(page);
+  if (!composer.empty || surface.referenceCount !== 0) {
+    throw phaseError(
+      'clear-initial',
+      `Jimeng initial draft cleanup was incomplete (${composer.textLength} text character(s), ${composer.mentionCount} mention node(s), ${surface.referenceCount} reference card(s))`,
+      'No generation was submitted. Inspect the visible composer and reference strip before retrying.',
+    );
+  }
+}
+
+async function clearReferenceAssets(page) {
+  const maxReferences = 24;
+  for (let removed = 0; removed < maxReferences; removed += 1) {
+    const marker = nextMarker(`reference-remove-${removed}`);
+    const state = await page.evaluate(`(() => {
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== 'none'
+          && style.visibility !== 'hidden'
+          && rect.width > 0
+          && rect.height > 0;
+      };
+      const controls = [...document.querySelectorAll('[data-reference-remove-button="true"]')];
+      if (controls.length === 0) return { done: true, count: 0 };
+      const visibleControls = controls.filter(visible);
+      if (visibleControls.length === 0) {
+        return { done: false, count: controls.length, reason: 'remove-controls-hidden' };
+      }
+      visibleControls[0].setAttribute(${JSON.stringify(TARGET_ATTR)}, ${JSON.stringify(marker)});
+      return {
+        done: false,
+        count: controls.length,
+        selector: '[${TARGET_ATTR}="${marker}"]',
+      };
+    })()`);
+    if (state?.done) return;
+    if (!state?.selector) {
+      throw phaseError(
+        'clear-references',
+        `Jimeng retained ${state?.count ?? 'unknown'} reference card(s), but no visible remove control was available`,
+        'No generation was submitted. Inspect the visible reference strip and clear stale cards manually.',
+      );
+    }
+
+    await page.click(state.selector);
+    const deadline = Date.now() + 2_000;
+    let remaining = state.count;
+    while (Date.now() < deadline) {
+      remaining = await page.evaluate(
+        `document.querySelectorAll('[data-reference-remove-button="true"]').length`,
+      );
+      if (remaining < state.count) break;
+      await page.sleep(0.1);
+    }
+    if (remaining >= state.count) {
+      throw phaseError(
+        'clear-references',
+        `Jimeng reference count did not decrease after clicking a remove control (${state.count} card(s))`,
+        'No generation was submitted. Inspect the visible reference strip and retry.',
+      );
+    }
+  }
+
+  throw phaseError(
+    'clear-references',
+    `Jimeng still exposes reference cards after ${maxReferences} removal attempts`,
+    'No generation was submitted. The reference strip exceeded the safe cleanup bound.',
+  );
+}
+
 async function uploadReferenceAssets(page, assets, uploads, startAssetIndex) {
-  const pending = assets.slice(startAssetIndex);
-  if (pending.length === 0) return;
+  for (let index = startAssetIndex; index < assets.length; index += 1) {
+    const asset = assets[index];
+    const before = await probeJimengAgentSurface(page);
+    if (before.referenceCount !== index) {
+      throw phaseError(
+        'upload',
+        `Expected ${index} confirmed Jimeng reference card(s) before ${asset.label}, found ${before.referenceCount}`,
+        'No generation was submitted. The upload sequence stopped before writing the prompt.',
+        index,
+      );
+    }
 
-  const slot = await markCurrentUploadSlot(page, nextMarker(`upload-${startAssetIndex}`));
-  if (!slot.ok) {
-    throw phaseError(
-      'upload',
-      `Could not locate an active Jimeng reference file input before ${pending[0].label}`,
-      'Reload the visible Jimeng workspace manually and retry.',
-      startAssetIndex,
-    );
+    const slot = await markCurrentUploadSlot(page, nextMarker(`upload-${index}`));
+    if (!slot.ok) {
+      throw phaseError(
+        'upload',
+        `Could not locate an active Jimeng reference file input before ${asset.label}`,
+        'Reload the visible Jimeng workspace manually and retry.',
+        index,
+      );
+    }
+
+    try {
+      // Assign exactly one file per change event. Jimeng can silently discard a
+      // heterogeneous multi-file assignment, so every card is acknowledged
+      // before the next resource is offered.
+      await page.setFileInput([asset.browserPath], slot.selector);
+    } catch (err) {
+      throw phaseError(
+        'upload',
+        `setFileInput failed for ${asset.label} (${asset.filename}): ${describeError(err)}`,
+        'Verify the file is readable by the browser host and no native file chooser is open.',
+        index,
+      );
+    }
+
+    await waitForUploadCompletion(page, asset, index, index + 1);
+    uploads[index] = asset;
+    uploads.length = index + 1;
   }
-
-  try {
-    // Jimeng exposes one multi-file reference input. Assign the ordered batch
-    // directly, matching the proven Playwright flow and avoiding one indexing
-    // delay per asset. Never click the tile: it opens a native file chooser.
-    await page.setFileInput(pending.map((asset) => asset.browserPath), slot.selector);
-  } catch (err) {
-    throw phaseError(
-      'upload',
-      `setFileInput failed for ${pending.map((asset) => asset.label).join(', ')}: ${describeError(err)}`,
-      'Verify every file is readable by the browser host and no native file chooser is open.',
-      startAssetIndex,
-    );
-  }
-
-  await waitForUploadCompletion(page, pending, startAssetIndex);
-  uploads.splice(startAssetIndex, uploads.length - startAssetIndex, ...pending);
 }
 
 async function markCurrentUploadSlot(page, marker) {
@@ -585,11 +699,11 @@ async function markCurrentUploadSlot(page, marker) {
   })()`);
 }
 
-async function waitForUploadCompletion(page, assets, failedAssetIndex) {
-  // The established Jimeng flow allows the platform seven seconds to index
-  // the batch. Mention insertion below is the authoritative readiness proof;
-  // polling a closed @ listbox can never succeed.
-  const deadline = Date.now() + 7_000;
+async function waitForUploadCompletion(page, asset, failedAssetIndex, expectedReferenceCount) {
+  // Images usually index quickly; video/audio often need longer for the
+  // reference strip card and duration badge to appear.
+  const timeoutMs = asset.kind === 'image' ? 12_000 : 30_000;
+  const deadline = Date.now() + timeoutMs;
   let last = null;
   while (Date.now() < deadline) {
     last = await probeJimengAgentSurface(page);
@@ -597,13 +711,34 @@ async function waitForUploadCompletion(page, assets, failedAssetIndex) {
     if (failure) {
       throw phaseError(
         'upload',
-        `Jimeng rejected the reference batch (${assets.map((asset) => asset.filename).join(', ')}): ${failure}`,
+        `Jimeng rejected ${asset.label} (${asset.filename}): ${failure}`,
         'No generation was submitted. The visible UI rejected this file; check account/workspace entitlement and retry later.',
         failedAssetIndex,
       );
     }
-    await page.sleep(0.4);
+    if (last.referenceCount === expectedReferenceCount) {
+      // Let Jimeng finish indexing the just-rendered card before the next file
+      // change event or @ query.
+      await page.sleep(asset.kind === 'image' ? 0.8 : 1.2);
+      return;
+    }
+    if (last.referenceCount > expectedReferenceCount) {
+      throw phaseError(
+        'upload',
+        `Jimeng created ${last.referenceCount} reference cards while waiting for ${asset.label}; expected ${expectedReferenceCount}`,
+        'No generation was submitted. Clear the visible reference strip and retry.',
+        failedAssetIndex,
+      );
+    }
+    await page.sleep(0.25);
   }
+
+  throw phaseError(
+    'upload',
+    `Jimeng did not create a reference card for ${asset.label} (${asset.filename}) within ${Math.round(timeoutMs / 1000)} seconds`,
+    'No generation was submitted. The upload was not acknowledged; verify the visible reference strip and file type.',
+    failedAssetIndex,
+  );
 }
 
 async function fillPromptWithRichMentions(page, agentPrompt, assets, mentionDebug) {
@@ -658,10 +793,10 @@ async function fillPromptWithRichMentions(page, agentPrompt, assets, mentionDebu
     await page.sleep(0.12);
   }
 
-  await validatePromptIntegrity(page, normalizedPrompt, assets);
+  // Line structure is re-checked by the mandatory preparation checkpoint.
 }
 
-async function clearComposer(page, phase = 'clear-before-upload') {
+async function clearComposer(page, phase = 'clear-initial') {
   let last = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     await page.nativeKeyPress('Escape');
@@ -679,7 +814,7 @@ async function clearComposer(page, phase = 'clear-before-upload') {
   throw phaseError(
     phase,
     `Jimeng prompt editor retained content after keyboard clear (${last?.textLength ?? 0} text character(s), ${last?.mentionCount ?? 0} mention node(s))`,
-    phase === 'clear-before-upload'
+    phase === 'clear-initial'
       ? 'No generation was submitted. The workspace will be refreshed once before this preparation stops.'
       : 'No generation was submitted. Inspect the uploaded reference chip and retry after clearing the visible composer.',
   );
@@ -736,6 +871,9 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
     await page.nativeKeyPress('Escape');
     await page.sleep(0.12);
     await clickPromptEditorEnd(page);
+    // A native click establishes the real keyboard target. Re-collapse the
+    // selection afterward so an empty trailing paragraph remains the true end.
+    await focusPromptEditorEnd(page);
     await captureMentionDebug(page, mentionDebug, 'before-at', asset, {
       attempt: attempt + 1,
       expectedMentionCount,
@@ -800,6 +938,9 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
         && after.matchingMentionCount > before.matchingMentionCount
         && (await probeJimengAgentSurface(page)).mentionCount >= expectedMentionCount
       ) {
+        // Settle after a successful rich-mention commit so the next text /
+        // mention keystrokes do not race Jimeng's editor re-render.
+        await page.sleep(0.5);
         await focusPromptEditorEnd(page);
         return;
       }
@@ -976,7 +1117,8 @@ async function selectMentionCandidateWithGuardedEnter(page, marker, asset) {
         && getComputedStyle(candidate).visibility !== 'hidden'
         && getComputedStyle(candidate).display !== 'none';
       const candidateHit = !!candidate && !!hit && (hit === candidate || candidate.contains(hit));
-      const candidateMatches = !!candidate && compact(candidate.innerText || candidate.textContent) === compact(label);
+      const candidateMatches = !!candidate && [candidate, ...candidate.querySelectorAll('*')]
+        .some((node) => compact(node.innerText || node.textContent) === compact(label));
       const selectionInEditor = !!editor
         && !!selection
         && selection.rangeCount === 1
@@ -1040,6 +1182,10 @@ async function selectMentionCandidateWithGuardedEnter(page, marker, asset) {
   }
 
   await dispatchEnterKey(page);
+  // The browser bridge can acknowledge the CDP command before a busy Jimeng
+  // renderer has delivered the DOM keydown. Keep the capture guard armed
+  // until the event loop has had time to process both key events.
+  await page.sleep(0.15);
   const outcome = await page.evaluate(`(() => {
     const guard = window[${JSON.stringify(guardKey)}];
     if (!guard) return { status: 'missing', keydown: null };
@@ -1051,32 +1197,48 @@ async function selectMentionCandidateWithGuardedEnter(page, marker, asset) {
     };
   })()`);
   if (outcome.status !== 'allowed' || outcome.keydown?.safe !== true) {
+    const failedChecks = Object.entries(outcome.keydown || {})
+      .filter(([key, value]) => key !== 'safe' && value === false)
+      .map(([key]) => key);
     throw phaseError(
       'mention',
-      `Enter was blocked because the ${asset.label} mention picker became unsafe`,
+      `Enter was blocked because the ${asset.label} mention picker became unsafe (status=${outcome.status}${failedChecks.length > 0 ? `; ${failedChecks.join(', ')}` : ''})`,
       'No generation was submitted. The candidate or editor selection changed before the keydown event.',
     );
   }
   return outcome;
 }
 
-async function dispatchEnterKey(page) {
-  for (const event of buildEnterKeyEvents()) {
+async function dispatchEnterKey(page, modifiers = 0) {
+  for (const event of buildEnterKeyEvents(modifiers)) {
     await page.cdp('Input.dispatchKeyEvent', event);
   }
 }
 
-export function buildEnterKeyEvents() {
-  const descriptor = {
+/**
+ * Chromium Enter descriptor matching Playwright's crInput path.
+ * Bare `key: 'Enter'` without code/text is dropped by current Chrome CDP
+ * routing; Enter must be `keyDown` with `text: '\r'` (not textless rawKeyDown).
+ */
+export function buildEnterKeyEvents(modifiers = 0) {
+  const base = {
     key: 'Enter',
     code: 'Enter',
     windowsVirtualKeyCode: 13,
     nativeVirtualKeyCode: 13,
-    modifiers: 0,
+    modifiers,
   };
   return [
-    { ...descriptor, type: 'rawKeyDown' },
-    { ...descriptor, type: 'keyUp' },
+    {
+      ...base,
+      type: 'keyDown',
+      text: '\r',
+      unmodifiedText: '\r',
+    },
+    {
+      ...base,
+      type: 'keyUp',
+    },
   ];
 }
 
@@ -1344,8 +1506,11 @@ async function typeMentionAsciiKey(page, char) {
 }
 
 async function insertSoftBreak(page) {
+  await clickPromptEditorEnd(page);
   await focusPromptEditorEnd(page);
-  await page.nativeKeyPress('Enter', ['Shift']);
+  // Shift modifier bit = 8. Do not use bare nativeKeyPress('Enter'): current
+  // Chrome drops incomplete Enter descriptors (no code / no text).
+  await dispatchEnterKey(page, 8);
   await page.sleep(0.25);
 }
 
@@ -1491,49 +1656,254 @@ async function rollbackFailedMention(page, label) {
   return true;
 }
 
-async function validatePromptIntegrity(page, prompt, assets) {
-  const anchors = [];
-  for (const segment of buildMentionSegments(prompt, assets)) {
-    if (segment.type === 'mention') {
-      anchors.push(segment.label);
-      continue;
-    }
-    if (segment.type !== 'text') continue;
-    const normalized = normalizePromptValidationText(segment.value);
-    if (!normalized) continue;
-    if (normalized.length <= 48) {
-      anchors.push(normalized);
-    } else {
-      anchors.push(normalized.slice(0, 24), normalized.slice(-24));
-    }
+/**
+ * Pre-input gate: Agent mode + Auto/Video preference.
+ * Must run while the preference panel is still readable, before upload/prompt.
+ */
+export async function runPreInputControlsCheck(page) {
+  const surface = await probeJimengAgentSurface(page);
+  const snapshot = {
+    surfaceReady: surface.ready === true || (surface.editorReady === true && surface.fileInputCount > 0),
+    agentSelected: surface.agentSelected === true,
+    autoEnabled: surface.autoEnabled === true,
+    videoSelected: surface.videoSelected === true,
+    preferencePanelReadable: surface.autoPopupOpen === true,
+  };
+
+  // configureAutoVideoPreference should leave the panel open. If not, reopen
+  // once to read aria-checked / video radio before any content input.
+  if (!snapshot.preferencePanelReadable) {
+    const opened = await ensurePreferenceSnapshot(page);
+    snapshot.autoEnabled = opened.autoEnabled;
+    snapshot.videoSelected = opened.videoSelected;
+    snapshot.preferencePanelReadable = opened.preferencePanelReadable;
+    const again = await probeJimengAgentSurface(page);
+    snapshot.agentSelected = again.agentSelected === true;
+    snapshot.surfaceReady = again.ready === true || (again.editorReady === true && again.fileInputCount > 0);
   }
-  const state = await probeJimengAgentSurface(page);
-  const actual = normalizePromptValidationText(state.editorText);
-  let cursor = 0;
-  const missing = [];
-  for (const rawAnchor of anchors) {
-    const anchor = normalizePromptValidationText(rawAnchor);
-    const index = actual.indexOf(anchor, cursor);
-    if (index === -1) {
-      missing.push(rawAnchor);
-    } else {
-      cursor = index + anchor.length;
-    }
-  }
-  if (missing.length > 0) {
+
+  const report = evaluatePreInputControls(snapshot);
+  if (!report.ok) {
     throw phaseError(
-      'prompt',
-      `Prompt integrity validation failed near: ${missing.slice(0, 4).join(', ')}`,
-      'No generation was submitted. Inspect the visible composer for missing or reordered text.',
+      'pre-input',
+      `Pre-input controls check failed: ${report.failures.join(', ')}`,
+      'No generation was submitted. Fix Agent/Auto/Video controls before uploading references or typing the prompt.',
     );
   }
+  return report;
 }
 
-function normalizePromptValidationText(value) {
-  return String(value || '')
-    .replace(/@/g, '')
-    .replace(/[\u00a0\u200b\s]+/g, '');
+/**
+ * Post-input content gate: references + prompt only.
+ * Does not reopen preference panels.
+ */
+export async function runContentCheckpoint(page, agentPrompt, assets, options = {}) {
+  const snapshot = await collectContentCheckpointSnapshot(page);
+  snapshot.requireSubmitArmed = options.requireSubmitArmed === true;
+  const expectations = buildCheckpointExpectations(agentPrompt, assets);
+  const report = evaluateContentCheckpoint(snapshot, expectations);
+  if (!report.ok) {
+    throw phaseError(
+      'checkpoint',
+      `Content checkpoint failed: ${report.failures.join(', ')}`,
+      'No generation was submitted. Inspect uploaded references and the composed prompt/mentions.',
+    );
+  }
+  return report;
 }
+
+/** @deprecated Prefer runContentCheckpoint. */
+export async function runPreparationCheckpoint(page, agentPrompt, assets, options = {}) {
+  return runContentCheckpoint(page, agentPrompt, assets, options);
+}
+
+async function ensurePreferenceSnapshot(page) {
+  let surface = await probeJimengAgentSurface(page);
+  if (surface.autoPopupOpen) {
+    return {
+      autoEnabled: surface.autoEnabled === true,
+      videoSelected: surface.videoSelected === true,
+      preferencePanelReadable: true,
+    };
+  }
+
+  const marker = nextMarker('preinput-pref');
+  const marked = await markPreferenceControl(page, marker);
+  if (!marked?.ok) {
+    return {
+      autoEnabled: false,
+      videoSelected: false,
+      preferencePanelReadable: false,
+    };
+  }
+  await page.click(`[${TARGET_ATTR}="${marker}"]`);
+  const deadline = Date.now() + 4_000;
+  while (Date.now() < deadline) {
+    surface = await probeJimengAgentSurface(page);
+    if (surface.autoPopupOpen) {
+      return {
+        autoEnabled: surface.autoEnabled === true,
+        videoSelected: surface.videoSelected === true,
+        preferencePanelReadable: true,
+      };
+    }
+    await page.sleep(0.15);
+  }
+  return {
+    autoEnabled: false,
+    videoSelected: false,
+    preferencePanelReadable: false,
+  };
+}
+
+async function collectContentCheckpointSnapshot(page) {
+  return page.evaluate(`(() => {
+    ${buildPromptEditorLocatorScript()}
+    const editor = findPromptEditor();
+    const surfaceReady = !!editor
+      && document.querySelectorAll(${JSON.stringify(FILE_INPUT_SELECTOR)}).length > 0;
+    const editorText = editor
+      ? (editor.innerText || editor.textContent || '').replace(/\\u00a0/g, ' ')
+      : '';
+    const editorLines = editor
+      ? [...editor.children].flatMap((block) => {
+        const clone = block.cloneNode(true);
+        clone.querySelectorAll('.node-reference-mention-tag').forEach((mention) => {
+          mention.replaceWith(document.createTextNode(mention.innerText || mention.textContent || ''));
+        });
+        clone.querySelectorAll(
+          '[data-rich-placeholder], .rich-placeholder-widget, .ProseMirror-separator, .ProseMirror-trailingBreak',
+        ).forEach((node) => node.remove());
+        clone.querySelectorAll('br').forEach((br) => br.replaceWith(document.createTextNode('\\n')));
+        return String(clone.textContent || '').split('\\n');
+      })
+      : [];
+    const observedMentionLabels = editor
+      ? [...editor.querySelectorAll('.node-reference-mention-tag')]
+        .map((node) => (node.innerText || node.textContent || '').replace(/\\s+/g, '').trim())
+        .filter(Boolean)
+      : [];
+    const menuVisible = [...document.querySelectorAll(${JSON.stringify(MENTION_OPTION_SELECTOR)})]
+      .some((el) => {
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+      });
+    const submitCandidates = [...document.querySelectorAll(
+      'button[class*="submit-button"], button[class*="submit"], button.lv-btn-primary.lv-btn-shape-circle',
+    )].filter((el) => {
+      const style = window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return style.display !== 'none'
+        && style.visibility !== 'hidden'
+        && rect.width > 0
+        && rect.height > 0
+        && !el.disabled
+        && el.getAttribute('aria-disabled') !== 'true'
+        && !el.className.toString().includes('disabled');
+    });
+    return {
+      surfaceReady,
+      referenceCount: document.querySelectorAll('[data-reference-remove-button="true"]').length,
+      mentionCount: observedMentionLabels.length,
+      observedMentionLabels,
+      rawAt: editorText.includes('@'),
+      menuVisible,
+      editorLines: editorLines.map((line) => String(line || '')
+        .replace(/@/g, '')
+        .replace(/[\\u00a0\\u200b\\s]+/g, '')),
+      editorTextNormalized: editorText
+        .replace(/@/g, '')
+        .replace(/[\\u00a0\\u200b\\s]+/g, ''),
+      submitEnabled: submitCandidates.length > 0,
+    };
+  })()`);
+}
+
+/**
+ * Click the visible generate control only after a green checkpoint.
+ * This is the sole path that may start a paid generation.
+ */
+export async function submitPreparedGeneration(page) {
+  const marker = nextMarker('submit');
+  const marked = await page.evaluate(`(() => {
+    const visible = (el) => {
+      if (!(el instanceof HTMLElement)) return false;
+      const style = window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return style.display !== 'none'
+        && style.visibility !== 'hidden'
+        && rect.width > 0
+        && rect.height > 0;
+    };
+    const candidates = [...document.querySelectorAll(
+      'button[class*="submit-button"], button[class*="submit"], button.lv-btn-primary.lv-btn-shape-circle',
+    )].filter((el) => (
+      visible(el)
+      && !el.disabled
+      && el.getAttribute('aria-disabled') !== 'true'
+      && !String(el.className || '').includes('disabled')
+    ));
+    if (candidates.length === 0) return { ok: false, count: 0 };
+    candidates.sort((a, b) => {
+      const ar = a.getBoundingClientRect();
+      const br = b.getBoundingClientRect();
+      return (br.bottom - ar.bottom) || (br.right - ar.right);
+    });
+    candidates[0].setAttribute(${JSON.stringify(TARGET_ATTR)}, ${JSON.stringify(marker)});
+    return { ok: true, count: candidates.length };
+  })()`);
+  if (!marked?.ok) {
+    throw phaseError(
+      'submit',
+      'Could not locate an enabled Jimeng generate/submit control after checkpoint',
+      'Checkpoint passed but formal submission is blocked until the generate button is visible and enabled.',
+    );
+  }
+
+  await page.click(`[${TARGET_ATTR}="${marker}"]`);
+  await page.sleep(2);
+  await page.nativeKeyPress('Escape').catch(() => null);
+  await page.sleep(0.5);
+
+  const stillReady = await page.evaluate(`(() => {
+    const visible = (el) => {
+      if (!(el instanceof HTMLElement)) return false;
+      const style = window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return style.display !== 'none'
+        && style.visibility !== 'hidden'
+        && rect.width > 0
+        && rect.height > 0;
+    };
+    return [...document.querySelectorAll(
+      'button[class*="submit-button"], button[class*="submit"], button.lv-btn-primary.lv-btn-shape-circle',
+    )].some((el) => (
+      visible(el)
+      && !el.disabled
+      && el.getAttribute('aria-disabled') !== 'true'
+      && !String(el.className || '').includes('disabled')
+    ));
+  })()`);
+
+  if (!stillReady) return { accepted: true, buttonStillEnabled: false };
+  return { accepted: true, buttonStillEnabled: true };
+}
+
+export function normalizePromptValidationLines(value) {
+  return normalizeCheckpointLines(value);
+}
+
+export function normalizePromptValidationText(value) {
+  return normalizeCheckpointText(value);
+}
+
+export {
+  buildCheckpointExpectations,
+  evaluateContentCheckpoint,
+  evaluatePreInputControls,
+  evaluatePreparationCheckpoint,
+} from './checkpoint.js';
 
 async function waitForPreferenceTooltipClosed(page, timeoutMs) {
   const deadline = Date.now() + timeoutMs;

@@ -64,6 +64,8 @@ const KIND_TO_EXTENSIONS = Object.freeze({
 
 const DEFAULT_FFPROBE_BIN = 'ffprobe';
 
+const MIN_REFERENCE_DURATION_SECONDS = 2;
+const MIN_REFERENCE_DURATION_MS = MIN_REFERENCE_DURATION_SECONDS * 1000;
 const MAX_REFERENCE_DURATION_MS = MAX_REFERENCE_DURATION_SECONDS * 1000;
 
 /**
@@ -287,6 +289,18 @@ export function validateLocalReferenceAssets(canonical, options = {}) {
         throw new ArgumentError(
           `Duration probe returned an invalid value for '${sourcePath}': '${String(durationMs)}'`,
           'The duration probe must report a positive finite integer duration in milliseconds.',
+        );
+      }
+      if (durationMs < MIN_REFERENCE_DURATION_MS) {
+        throw new ArgumentError(
+          `${kind === 'video' ? 'Video' : 'Audio'} reference '${sourcePath}' is ${durationMs}ms; Jimeng requires each video/audio reference to be at least ${MIN_REFERENCE_DURATION_SECONDS}s`,
+          `Use a ${kind} reference whose duration is at least ${MIN_REFERENCE_DURATION_SECONDS} seconds.`,
+        );
+      }
+      if (durationMs > MAX_REFERENCE_DURATION_MS) {
+        throw new ArgumentError(
+          `${kind === 'video' ? 'Video' : 'Audio'} reference '${sourcePath}' is ${durationMs}ms; Jimeng allows at most ${MAX_REFERENCE_DURATION_SECONDS}s per video/audio reference`,
+          `Trim the ${kind} reference to at most ${MAX_REFERENCE_DURATION_SECONDS} seconds.`,
         );
       }
     }

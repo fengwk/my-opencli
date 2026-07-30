@@ -7,6 +7,7 @@ import {
   buildMentionSegments,
   buildWorkspaceUrl,
   chooseRetryPlan,
+  normalizePromptValidationLines,
   resolveMentionDebugOptions,
 } from '../src/agent-dom.js';
 
@@ -63,6 +64,22 @@ describe('jimeng-agent/agent-dom — rich mention segmentation', () => {
     expect(mentions[1].asset).toBe(assets[0]);
   });
 
+  it('preserves line-boundary and adjacent mentions without inventing text segments', () => {
+    const parts = buildMentionSegments('@视频1\n@图片1@视频1', assets);
+
+    expect(parts.map((part) => part.type)).toEqual([
+      'mention',
+      'newline',
+      'mention',
+      'mention',
+    ]);
+    expect(parts.filter((part) => part.type === 'mention').map((part) => part.label)).toEqual([
+      '视频1',
+      '图片1',
+      '视频1',
+    ]);
+  });
+
   it('does not invent a plaintext fallback when a required upload is absent', () => {
     expect(() => buildMentionSegments('@音频1', assets)).toThrow(ArgumentError);
   });
@@ -72,12 +89,14 @@ describe('jimeng-agent/agent-dom — guarded mention selection', () => {
   it('builds complete Chromium Enter events recognized by ProseMirror keymaps', () => {
     expect(buildEnterKeyEvents()).toEqual([
       {
-        type: 'rawKeyDown',
+        type: 'keyDown',
         key: 'Enter',
         code: 'Enter',
         windowsVirtualKeyCode: 13,
         nativeVirtualKeyCode: 13,
         modifiers: 0,
+        text: '\r',
+        unmodifiedText: '\r',
       },
       {
         type: 'keyUp',
@@ -87,6 +106,40 @@ describe('jimeng-agent/agent-dom — guarded mention selection', () => {
         nativeVirtualKeyCode: 13,
         modifiers: 0,
       },
+    ]);
+  });
+
+  it('adds Shift modifiers for soft-break Enter events', () => {
+    expect(buildEnterKeyEvents(8)).toEqual([
+      {
+        type: 'keyDown',
+        key: 'Enter',
+        code: 'Enter',
+        windowsVirtualKeyCode: 13,
+        nativeVirtualKeyCode: 13,
+        modifiers: 8,
+        text: '\r',
+        unmodifiedText: '\r',
+      },
+      {
+        type: 'keyUp',
+        key: 'Enter',
+        code: 'Enter',
+        windowsVirtualKeyCode: 13,
+        nativeVirtualKeyCode: 13,
+        modifiers: 8,
+      },
+    ]);
+  });
+});
+
+describe('jimeng-agent/agent-dom — prompt structure validation', () => {
+  it('preserves empty lines while normalizing mention markers and incidental whitespace', () => {
+    expect(normalizePromptValidationLines('prefix\n\n@图片1 作为参考\n@视频1')).toEqual([
+      'prefix',
+      '',
+      '图片1作为参考',
+      '视频1',
     ]);
   });
 });

@@ -365,7 +365,7 @@ describe('jimeng-agent/media — validateLocalReferenceAssets (happy paths)', ()
     const c = touch('VU.WAV');
     const canonical = makeCanonical({ image: [a], video: [b], audio: [c] });
     const result = validateLocalReferenceAssets(canonical, {
-      probe: () => 1000,
+      probe: () => 2500,
     });
     expect(result.assets.map((a) => a.filename)).toEqual(['IMG.JPG', 'Mix.Mp4', 'VU.WAV']);
     expect(result.assets.every((a) => a.durationMs !== undefined)).toBe(true);
@@ -376,7 +376,7 @@ describe('jimeng-agent/media — validateLocalReferenceAssets (happy paths)', ()
     const vid = touch('clip.mp4');
     const canonical = makeCanonical({ image: [img], video: [vid] });
     const result = validateLocalReferenceAssets(canonical, {
-      probe: () => 1000,
+      probe: () => 2500,
     });
     expect(Object.isFrozen(result)).toBe(true);
     expect(Object.isFrozen(result.assets)).toBe(true);
@@ -570,7 +570,7 @@ describe('jimeng-agent/media — validateLocalReferenceAssets (rejections)', () 
     const canonical = makeCanonical({ image: [img], video: [vid] });
     let captured;
     try {
-      validateLocalReferenceAssets(canonical, { probe: () => 1000 });
+      validateLocalReferenceAssets(canonical, { probe: () => 2500 });
     } catch (err) {
       captured = err;
     }
@@ -583,7 +583,7 @@ describe('jimeng-agent/media — validateLocalReferenceAssets (rejections)', () 
     const img = touch('track.png');
     const aud = touch('Track.MP3');
     const canonical = makeCanonical({ image: [img], audio: [aud] });
-    expect(() => validateLocalReferenceAssets(canonical, { probe: () => 1000 }))
+    expect(() => validateLocalReferenceAssets(canonical, { probe: () => 2500 }))
       .toThrow(ArgumentError);
   });
 
@@ -593,7 +593,7 @@ describe('jimeng-agent/media — validateLocalReferenceAssets (rejections)', () 
     const canonical = makeCanonical({ image: [img], video: [vid] });
     // We only strip the FINAL extension, so 'panel.sora' ≠ 'panel.sora.tar'.
     // That means these two should both pass — verify the contract.
-    const result = validateLocalReferenceAssets(canonical, { probe: () => 1000 });
+    const result = validateLocalReferenceAssets(canonical, { probe: () => 2500 });
     expect(result.assets.map((a) => a.mentionName)).toEqual(['panel.sora', 'panel.sora.tar']);
   });
 
@@ -602,7 +602,7 @@ describe('jimeng-agent/media — validateLocalReferenceAssets (rejections)', () 
     const vid = touch('clip.mp4');
     const aud = touch('voice.mp3');
     const canonical = makeCanonical({ image: [img], video: [vid], audio: [aud] });
-    const result = validateLocalReferenceAssets(canonical, { probe: () => 1000 });
+    const result = validateLocalReferenceAssets(canonical, { probe: () => 2500 });
     expect(result.assets.map((a) => a.mentionName)).toEqual(['hero', 'clip', 'voice']);
   });
 });
@@ -645,7 +645,7 @@ describe('jimeng-agent/media — validateLocalReferenceAssets (probe wiring)', (
     validateLocalReferenceAssets(canonical, {
       probe: (filePath) => {
         probeCalls.push(filePath);
-        return 1500;
+        return 2500;
       },
     });
     expect(probeCalls).toEqual([v1, v2, au1, au2]);
@@ -684,6 +684,40 @@ describe('jimeng-agent/media — validateLocalReferenceAssets (probe wiring)', (
         .toThrow(ArgumentError);
     }
   });
+
+  for (const [kind, extension] of [['video', 'mp4'], ['audio', 'mp3']]) {
+    it(`rejects a ${kind} reference below the 2s per-file minimum`, () => {
+      const asset = touch(`short.${extension}`);
+      const canonical = makeCanonical({ [kind]: [asset] });
+      expect(() => validateLocalReferenceAssets(canonical, { probe: () => 1999 }))
+        .toThrow(/at least 2s/);
+    });
+
+    it(`accepts a ${kind} reference exactly at the 2s per-file minimum`, () => {
+      const asset = touch(`minimum.${extension}`);
+      const canonical = makeCanonical({ [kind]: [asset] });
+      const result = validateLocalReferenceAssets(canonical, {
+        probe: () => 2000,
+      });
+      expect(result.assets[0].durationMs).toBe(2000);
+    });
+
+    it(`accepts a ${kind} reference exactly at the 15s per-file maximum`, () => {
+      const asset = touch(`maximum.${extension}`);
+      const canonical = makeCanonical({ [kind]: [asset] });
+      const result = validateLocalReferenceAssets(canonical, {
+        probe: () => MAX_REFERENCE_DURATION_SECONDS * 1000,
+      });
+      expect(result.assets[0].durationMs).toBe(15000);
+    });
+
+    it(`rejects a ${kind} reference above the 15s per-file maximum`, () => {
+      const asset = touch(`long.${extension}`);
+      const canonical = makeCanonical({ [kind]: [asset] });
+      expect(() => validateLocalReferenceAssets(canonical, { probe: () => 15001 }))
+        .toThrow(/at most 15s per/);
+    });
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -749,7 +783,7 @@ describe('jimeng-agent/media — validateLocalReferenceAssets (duration caps)', 
     expect(captured.message).toContain('Total audio reference duration');
   });
 
-  it('rounds fractional video probe output UP and rejects 15001ms post-ceiling', () => {
+  it('rejects a fractional video duration rounded above the per-file ceiling', () => {
     const vid = touch('clip.mp4');
     const canonical = makeCanonical({ video: [vid] });
     // The default production probe uses Math.ceil, but a tested probe has
@@ -762,10 +796,10 @@ describe('jimeng-agent/media — validateLocalReferenceAssets (duration caps)', 
       captured = err;
     }
     expect(captured).toBeInstanceOf(ArgumentError);
-    expect(captured.message).toContain('Total video reference duration');
+    expect(captured.message).toContain('at most 15s per video/audio reference');
   });
 
-  it('rounds fractional audio probe output UP and rejects 15001ms post-ceiling', () => {
+  it('rejects a fractional audio duration rounded above the per-file ceiling', () => {
     const aud = touch('clip.mp3');
     const canonical = makeCanonical({ audio: [aud] });
     let captured;
@@ -775,7 +809,7 @@ describe('jimeng-agent/media — validateLocalReferenceAssets (duration caps)', 
       captured = err;
     }
     expect(captured).toBeInstanceOf(ArgumentError);
-    expect(captured.message).toContain('Total audio reference duration');
+    expect(captured.message).toContain('at most 15s per video/audio reference');
   });
 
   it('keeps per-kind totals independent (image padding does not affect video total)', () => {

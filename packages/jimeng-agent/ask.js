@@ -1,8 +1,6 @@
 /**
- * Prepare a Jimeng Agent video request through visible UI only.
- *
- * The command uploads references and fills rich @ mentions, then returns
- * without clicking any generation/submission control.
+ * Prepare a Jimeng Agent video request through visible UI, run a mandatory
+ * preparation checkpoint, and optionally submit generation when --submit 1.
  */
 
 import { cli, Strategy } from '@jackwener/opencli/registry';
@@ -15,7 +13,7 @@ export const askCommand = cli({
   site: 'jimeng-agent',
   name: 'ask',
   access: 'write',
-  description: 'Prepare Jimeng Agent video references and prompt; does not submit generation',
+  description: 'Prepare Jimeng Agent video draft, require a green checkpoint, optionally submit with --submit 1',
   domain: JIMENG_DOMAIN,
   strategy: Strategy.COOKIE,
   browser: true,
@@ -83,6 +81,12 @@ export const askCommand = cli({
       default: 0,
       help: 'Preparation retry count (default 0; prefers in-page recovery before a fresh workspace)',
     },
+    {
+      name: 'submit',
+      type: 'int',
+      default: 0,
+      help: '0 = prepare only after green checkpoint (default); 1 = formally submit generation after checkpoint passes',
+    },
   ],
   columns: [
     'status',
@@ -90,8 +94,10 @@ export const askCommand = cli({
     'workspaceUrl',
     'uploaded',
     'mentions',
+    'assetId',
     'retryUsed',
     'submitted',
+    'checkpointOk',
   ],
   validateArgs: (kwargs) => {
     normalizeAskArgs(kwargs);

@@ -6,7 +6,8 @@ Protocol-first ChatGPT web adapter:
 2. Collect stream text / sandbox files / image gen pointers  
 3. Files: human-like chip / flyout Download via `waitForDownload`  
 4. Images: official-style DOM export (fetch/canvas → local files)  
-5. Uploads: sequential `setFileInput` (path) — native CDP path only, no DataTransfer / base64 fallback
+5. Uploads: sequential `setFileInput` (path) — native CDP path only, no DataTransfer / base64 fallback  
+6. Managed collect: Chrome downloads are remapped (`C:\...` → `/mnt/c/...` on WSL) and copied into `--op` (`path` / `collected` / `collectedFrom` / `bytes`)
 
 ## Requirements
 

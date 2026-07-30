@@ -40,8 +40,11 @@ describe('jimeng-agent/ask command registration', () => {
     expect(() => askCommand.validateArgs(validArgs({ ratio: '7:7' }))).toThrow(ArgumentError);
   });
 
-  it('declares an explicit non-submission outcome column', () => {
+  it('declares checkpoint and submit outcome columns with prepare-first semantics', () => {
     expect(askCommand.columns).toContain('submitted');
-    expect(askCommand.description).toMatch(/does not submit/i);
+    expect(askCommand.columns).toContain('checkpointOk');
+    expect(askCommand.description).toMatch(/checkpoint/i);
+    const byName = new Map(askCommand.args.map((arg) => [arg.name, arg]));
+    expect(byName.get('submit')).toMatchObject({ type: 'int', default: 0 });
   });
 });
