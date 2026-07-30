@@ -2,8 +2,7 @@
  * Visible-UI Jimeng Agent preparation, checkpoint, and optional submit.
  *
  * Flow:
- *   light dock recovery (only if 「回到底部」 visible)
- *   -> clear draft
+ *   clear draft
  *   -> Agent/Auto/video configuration
  *   -> pre-input controls check (mode/preference only)
  *   -> upload refs -> write prompt/mentions
@@ -199,8 +198,6 @@ export async function prepareJimengAgentAsk(page, canonical, preparedAssets) {
 
   while (true) {
     try {
-      // Once at start only: if 「回到底部」 is visible, click it; otherwise no-op.
-      await ensureComposerDocked(page);
       await waitForAgentSurface(page);
       if (startAssetIndex === 0) {
         await clearInitialDraftState(page);
@@ -215,7 +212,6 @@ export async function prepareJimengAgentAsk(page, canonical, preparedAssets) {
       // Jimeng may insert an uploaded reference chip at the document start.
       // Match the established flow: clear that platform-added draft state
       // before writing the canonical prompt and its explicit @ mentions.
-      // Do not re-dock here — bulk scroll after upload was thrashing the dock.
       await clearComposer(page, 'clear-after-upload');
       await fillPromptWithRichMentions(page, canonical.agentPrompt, preparedAssets, mentionDebug);
 
@@ -385,86 +381,106 @@ export async function probeJimengAgentSurface(page) {
   })()`);
 }
 
-async function openWorkspace(page, workspaceUrl, { fresh: _fresh }) {
-  // Always navigate the current automation tab.
-  // Never open a new tab: Hub/CDP "Cannot attach to this target" and leftover
-  // blank pages came from newTab + selectTab churn on fresh retries.
+/**
+ * Open the Jimeng workspace in the current tab.
+ *
+ * - Same workspace + composer expanded → no reload (keep UI state).
+ * - Same workspace + composer collapsed/missing → reload once to reset dock.
+ * - Different page / blank → goto.
+ * - `fresh: true` always reloads (recovery path).
+ * - Never opens a new tab.
+ */
+async function openWorkspace(page, workspaceUrl, { fresh = false } = {}) {
+  let currentHref = '';
+  try {
+    if (typeof page.url === 'function') {
+      currentHref = String(page.url() || '');
+    }
+  } catch {
+    currentHref = '';
+  }
+  if (!currentHref) {
+    currentHref = await page.evaluate('location.href').catch(() => '');
+  }
+
+  const alreadyThere = isSameJimengWorkspace(currentHref, workspaceUrl);
+  if (alreadyThere && !fresh) {
+    const expanded = await isComposerExpanded(page).catch(() => false);
+    if (expanded) {
+      return;
+    }
+    // Composer collapsed / not ready → full reload to restore dock.
+  }
+
   await page.goto(workspaceUrl);
 }
 
+/** True when both URLs point at the same Jimeng generate workspace id. */
+function isSameJimengWorkspace(currentHref, targetUrl) {
+  try {
+    const cur = new URL(String(currentHref || ''));
+    const tgt = new URL(String(targetUrl || ''));
+    if (cur.origin !== tgt.origin) return false;
+    const curPath = cur.pathname.replace(/\/+$/, '') || '/';
+    const tgtPath = tgt.pathname.replace(/\/+$/, '') || '/';
+    if (curPath !== tgtPath) return false;
+    const curWs = cur.searchParams.get('workspace');
+    const tgtWs = tgt.searchParams.get('workspace');
+    return !!tgtWs && curWs === tgtWs;
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Light recovery when the history list has scrolled up and the composer dock
- * is collapsed. Intentionally minimal:
- *   - only click 「回到底部」 when that floating control is actually visible
- *   - do NOT scroll every overflow container (causes dock shrink/expand thrash)
- *   - do NOT force editor.focus() when the surface is already ready
+ * Detect whether the Agent composer input dock is expanded and usable.
+ *
+ * Collapsed signals (any → not expanded):
+ * - no visible prompt editor / file input
+ * - editor too short (collapsed strip)
+ * - floating 「回到底部」 visible (history scrolled up, dock tucked away)
  */
-async function ensureComposerDocked(page, { force = false } = {}) {
-  // Fast path: composer already ready and no 「回到底部」 pill → no-op.
-  if (!force) {
-    const surface = await probeJimengAgentSurface(page).catch(() => null);
-    const backVisible = await page.evaluate(`(() => {
-      const visible = (el) => {
-        if (!(el instanceof HTMLElement)) return false;
-        const style = window.getComputedStyle(el);
-        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
-        const rect = el.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0;
-      };
-      return [...document.querySelectorAll('button, [role="button"], div, span, a')]
-        .filter(visible)
-        .some((el) => {
-          const t = ((el.getAttribute('aria-label') || '') + ' ' + (el.innerText || el.textContent || ''))
-            .replace(/\\s+/g, '');
-          return t.includes('回到底部');
-        });
-    })()`).catch(() => false);
+async function isComposerExpanded(page) {
+  return page.evaluate(`(() => {
+    ${buildPromptEditorLocatorScript()}
+    const editor = findPromptEditor();
+    if (!editor) return false;
 
-    if (surface?.ready && !backVisible) {
-      return { acted: false, reason: 'already-docked' };
-    }
-  }
+    const editorRect = editor.getBoundingClientRect();
+    // Collapsed dock usually keeps a tiny or off-screen editor.
+    if (editorRect.width < 80 || editorRect.height < 24) return false;
+    if (editorRect.bottom < 40 || editorRect.top > (window.innerHeight || 0) - 20) return false;
 
-  // Only act when 「回到底部」 is visible (true collapsed/scrolled-up state).
-  const backToBottom = await page.evaluate(`(() => {
-    const visible = (el) => {
-      if (!(el instanceof HTMLElement)) return false;
-      const style = window.getComputedStyle(el);
-      if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
-      const rect = el.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0;
-    };
-    const compact = (el) => ((el.getAttribute('aria-label') || '') + ' ' + (el.innerText || el.textContent || ''))
-      .replace(/\\s+/g, '');
-    const candidates = [...document.querySelectorAll('button, [role="button"], div, span, a')]
+    const fileInputs = [...document.querySelectorAll(${JSON.stringify(FILE_INPUT_SELECTOR)})];
+    if (fileInputs.length === 0) return false;
+
+    // 「回到底部」 means the history list stole focus and the dock is collapsed.
+    const backToBottom = [...document.querySelectorAll('button, [role="button"], div, span, a')]
       .filter(visible)
-      .filter((el) => compact(el).includes('回到底部'));
-    candidates.sort((a, b) => {
-      const ar = a.getBoundingClientRect();
-      const br = b.getBoundingClientRect();
-      return (ar.width * ar.height) - (br.width * br.height);
-    });
-    const target = candidates[0] || null;
-    if (!target) return { ok: false, reason: 'not-found' };
-    const rect = target.getBoundingClientRect();
-    return {
-      ok: true,
-      x: Math.round(rect.left + rect.width / 2),
-      y: Math.round(rect.top + rect.height / 2),
-    };
+      .some((el) => {
+        const t = ((el.getAttribute('aria-label') || '') + ' ' + (el.innerText || el.textContent || ''))
+          .replace(/\\s+/g, '');
+        return t.includes('回到底部');
+      });
+    if (backToBottom) return false;
+
+    // Agent mode combobox near the editor is a strong "dock expanded" signal.
+    const roots = [];
+    let node = editor.parentElement;
+    for (let i = 0; node && i < 10; i += 1, node = node.parentElement) roots.push(node);
+    const scope = roots[roots.length - 1] || document.body;
+    const hasAgentControl = [...scope.querySelectorAll('[role="combobox"], button, [role="button"]')]
+      .filter(visible)
+      .some((el) => /Agent\\s*模式/i.test(
+        ((el.getAttribute('aria-label') || '') + ' ' + (el.innerText || el.textContent || '')).replace(/\\s+/g, ' '),
+      ));
+    if (!hasAgentControl) return false;
+
+    return true;
   })()`);
-
-  if (backToBottom?.ok && typeof page.nativeClick === 'function') {
-    await page.nativeClick(backToBottom.x, backToBottom.y);
-    await page.sleep(0.3);
-    return { acted: true, reason: 'back-to-bottom' };
-  }
-
-  return { acted: false, reason: 'no-back-to-bottom' };
 }
 
 async function waitForAgentSurface(page, timeoutMs = 25_000) {
-  // Dock recovery is done once at prepare start; do not re-dock in this poll loop.
   const deadline = Date.now() + timeoutMs;
   let last = null;
   while (Date.now() < deadline) {
