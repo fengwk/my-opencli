@@ -1115,24 +1115,62 @@ async function isMentionPickerVisible(page) {
   })()`);
 }
 
+/** Poll until the mention picker shows real 图片N/视频N/音频N options. */
+async function waitForMentionPicker(page, timeoutMs) {
+  const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
+  while (Date.now() < deadline) {
+    if (await isMentionPickerVisible(page)) return true;
+    await page.sleep(0.12);
+  }
+  return isMentionPickerVisible(page);
+}
+
+/**
+ * Delete every trailing bare '@' at the end of the composer (not chip content).
+ * Used before typing a new '@' so Hub/slow retries never stack "@@".
+ */
+async function stripTrailingBareAtsAtEnd(page) {
+  try {
+    await ensurePromptEditorCaret(page);
+  } catch {
+    await placeCaretAtPromptEditorEnd(page).catch(() => null);
+  }
+  for (let i = 0; i < 6; i += 1) {
+    const endsWithAt = await page.evaluate(`(() => {
+      ${buildPromptEditorLocatorScript()}
+      const editor = findPromptEditor();
+      if (!editor) return false;
+      const text = (editor.innerText || editor.textContent || '')
+        .replace(/[\\u00a0\\u200b]+/g, '')
+        .replace(/\\s+$/g, '');
+      return /@$/.test(text);
+    })()`);
+    if (!endsWithAt) break;
+    await pressKeyWithGap(page, 'Backspace');
+  }
+}
+
 /**
  * Insert one rich @mention chip.
  *
- * Flow (as specified):
- *   1. type '@' → wait 0.5s → check picker visible
- *      - invisible: Backspace '@', re-type '@' (max 3). Fail hard if still invisible.
- *   2. type label (e.g. 图片1) → wait → check picker still visible
- *      - invisible: rewind (label.length + 1) and full-retry from step 1 (max 3)
- *   3. picker still visible → Enter on unique candidate → verify chip committed
- *      - fail: rewind (label.length + 1) and full-retry (max 3)
+ * Flow:
+ *   1. ensure no trailing bare '@', type ONE '@', poll for picker (slow Hub/NAS)
+ *      - if still invisible: strip ALL trailing bare '@', re-type ONE '@' (max 3)
+ *   2. type label → poll picker still visible
+ *      - invisible: rewind (label.length + 1) and full-retry
+ *   3. Enter unique candidate → verify chip; strip orphan bare '@' after commit
  *
- * Between '@' and Enter we never click the editor (would steal focus / close picker).
- * Visibility checks are pure evaluate and do not move focus.
+ * Critical: never type a second '@' while a bare '@' is still in the composer
+ * (that produced the Hub-visible "@@图片1" flash on slow machines).
  */
 async function insertRichMention(page, asset, expectedMentionCount, mentionDebug) {
   const maxAtAttempts = mentionDebug.enabled ? 1 : 3;
   const maxFullAttempts = mentionDebug.enabled ? 1 : 3;
   const label = asset.label;
+  // Hub/NAS is slower than local; fixed 0.5s after '@' was too short and caused
+  // false "picker missing" → re-type '@' → "@@图片1".
+  const pickerWaitAfterAtMs = 2_000;
+  const pickerWaitAfterLabelMs = 1_500;
 
   for (let fullAttempt = 0; fullAttempt < maxFullAttempts; fullAttempt += 1) {
     const before = await getMentionState(page, asset);
@@ -1141,6 +1179,8 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
     await pressKeyWithGap(page, 'Escape', 0.12);
     await ensurePromptEditorCaret(page);
     await page.sleep(MENTION_KEY_GAP_S);
+    // Drop any leftover bare '@' from a previous attempt before we type a new one.
+    await stripTrailingBareAtsAtEnd(page);
 
     await captureMentionDebug(page, mentionDebug, 'before-at', asset, {
       fullAttempt: fullAttempt + 1,
@@ -1148,24 +1188,26 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
       before,
     });
 
-    // ---------- Phase 1: type '@', require picker ----------
+    // ---------- Phase 1: type ONE '@', require picker (poll, not fixed sleep) ----------
     let atOpened = false;
     for (let atAttempt = 0; atAttempt < maxAtAttempts; atAttempt += 1) {
+      // Guard: never stack another '@' on top of an existing bare '@'.
+      await stripTrailingBareAtsAtEnd(page);
       await typeMentionQuery(page, '@');
-      await page.sleep(0.5);
+      const opened = await waitForMentionPicker(page, pickerWaitAfterAtMs);
       await captureMentionDebug(page, mentionDebug, 'after-at', asset, {
         fullAttempt: fullAttempt + 1,
         atAttempt: atAttempt + 1,
+        pickerVisible: opened,
       });
 
-      if (await isMentionPickerVisible(page)) {
+      if (opened) {
         atOpened = true;
         break;
       }
 
-      // '@' did not open picker → remove this '@' and re-try '@'.
-      // Prefer single Backspace; fall back to caret restore if focus was lost.
-      await pressKeyWithGap(page, 'Backspace');
+      // Picker never appeared → strip every trailing bare '@', then re-try ONE '@'.
+      await stripTrailingBareAtsAtEnd(page);
       const caretOk = await isCaretInPromptEditor(page).catch(() => false);
       if (!caretOk) {
         await ensurePromptEditorCaret(page);
@@ -1174,8 +1216,7 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
     }
 
     if (!atOpened) {
-      // Hard fail: '@' never opened a real mention picker.
-      await stripTrailingBareAt(page);
+      await stripTrailingBareAtsAtEnd(page);
       throw phaseError(
         'mention',
         `Rich @ mention picker did not open after ${maxAtAttempts} '@' attempt${maxAtAttempts === 1 ? '' : 's'} for ${label} (${asset.filename})`,
@@ -1187,13 +1228,14 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
     // Do NOT click/refocus the editor here — that can close the picker.
     await page.sleep(MENTION_KEY_GAP_S);
     await typeMentionQuery(page, label);
-    await page.sleep(0.55);
+    const labelPickerOk = await waitForMentionPicker(page, pickerWaitAfterLabelMs);
     await captureMentionDebug(page, mentionDebug, 'after-label', asset, {
       fullAttempt: fullAttempt + 1,
       expectedMentionCount,
+      pickerVisible: labelPickerOk,
     });
 
-    if (!(await isMentionPickerVisible(page))) {
+    if (!labelPickerOk) {
       // Label typing lost the picker → rewind (label chars + '@') and full-retry.
       await rewindMentionKeystrokes(page, label, 'label');
       continue;
