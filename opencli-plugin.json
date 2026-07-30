@@ -1,19 +1,19 @@
 {
   "name": "my-opencli",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "opencli": ">=1.8.7",
   "description": "Personal OpenCLI plugins (chatgpt-agent and jimeng-agent)",
   "plugins": {
     "chatgpt-agent": {
       "path": "packages/chatgpt-agent",
       "description": "Protocol-stream ChatGPT agent: WS capture, sequential upload, file/image export",
-      "version": "0.1.15",
+      "version": "0.1.16",
       "opencli": ">=1.8.7"
     },
     "jimeng-agent": {
       "path": "packages/jimeng-agent",
       "description": "Jimeng Agent video drafts with rich mentions, checkpointed prepare/submit, status search and official download",
-      "version": "0.1.15",
+      "version": "0.1.16",
       "opencli": ">=1.8.7"
     }
   }

@@ -2,7 +2,7 @@
  * Visible-UI Jimeng Agent preparation, checkpoint, and optional submit.
  *
  * Flow:
- *   dock composer (回到底部 / scroll-to-bottom, idempotent)
+ *   light dock recovery (only if 「回到底部」 visible)
  *   -> clear draft
  *   -> Agent/Auto/video configuration
  *   -> pre-input controls check (mode/preference only)
@@ -199,8 +199,7 @@ export async function prepareJimengAgentAsk(page, canonical, preparedAssets) {
 
   while (true) {
     try {
-      // Always dock first. Safe when already at bottom (idempotent).
-      // Covers the common "scrolled history up → composer collapsed" state.
+      // Once at start only: if 「回到底部」 is visible, click it; otherwise no-op.
       await ensureComposerDocked(page);
       await waitForAgentSurface(page);
       if (startAssetIndex === 0) {
@@ -216,7 +215,7 @@ export async function prepareJimengAgentAsk(page, canonical, preparedAssets) {
       // Jimeng may insert an uploaded reference chip at the document start.
       // Match the established flow: clear that platform-added draft state
       // before writing the canonical prompt and its explicit @ mentions.
-      await ensureComposerDocked(page);
+      // Do not re-dock here — bulk scroll after upload was thrashing the dock.
       await clearComposer(page, 'clear-after-upload');
       await fillPromptWithRichMentions(page, canonical.agentPrompt, preparedAssets, mentionDebug);
 
@@ -394,18 +393,39 @@ async function openWorkspace(page, workspaceUrl, { fresh: _fresh }) {
 }
 
 /**
- * Bring the Agent composer dock into view.
- *
- * Idempotent: safe to call when already at the bottom. Handles the common
- * "history scrolled up → floating 回到底部 → composer collapsed" state by:
- *   1. clicking the visible 「回到底部」 control when present
- *   2. scrolling main overflow containers to the bottom
- *   3. focusing the prompt editor when it is already mounted
- *
- * This is part of the standard CLI prepare path, not an optional recovery.
+ * Light recovery when the history list has scrolled up and the composer dock
+ * is collapsed. Intentionally minimal:
+ *   - only click 「回到底部」 when that floating control is actually visible
+ *   - do NOT scroll every overflow container (causes dock shrink/expand thrash)
+ *   - do NOT force editor.focus() when the surface is already ready
  */
-async function ensureComposerDocked(page) {
-  // 1) Click 「回到底部」 if visible (floating pill after scrolling history up).
+async function ensureComposerDocked(page, { force = false } = {}) {
+  // Fast path: composer already ready and no 「回到底部」 pill → no-op.
+  if (!force) {
+    const surface = await probeJimengAgentSurface(page).catch(() => null);
+    const backVisible = await page.evaluate(`(() => {
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      return [...document.querySelectorAll('button, [role="button"], div, span, a')]
+        .filter(visible)
+        .some((el) => {
+          const t = ((el.getAttribute('aria-label') || '') + ' ' + (el.innerText || el.textContent || ''))
+            .replace(/\\s+/g, '');
+          return t.includes('回到底部');
+        });
+    })()`).catch(() => false);
+
+    if (surface?.ready && !backVisible) {
+      return { acted: false, reason: 'already-docked' };
+    }
+  }
+
+  // Only act when 「回到底部」 is visible (true collapsed/scrolled-up state).
   const backToBottom = await page.evaluate(`(() => {
     const visible = (el) => {
       if (!(el instanceof HTMLElement)) return false;
@@ -419,7 +439,6 @@ async function ensureComposerDocked(page) {
     const candidates = [...document.querySelectorAll('button, [role="button"], div, span, a')]
       .filter(visible)
       .filter((el) => compact(el).includes('回到底部'));
-    // Prefer the smallest leaf-like control (the floating pill, not a huge parent).
     candidates.sort((a, b) => {
       const ar = a.getBoundingClientRect();
       const br = b.getBoundingClientRect();
@@ -428,63 +447,30 @@ async function ensureComposerDocked(page) {
     const target = candidates[0] || null;
     if (!target) return { ok: false, reason: 'not-found' };
     const rect = target.getBoundingClientRect();
-    target.setAttribute(${JSON.stringify(TARGET_ATTR)}, 'back-to-bottom');
     return {
       ok: true,
       x: Math.round(rect.left + rect.width / 2),
       y: Math.round(rect.top + rect.height / 2),
-      text: compact(target).slice(0, 32),
     };
   })()`);
 
   if (backToBottom?.ok && typeof page.nativeClick === 'function') {
     await page.nativeClick(backToBottom.x, backToBottom.y);
-    await page.sleep(0.25);
-  } else if (backToBottom?.ok) {
-    await page.click(`[${TARGET_ATTR}="back-to-bottom"]`).catch(() => null);
-    await page.sleep(0.25);
+    await page.sleep(0.3);
+    return { acted: true, reason: 'back-to-bottom' };
   }
 
-  // 2) Scroll window + overflow containers to bottom (no-op when already there).
-  await page.evaluate(`(() => {
-    try { window.scrollTo(0, document.documentElement.scrollHeight || document.body.scrollHeight || 0); } catch {}
-    const nodes = [...document.querySelectorAll('div, main, section, aside')];
-    for (const el of nodes) {
-      if (!(el instanceof HTMLElement)) continue;
-      if (el.scrollHeight <= el.clientHeight + 40) continue;
-      const style = window.getComputedStyle(el);
-      if (!/(auto|scroll)/.test(style.overflowY) && !/(auto|scroll)/.test(style.overflow)) continue;
-      // Prefer large vertical scrollers (history / chat body).
-      if (el.clientHeight < 120) continue;
-      try { el.scrollTop = el.scrollHeight; } catch {}
-    }
-  })()`);
-  await page.sleep(0.2);
-
-  // 3) Soft-focus the editor if already mounted (does not throw if missing).
-  await page.evaluate(`(() => {
-    ${buildPromptEditorLocatorScript()}
-    const editor = findPromptEditor();
-    if (!editor) return false;
-    try { editor.focus(); } catch {}
-    return true;
-  })()`).catch(() => null);
-  await page.sleep(0.15);
+  return { acted: false, reason: 'no-back-to-bottom' };
 }
 
 async function waitForAgentSurface(page, timeoutMs = 25_000) {
+  // Dock recovery is done once at prepare start; do not re-dock in this poll loop.
   const deadline = Date.now() + timeoutMs;
   let last = null;
-  let dockTick = 0;
   while (Date.now() < deadline) {
     last = await probeJimengAgentSurface(page);
     if (last.ready) return last;
-    // Periodically re-dock while waiting — history scroll can re-collapse it.
-    dockTick += 1;
-    if (dockTick % 4 === 0) {
-      await ensureComposerDocked(page).catch(() => null);
-    }
-    await page.sleep(0.25);
+    await page.sleep(0.35);
   }
   throw phaseError(
     'surface',
