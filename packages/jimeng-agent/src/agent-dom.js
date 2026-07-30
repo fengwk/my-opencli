@@ -764,7 +764,7 @@ async function fillPromptWithRichMentions(page, agentPrompt, assets, mentionDebu
 
     if (segment.type === 'text') {
       if (segment.value) {
-        await focusPromptEditorEnd(page);
+        await ensurePromptEditorCaret(page);
         await insertNativeText(page, segment.value);
         emittedAnyContent = true;
         lastSegmentType = 'text';
@@ -774,12 +774,12 @@ async function fillPromptWithRichMentions(page, agentPrompt, assets, mentionDebu
     }
 
     if (!emittedAnyContent) {
-      await focusPromptEditorEnd(page);
+      await ensurePromptEditorCaret(page);
       await insertNativeText(page, LEADING_MENTION_GUARD);
       emittedAnyContent = true;
     }
     if (lastSegmentType === 'mention') {
-      await focusPromptEditorEnd(page);
+      await ensurePromptEditorCaret(page);
       await insertNativeText(page, ' ');
     }
     expectedMentionCount += 1;
@@ -864,16 +864,27 @@ function createMentionDebugSession(options) {
   };
 }
 
+async function isMentionPickerVisible(page) {
+  return page.evaluate(`(() => {
+    const visible = (el) => {
+      if (!(el instanceof HTMLElement)) return false;
+      const style = window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+    };
+    return [...document.querySelectorAll(${JSON.stringify(MENTION_OPTION_SELECTOR)})].some(visible);
+  })()`);
+}
+
 async function insertRichMention(page, asset, expectedMentionCount, mentionDebug) {
   const maxAttempts = mentionDebug.enabled ? 1 : 5;
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const before = await getMentionState(page, asset);
     await page.nativeKeyPress('Escape');
     await page.sleep(0.12);
-    await clickPromptEditorEnd(page);
-    // A native click establishes the real keyboard target. Re-collapse the
-    // selection afterward so an empty trailing paragraph remains the true end.
-    await focusPromptEditorEnd(page);
+    // Establish a real caret before @ typing. Native click is best-effort;
+    // JS caret placement is the source of truth after mention re-renders.
+    await ensurePromptEditorCaret(page);
     await captureMentionDebug(page, mentionDebug, 'before-at', asset, {
       attempt: attempt + 1,
       expectedMentionCount,
@@ -884,6 +895,15 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
       attempt: attempt + 1,
       expectedMentionCount,
     });
+
+    // If @ did not open the picker (lost focus / swallowed key), delete @ and retry.
+    if (!(await isMentionPickerVisible(page))) {
+      await page.nativeKeyPress('Backspace');
+      await page.sleep(0.15);
+      await ensurePromptEditorCaret(page);
+      continue;
+    }
+
     await typeMentionQuery(page, asset.label);
     await page.sleep(1);
     await captureMentionDebug(page, mentionDebug, 'after-label', asset, {
@@ -899,6 +919,8 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
       3_000,
     );
     if (candidate.ok) {
+      // Soft inspect: do not throw on center-obscured. Unique visible candidates
+      // are selected via guarded Enter, not mouse click.
       const candidateTarget = await inspectMentionCandidateTarget(page, marker, asset);
       await captureMentionDebug(page, mentionDebug, 'before-click', asset, {
         attempt: attempt + 1,
@@ -913,47 +935,69 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
           'No generation was submitted. The unique candidate remains open for a manual mouse click.',
         );
       }
-      const enterGuard = await selectMentionCandidateWithGuardedEnter(page, marker, asset);
-      await page.sleep(0.3);
-      const after = await getMentionState(page, asset);
-      await captureMentionDebug(page, mentionDebug, 'after-click', asset, {
-        attempt: attempt + 1,
-        expectedMentionCount,
-        candidate,
-        candidateTarget,
-        enterGuard,
-        before,
-        after,
-      });
-      if (mentionDebug.enabled && mentionDebug.stopPhase === 'after-click') {
-        throw phaseError(
-          'mention',
-          `Mention debug checkpoint reached after selecting ${asset.label}; inspect ${mentionDebug.directory}`,
-          'No generation was submitted. The first selection result was intentionally preserved without retry or rollback.',
-        );
-      }
+      // Only hard-block when the unique candidate disappeared / text mismatch.
       if (
-        !after.menuVisible
-        && !after.hasRaw
-        && after.matchingMentionCount > before.matchingMentionCount
-        && (await probeJimengAgentSurface(page)).mentionCount >= expectedMentionCount
+        candidateTarget?.ok
+        || candidateTarget?.reason === 'candidate-center-obscured'
       ) {
-        // Settle after a successful rich-mention commit so the next text /
-        // mention keystrokes do not race Jimeng's editor re-render.
-        await page.sleep(0.5);
-        await focusPromptEditorEnd(page);
-        return;
+        const enterGuard = await selectMentionCandidateWithGuardedEnter(page, marker, asset);
+        await page.sleep(0.3);
+        const after = await getMentionState(page, asset);
+        await captureMentionDebug(page, mentionDebug, 'after-click', asset, {
+          attempt: attempt + 1,
+          expectedMentionCount,
+          candidate,
+          candidateTarget,
+          enterGuard,
+          before,
+          after,
+        });
+        if (mentionDebug.enabled && mentionDebug.stopPhase === 'after-click') {
+          throw phaseError(
+            'mention',
+            `Mention debug checkpoint reached after selecting ${asset.label}; inspect ${mentionDebug.directory}`,
+            'No generation was submitted. The first selection result was intentionally preserved without retry or rollback.',
+          );
+        }
+        if (
+          !after.menuVisible
+          && !after.hasRaw
+          && after.matchingMentionCount > before.matchingMentionCount
+          && (await probeJimengAgentSurface(page)).mentionCount >= expectedMentionCount
+        ) {
+          // Settle after a successful rich-mention commit so the next text /
+          // mention keystrokes do not race Jimeng's editor re-render.
+          await page.sleep(0.5);
+          await ensurePromptEditorCaret(page);
+          return;
+        }
       }
     }
 
     await page.nativeKeyPress('Escape');
     await page.sleep(0.2);
-    if (!(await rollbackFailedMention(page, asset.label))) {
-      throw phaseError(
-        'mention',
-        `Rich @ mention insertion failed and could not be safely rolled back for ${asset.label}`,
-        'No generation was submitted. Check the visible composer and uploaded reference card.',
-      );
+    // Always try to strip a failed raw @label so the next attempt starts clean.
+    const rolled = await rollbackFailedMention(page, asset.label);
+    if (!rolled) {
+      // Also strip a lone leftover '@' when the picker never opened fully.
+      await ensurePromptEditorCaret(page);
+      const strippedAt = await page.evaluate(`(() => {
+        ${buildPromptEditorLocatorScript()}
+        const editor = findPromptEditor();
+        if (!editor) return false;
+        const text = (editor.innerText || editor.textContent || '').replace(/\\u00a0/g, ' ');
+        return /@$/.test(text.slice(-8).replace(/\\s+$/g, ''));
+      })()`);
+      if (strippedAt) {
+        await page.nativeKeyPress('Backspace');
+        await page.sleep(0.1);
+      } else if (attempt === maxAttempts - 1) {
+        throw phaseError(
+          'mention',
+          `Rich @ mention insertion failed and could not be safely rolled back for ${asset.label}`,
+          'No generation was submitted. Check the visible composer and uploaded reference card.',
+        );
+      }
     }
   }
 
@@ -1116,26 +1160,32 @@ async function selectMentionCandidateWithGuardedEnter(page, marker, asset) {
         && rect.height > 0
         && getComputedStyle(candidate).visibility !== 'hidden'
         && getComputedStyle(candidate).display !== 'none';
+      // Enter selection does not need a clear mouse hit on the candidate center.
+      // Require a unique visible matching candidate + caret still in the editor.
       const candidateHit = !!candidate && !!hit && (hit === candidate || candidate.contains(hit));
       const candidateMatches = !!candidate && [candidate, ...candidate.querySelectorAll('*')]
-        .some((node) => compact(node.innerText || node.textContent) === compact(label));
+        .some((node) => {
+          const text = compact(node.innerText || node.textContent);
+          return text === compact(label) || text.includes(compact(label));
+        });
       const selectionInEditor = !!editor
         && !!selection
-        && selection.rangeCount === 1
-        && selection.isCollapsed
+        && selection.rangeCount >= 1
         && editor.contains(selection.anchorNode)
         && editor.contains(selection.focusNode);
-      const suggestionMatches = !!editor && [...editor.querySelectorAll('.suggestion, [class*="suggestion"]')]
-        .some((node) => compact(node.innerText || node.textContent) === compact('@' + label));
+      const suggestionMatches = !!editor && (
+        [...editor.querySelectorAll('.suggestion, [class*="suggestion"]')]
+          .some((node) => compact(node.innerText || node.textContent).includes(compact(label)))
+        // Raw trailing @label is also a valid pre-commit state.
+        || compact(editor.innerText || editor.textContent || '').includes(compact('@' + label))
+      );
       const activeInEditor = !!editor
         && (document.activeElement === editor || editor.contains(document.activeElement));
       return {
         safe: candidateVisible
-          && candidateHit
           && candidateMatches
           && selectionInEditor
-          && suggestionMatches
-          && activeInEditor,
+          && (suggestionMatches || activeInEditor),
         candidateVisible,
         candidateHit,
         candidateMatches,
@@ -1371,31 +1421,63 @@ function buildPromptEditorLocatorScript() {
   `;
 }
 
-async function focusPromptEditorEnd(page) {
-  const marker = nextMarker('editor');
-  const result = await page.evaluate(`(() => {
+async function isCaretInPromptEditor(page) {
+  return page.evaluate(`(() => {
     ${buildPromptEditorLocatorScript()}
     const editor = findPromptEditor();
-    if (!editor) return { ok: false };
+    const selection = window.getSelection();
+    if (!editor || !selection?.anchorNode || !selection?.focusNode) return false;
+    return editor.contains(selection.anchorNode) && editor.contains(selection.focusNode);
+  })()`);
+}
+
+/**
+ * Place the caret at the true end of the ProseMirror editor.
+ * Prefer after the last child so we leave mention widgets / placeholders.
+ */
+async function placeCaretAtPromptEditorEnd(page) {
+  const marker = nextMarker('editor');
+  return page.evaluate(`(() => {
+    ${buildPromptEditorLocatorScript()}
+    const editor = findPromptEditor();
+    if (!editor) return { ok: false, reason: 'editor-not-found' };
     editor.setAttribute(${JSON.stringify(TARGET_ATTR)}, ${JSON.stringify(marker)});
     editor.focus();
     const selection = window.getSelection();
-    if (selection) {
-      const range = document.createRange();
+    if (!selection) return { ok: false, reason: 'no-selection' };
+    const range = document.createRange();
+    // Walk to the last renderable child; after mention chips this is more
+    // reliable than collapse(false) on the whole editor contents.
+    let node = editor.lastChild;
+    while (node && node.nodeType === Node.ELEMENT_NODE && node.lastChild) {
+      node = node.lastChild;
+    }
+    if (node && node.nodeType === Node.TEXT_NODE) {
+      const len = node.nodeValue ? node.nodeValue.length : 0;
+      range.setStart(node, len);
+      range.collapse(true);
+    } else if (editor.lastChild) {
+      range.setStartAfter(editor.lastChild);
+      range.collapse(true);
+    } else {
       range.selectNodeContents(editor);
       range.collapse(false);
-      selection.removeAllRanges();
-      selection.addRange(range);
     }
+    selection.removeAllRanges();
+    selection.addRange(range);
     return { ok: true };
   })()`);
+}
+
+async function focusPromptEditorEnd(page) {
+  const result = await placeCaretAtPromptEditorEnd(page);
   if (!result?.ok) {
     throw phaseError('prompt', 'Could not locate the active Jimeng prompt editor');
   }
 }
 
-async function clickPromptEditorEnd(page) {
-  const target = await page.evaluate(`(() => {
+async function computePromptEditorEndClickPoint(page) {
+  return page.evaluate(`(() => {
     ${buildPromptEditorLocatorScript()}
     const editor = findPromptEditor();
     if (!editor) return { ok: false, reason: 'editor-not-found' };
@@ -1411,8 +1493,10 @@ async function clickPromptEditorEnd(page) {
       lastText = node;
     }
 
-    let x = editorRect.left + 16;
-    let y = editorRect.top + Math.min(20, editorRect.height / 2);
+    // Prefer bottom-right of the editor content box; safer than mid-widget hits
+    // after a mention chip re-render.
+    let x = editorRect.left + Math.max(16, editorRect.width - 24);
+    let y = editorRect.top + Math.max(12, editorRect.height - 18);
     if (lastText) {
       const range = document.createRange();
       const length = lastText.nodeValue.length;
@@ -1421,7 +1505,7 @@ async function clickPromptEditorEnd(page) {
       const rects = [...range.getClientRects()];
       const rect = rects[rects.length - 1] || range.getBoundingClientRect();
       if (rect && rect.height > 0) {
-        x = rect.right + 2;
+        x = rect.right + 4;
         y = rect.top + rect.height / 2;
       }
     }
@@ -1434,31 +1518,55 @@ async function clickPromptEditorEnd(page) {
       y: Math.round(y),
     };
   })()`);
-  if (!target?.ok) {
-    throw phaseError('prompt', 'Could not find a human-click position at the end of the Jimeng prompt editor');
+}
+
+/**
+ * Ensure a real caret is inside the prompt editor before typing.
+ * Native click is best-effort: Jimeng mention re-renders can swallow the click
+ * without leaving a selection. Always re-place the caret via JS afterward and
+ * only fail when every strategy leaves the caret outside the editor.
+ */
+async function ensurePromptEditorCaret(page) {
+  await placeCaretAtPromptEditorEnd(page);
+  if (await isCaretInPromptEditor(page)) return;
+
+  const target = await computePromptEditorEndClickPoint(page);
+  if (target?.ok && typeof page.nativeClick === 'function') {
+    await page.nativeClick(target.x, target.y);
+    await page.sleep(0.12);
+    await placeCaretAtPromptEditorEnd(page);
+    if (await isCaretInPromptEditor(page)) return;
   }
 
-  await page.nativeClick(target.x, target.y);
-  await page.sleep(0.12);
-  const focused = await page.evaluate(`(() => {
+  // Last resort: click the editor content box itself, then re-place caret.
+  const box = await page.evaluate(`(() => {
     ${buildPromptEditorLocatorScript()}
     const editor = findPromptEditor();
-    const selection = window.getSelection();
-    return !!(
-      editor
-      && selection?.anchorNode
-      && selection?.focusNode
-      && editor.contains(selection.anchorNode)
-      && editor.contains(selection.focusNode)
-    );
+    if (!editor) return null;
+    const r = editor.getBoundingClientRect();
+    return {
+      x: Math.round(r.left + Math.min(40, r.width / 3)),
+      y: Math.round(r.top + Math.min(28, r.height / 2)),
+    };
   })()`);
-  if (!focused) {
+  if (box && typeof page.nativeClick === 'function') {
+    await page.nativeClick(box.x, box.y);
+    await page.sleep(0.12);
+    await placeCaretAtPromptEditorEnd(page);
+  }
+
+  if (!(await isCaretInPromptEditor(page))) {
     throw phaseError(
       'prompt',
-      'The native editor click did not leave a caret inside the Jimeng prompt editor',
+      'Could not place a caret inside the Jimeng prompt editor after mention/text updates',
       'No generation was submitted. Inspect the visible editor and retry.',
     );
   }
+}
+
+/** @deprecated Prefer ensurePromptEditorCaret — kept as an alias for call sites. */
+async function clickPromptEditorEnd(page) {
+  await ensurePromptEditorCaret(page);
 }
 
 async function insertNativeText(page, text) {
@@ -1577,28 +1685,22 @@ async function inspectMentionCandidateTarget(page, marker, asset) {
     const x = Math.round(rect.left + rect.width / 2);
     const y = Math.round(rect.top + rect.height / 2);
     const hit = document.elementFromPoint(x, y);
-    if (!hit || !option.contains(hit)) {
-      return {
-        ok: false,
-        reason: 'candidate-center-obscured',
-        hitTag: hit?.tagName || null,
-        hitClass: String(hit?.className || ''),
-      };
-    }
+    // Center-obscured is non-fatal for Enter-based selection; report it but
+    // still mark ok when the unique candidate is visible and text-matched.
+    const centerClear = !!(hit && option.contains(hit));
     return {
       ok: true,
       x,
       y,
-      hitTag: hit.tagName,
-      hitClass: String(hit.className || ''),
+      centerClear,
+      reason: centerClear ? null : 'candidate-center-obscured',
+      hitTag: hit?.tagName || null,
+      hitClass: String(hit?.className || ''),
     };
   })()`);
+  // Soft result for the attempt loop. Hard failures only when missing/mismatched.
   if (!result?.ok) {
-    throw phaseError(
-      'mention',
-      `The visible ${asset.label} candidate was not safely selectable: ${result?.reason || 'unknown reason'}`,
-      'No generation was submitted. Inspect the visible @ candidate panel.',
-    );
+    return result || { ok: false, reason: 'inspect-failed' };
   }
   return result;
 }
