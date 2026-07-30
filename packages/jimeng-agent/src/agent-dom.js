@@ -147,6 +147,9 @@ export function buildMentionSegments(agentPrompt, assets) {
  * Retry decisions are pure to make the "avoid refresh when possible" policy
  * auditable. An in-page retry is allowed once for a healthy failed upload;
  * any later retry opens a fresh workspace and starts from the first asset.
+ *
+ * Clear/composer-collapsed failures always prefer a full page reload — in-page
+ * resume is too weak when the dock is tucked away or reference cards are stuck.
  */
 export function chooseRetryPlan({
   retriesUsed,
@@ -155,8 +158,22 @@ export function chooseRetryPlan({
   errorPhase,
   failedAssetIndex,
   surface,
+  composerExpanded = true,
 }) {
   if (retriesUsed >= retryBudget) return { kind: 'stop' };
+
+  const forceFreshPhases = new Set([
+    'clear-initial',
+    'clear-references',
+    'clear-after-upload',
+    'mention',
+    'prompt',
+    'surface',
+  ]);
+  if (forceFreshPhases.has(errorPhase) || composerExpanded === false) {
+    return { kind: 'fresh', startAssetIndex: 0 };
+  }
+
   if (
     errorPhase === 'upload'
     && !priorInPlaceRetry
@@ -164,6 +181,7 @@ export function chooseRetryPlan({
     && failedAssetIndex >= 0
     && surface?.ready === true
     && surface.fileInputCount > 0
+    && composerExpanded !== false
   ) {
     return { kind: 'resume', startAssetIndex: failedAssetIndex };
   }
@@ -198,6 +216,10 @@ export async function prepareJimengAgentAsk(page, canonical, preparedAssets) {
 
   while (true) {
     try {
+      // If history scrolled up mid-session, reload once before any work.
+      if (!(await isComposerExpanded(page).catch(() => false))) {
+        await openWorkspace(page, workspaceUrl, { fresh: true });
+      }
       await waitForAgentSurface(page);
       if (startAssetIndex === 0) {
         await clearInitialDraftState(page);
@@ -213,6 +235,14 @@ export async function prepareJimengAgentAsk(page, canonical, preparedAssets) {
       // Match the established flow: clear that platform-added draft state
       // before writing the canonical prompt and its explicit @ mentions.
       await clearComposer(page, 'clear-after-upload');
+      // Re-check dock before typing: upload UI can leave history scrolled up.
+      if (!(await isComposerExpanded(page).catch(() => false))) {
+        throw phaseError(
+          'surface',
+          'Jimeng composer collapsed after upload (回到底部 / dock not expanded)',
+          'No generation was submitted. The page will reload and retry when budget allows.',
+        );
+      }
       await fillPromptWithRichMentions(page, canonical.agentPrompt, preparedAssets, mentionDebug);
 
       const checkpoint = await runContentCheckpoint(
@@ -244,16 +274,23 @@ export async function prepareJimengAgentAsk(page, canonical, preparedAssets) {
         ready: false,
         fileInputCount: 0,
       }));
-      if (failure.phase === 'clear-initial' && !clearRefreshUsed) {
-        // A stale controlled editor can reject the first keyboard clear. Refresh
-        // before mode selection/upload so recovery cannot duplicate references.
+      const composerExpanded = await isComposerExpanded(page).catch(() => false);
+
+      // Clear-path failures: always hard-reload (not soft same-URL skip).
+      if (
+        (failure.phase === 'clear-initial'
+          || failure.phase === 'clear-references'
+          || failure.phase === 'clear-after-upload')
+        && !clearRefreshUsed
+      ) {
         clearRefreshUsed = true;
         priorInPlaceRetry = false;
         startAssetIndex = 0;
         uploads.splice(0);
-        await openWorkspace(page, workspaceUrl, { fresh: false });
+        await openWorkspace(page, workspaceUrl, { fresh: true });
         continue;
       }
+
       const plan = chooseRetryPlan({
         retriesUsed,
         retryBudget: canonical.retry ?? 0,
@@ -261,6 +298,7 @@ export async function prepareJimengAgentAsk(page, canonical, preparedAssets) {
         errorPhase: failure.phase,
         failedAssetIndex: failure.failedAssetIndex,
         surface,
+        composerExpanded,
       });
 
       if (plan.kind === 'stop') {
@@ -454,7 +492,9 @@ async function isComposerExpanded(page) {
     const fileInputs = [...document.querySelectorAll(${JSON.stringify(FILE_INPUT_SELECTOR)})];
     if (fileInputs.length === 0) return false;
 
-    // 「回到底部」 means the history list stole focus and the dock is collapsed.
+    // 「回到底部」 can appear while the dock is still fully usable (history
+    // scrolled, input still open at the bottom). Only treat as collapsed when
+    // the editor is also not in the lower dock band / too short.
     const backToBottom = [...document.querySelectorAll('button, [role="button"], div, span, a')]
       .filter(visible)
       .some((el) => {
@@ -462,7 +502,9 @@ async function isComposerExpanded(page) {
           .replace(/\\s+/g, '');
         return t.includes('回到底部');
       });
-    if (backToBottom) return false;
+    const vh = window.innerHeight || 0;
+    const inDockBand = editorRect.top > vh * 0.45 && editorRect.bottom <= vh + 8;
+    if (backToBottom && (!inDockBand || editorRect.height < 36)) return false;
 
     // Agent mode combobox near the editor is a strong "dock expanded" signal.
     const roots = [];
@@ -1127,25 +1169,30 @@ async function waitForMentionPicker(page, timeoutMs) {
 
 /**
  * Delete every trailing bare '@' at the end of the composer (not chip content).
- * Used before typing a new '@' so Hub/slow retries never stack "@@".
+ * No-op when the composer does not end with '@' — avoids Escape/click thrash.
+ * When cleanup is needed, ensure a real caret first (JS place alone can miss).
  */
 async function stripTrailingBareAtsAtEnd(page) {
+  const endsWithAt = async () => page.evaluate(`(() => {
+    ${buildPromptEditorLocatorScript()}
+    const editor = findPromptEditor();
+    if (!editor) return false;
+    const text = (editor.innerText || editor.textContent || '')
+      .replace(/[\\u00a0\\u200b]+/g, '')
+      .replace(/\\s+$/g, '');
+    return /@$/.test(text);
+  })()`);
+
+  if (!(await endsWithAt())) return;
+
+  // Only when there is a real bare '@' to remove: place caret firmly, then delete.
   try {
     await ensurePromptEditorCaret(page);
   } catch {
     await placeCaretAtPromptEditorEnd(page).catch(() => null);
   }
   for (let i = 0; i < 6; i += 1) {
-    const endsWithAt = await page.evaluate(`(() => {
-      ${buildPromptEditorLocatorScript()}
-      const editor = findPromptEditor();
-      if (!editor) return false;
-      const text = (editor.innerText || editor.textContent || '')
-        .replace(/[\\u00a0\\u200b]+/g, '')
-        .replace(/\\s+$/g, '');
-      return /@$/.test(text);
-    })()`);
-    if (!endsWithAt) break;
+    if (!(await endsWithAt())) break;
     await pressKeyWithGap(page, 'Backspace');
   }
 }
@@ -1206,8 +1253,12 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
         break;
       }
 
-      // Picker never appeared → strip every trailing bare '@', then re-try ONE '@'.
+      // Picker never appeared → aggressively remove bare '@' (trailing + orphan
+      // text nodes). endsWith-only strip was leaving "请以@@@" on some hosts.
       await stripTrailingBareAtsAtEnd(page);
+      if (await hasOrphanBareAt(page).catch(() => false)) {
+        await stripTrailingBareAt(page);
+      }
       const caretOk = await isCaretInPromptEditor(page).catch(() => false);
       if (!caretOk) {
         await ensurePromptEditorCaret(page);
@@ -1217,6 +1268,9 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
 
     if (!atOpened) {
       await stripTrailingBareAtsAtEnd(page);
+      if (await hasOrphanBareAt(page).catch(() => false)) {
+        await stripTrailingBareAt(page);
+      }
       throw phaseError(
         'mention',
         `Rich @ mention picker did not open after ${maxAtAttempts} '@' attempt${maxAtAttempts === 1 ? '' : 's'} for ${label} (${asset.filename})`,
@@ -1273,10 +1327,8 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
         try {
           await page.sleep(MENTION_KEY_GAP_S);
           const enterGuard = await selectMentionCandidateWithGuardedEnter(page, marker, asset);
-          await page.sleep(0.4);
-          if (enterGuard?.status === 'allowed') {
-            await pressKeyWithGap(page, 'Escape', 0.12);
-          }
+          // Do NOT Escape after Enter — picker closes itself; Escape thrashs the dock.
+          await page.sleep(0.45);
           const after = await getMentionState(page, asset);
           await captureMentionDebug(page, mentionDebug, 'after-enter', asset, {
             fullAttempt: fullAttempt + 1,
@@ -1340,11 +1392,17 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
     }
 
     if (committed) {
-      // Jimeng sometimes leaves a bare '@' glyph next to the chip.
-      await stripTrailingBareAt(page);
-      await page.sleep(0.3);
-      // Safe to re-focus only AFTER the chip is committed.
-      await ensurePromptEditorCaret(page);
+      // Only edit when a bare orphan '@' is actually present. No Escape / no click
+      // when the commit is already clean — avoids dock shrink/expand thrash.
+      if (await hasOrphanBareAt(page)) {
+        await stripTrailingBareAt(page);
+      }
+      await page.sleep(0.2);
+      // Soft caret only (JS place). Do not nativeClick unless caret is missing.
+      await placeCaretAtPromptEditorEnd(page).catch(() => null);
+      if (!(await isCaretInPromptEditor(page).catch(() => false))) {
+        await ensurePromptEditorCaret(page).catch(() => null);
+      }
       return;
     }
 
@@ -1361,14 +1419,33 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
   );
 }
 
+/** True if the composer has an orphan bare '@' text node (not part of a chip). */
+async function hasOrphanBareAt(page) {
+  return page.evaluate(`(() => {
+    ${buildPromptEditorLocatorScript()}
+    const editor = findPromptEditor();
+    if (!editor) return false;
+    const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const v = walker.currentNode.nodeValue || '';
+      const lone = v === '@' || v.trim() === '@';
+      const trailing = /@$/.test(v) && !/@(?:图片|视频|音频)\\d*$/.test(v.replace(/\\s+$/, ''));
+      if (lone || trailing) return true;
+    }
+    const text = (editor.innerText || editor.textContent || '')
+      .replace(/[\\u00a0\\u200b]+/g, '')
+      .replace(/\\s+$/g, '');
+    return /@$/.test(text);
+  })()`);
+}
+
 /**
  * Remove orphan bare '@' text left beside a committed mention chip.
- * Jimeng sometimes converts only the label into a chip and leaves the '@' glyph.
- * Prefer DOM text-node surgery (select the orphan @ then Backspace) over end-of-editor backspaces.
+ * Call only when hasOrphanBareAt() is true — no Escape, no no-op edits.
  */
 async function stripTrailingBareAt(page) {
-  await page.nativeKeyPress('Escape');
-  await page.sleep(0.08);
+  // No Escape here: caller already decided there is a bare '@' to delete.
+  await placeCaretAtPromptEditorEnd(page).catch(() => null);
 
   for (let i = 0; i < 4; i += 1) {
     const selected = await page.evaluate(`(() => {
@@ -1403,11 +1480,7 @@ async function stripTrailingBareAt(page) {
   }
 
   // Fallback: if a bare '@' is still the last non-space char, delete from end once.
-  try {
-    await ensurePromptEditorCaret(page);
-  } catch {
-    await placeCaretAtPromptEditorEnd(page).catch(() => null);
-  }
+  await placeCaretAtPromptEditorEnd(page).catch(() => null);
   await page.sleep(MENTION_KEY_GAP_S);
   const endsWithAt = await page.evaluate(`(() => {
     ${buildPromptEditorLocatorScript()}

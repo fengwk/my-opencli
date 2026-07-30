@@ -191,6 +191,25 @@ describe('jimeng-agent/agent-dom — retry policy', () => {
       surface: { ready: true, fileInputCount: 1 },
     })).toEqual({ kind: 'fresh', startAssetIndex: 0 });
   });
+
+  it('forces a full reload for clear failures and collapsed composer', () => {
+    const base = {
+      retriesUsed: 0,
+      retryBudget: 2,
+      priorInPlaceRetry: false,
+      failedAssetIndex: 0,
+      surface: { ready: true, fileInputCount: 1 },
+    };
+    expect(chooseRetryPlan({
+      ...base,
+      errorPhase: 'clear-initial',
+    })).toEqual({ kind: 'fresh', startAssetIndex: 0 });
+    expect(chooseRetryPlan({
+      ...base,
+      errorPhase: 'upload',
+      composerExpanded: false,
+    })).toEqual({ kind: 'fresh', startAssetIndex: 0 });
+  });
 });
 
 describe('jimeng-agent/agent-dom — mention debug options', () => {
