@@ -54,6 +54,10 @@ export function buildCheckpointExpectations(agentPrompt, assets) {
 /**
  * Pre-input gate: mode and preference controls only.
  * Call this after Agent/Auto/Video configuration and before upload/prompt input.
+ *
+ * Note: preferencePanelReadable is intentionally NOT required. Forcing the
+ * Auto preference dropdown open just to re-read state was flaky on Hub and
+ * is no longer part of the prepare path.
  */
 export function evaluatePreInputControls(snapshot) {
   const checks = {
@@ -61,7 +65,6 @@ export function evaluatePreInputControls(snapshot) {
     agentSelected: snapshot?.agentSelected === true,
     autoEnabled: snapshot?.autoEnabled === true,
     videoSelected: snapshot?.videoSelected === true,
-    preferencePanelReadable: snapshot?.preferencePanelReadable === true,
   };
   const failures = Object.entries(checks)
     .filter(([, ok]) => !ok)

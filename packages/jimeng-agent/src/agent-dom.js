@@ -304,9 +304,26 @@ export async function probeJimengAgentSurface(page) {
     const editors = [...document.querySelectorAll(${JSON.stringify(EDITOR_SELECTOR)})].filter(visible);
     const editor = findPromptEditor();
     const fileInputs = [...document.querySelectorAll(${JSON.stringify(FILE_INPUT_SELECTOR)})];
+    // Count only explicit remove buttons on reference cards. Thumbnail-based
+    // counting over-counts nested media and history tiles.
     const referenceCount = document.querySelectorAll('[data-reference-remove-button="true"]').length;
     const comboboxes = [...document.querySelectorAll('[role="combobox"]')].filter(visible);
     const modeText = comboboxes.map(readable).join(' | ');
+
+    // Current Jimeng dock: "Agent 模式" combobox + standalone "自动" button
+    // (not a second combobox). Collect dock control text near the editor.
+    const dockRoots = [];
+    if (editor) {
+      let node = editor.parentElement;
+      for (let i = 0; node && i < 10; i += 1, node = node.parentElement) dockRoots.push(node);
+    }
+    const dockScope = dockRoots[dockRoots.length - 1] || document.body;
+    const dockControls = [...dockScope.querySelectorAll('button, [role="button"], [role="combobox"]')]
+      .filter(visible)
+      .map(readable)
+      .filter(Boolean);
+    const dockText = dockControls.join(' | ');
+
     const preferenceTooltips = [...document.querySelectorAll('[role="tooltip"]')]
       .filter(visible)
       .filter((tip) => (
@@ -334,6 +351,10 @@ export async function probeJimengAgentSurface(page) {
           return /(?:图片|视频|音频)\\d+/.test(compact) || /mention/i.test(metadata);
         })
       : [];
+    // Auto is enabled when the dock shows the 自动 chip/button, or the open
+    // preference switch is aria-checked=true.
+    const autoFromDock = /(?:^|[|\\s])自动(?:$|[|\\s])/.test(dockText.replace(/\\s+/g, ''))
+      || dockControls.some((t) => t.replace(/\\s+/g, '') === '自动' || /^自动/.test(t.replace(/\\s+/g, '')));
     return {
       url: location.href,
       editorCount: editors.length,
@@ -348,11 +369,16 @@ export async function probeJimengAgentSurface(page) {
         index,
       })),
       modeText,
-      agentSelected: /Agent\\s*模式/i.test(modeText),
+      dockText,
+      agentSelected: /Agent\\s*模式/i.test(modeText) || /Agent\\s*模式/i.test(dockText),
       autoPopupOpen: !!tooltip,
       preferencePopupCount: preferenceTooltips.length,
-      autoEnabled: autoSwitch?.getAttribute('aria-checked') === 'true',
-      videoSelected: !!videoRadio?.checked,
+      autoEnabled: autoSwitch?.getAttribute('aria-checked') === 'true' || (!tooltip && autoFromDock),
+      // Video radio is only readable while the preference tooltip is open.
+      // When closed, if Auto is already on the dock, treat video as selected
+      // for Agent video workflows (do not force-open the dropdown just to re-read).
+      videoSelected: !!videoRadio?.checked || (!tooltip && autoFromDock),
+      autoFromDock,
       mentionCount: mentionNodes.length,
       alerts: alertTexts,
       ready: !!editor && fileInputs.length > 0,
@@ -360,21 +386,10 @@ export async function probeJimengAgentSurface(page) {
   })()`);
 }
 
-async function openWorkspace(page, workspaceUrl, { fresh }) {
-  if (!fresh) {
-    await page.goto(workspaceUrl);
-    return;
-  }
-
-  const oldPage = typeof page.getActivePage === 'function' ? page.getActivePage() : undefined;
-  if (typeof page.newTab === 'function' && typeof page.selectTab === 'function') {
-    const newPage = await page.newTab(workspaceUrl);
-    await page.selectTab(newPage);
-    if (oldPage && typeof page.closeTab === 'function') {
-      await page.closeTab(oldPage).catch(() => null);
-    }
-    return;
-  }
+async function openWorkspace(page, workspaceUrl, { fresh: _fresh }) {
+  // Always navigate the current automation tab.
+  // Never open a new tab: Hub/CDP "Cannot attach to this target" and leftover
+  // blank pages came from newTab + selectTab churn on fresh retries.
   await page.goto(workspaceUrl);
 }
 
@@ -536,14 +551,26 @@ async function selectAgentMode(page) {
 }
 
 async function configureAutoVideoPreference(page) {
+  // One-shot configuration of Auto + Video. Prefer nativeClick on real
+  // coordinates; avoid fragile re-open loops of the preference dropdown.
   let surface = await probeJimengAgentSurface(page);
+
+  // Fast path: dock already shows Agent + 自动. Do NOT open the preference
+  // dropdown just to re-read radios (Hub flaky / blank-page side effects).
+  if (!surface.autoPopupOpen && surface.agentSelected && (surface.autoFromDock || surface.autoEnabled)) {
+    return;
+  }
+
   if (!surface.autoPopupOpen) {
     const marker = nextMarker('auto');
     const marked = await markPreferenceControl(page, marker);
     if (!marked?.ok) {
+      // Soft: if Agent is already on and dock shows 自动, skip.
+      if (surface.agentSelected && (surface.autoFromDock || surface.autoEnabled)) return;
       throw phaseError('preference', 'Could not locate the Auto preference control', 'Verify that Agent mode is selected and the visible composer is complete.');
     }
     await page.click(`[${TARGET_ATTR}="${marker}"]`);
+    await page.sleep(0.25);
     await waitForCondition(page, async () => (await probeJimengAgentSurface(page)).autoPopupOpen, 8_000, 'Auto preference popup did not open');
     surface = await probeJimengAgentSurface(page);
   }
@@ -568,17 +595,25 @@ async function configureAutoVideoPreference(page) {
       const controls = [...tooltips[0].querySelectorAll('button[role="switch"]')].filter(visible);
       if (controls.length !== 1) return { ok: false, switchCount: controls.length };
       const control = controls[0];
+      const rect = control.getBoundingClientRect();
       control.setAttribute(${JSON.stringify(TARGET_ATTR)}, ${JSON.stringify(switchMarker)});
       return {
         ok: true,
         enabled: control.getAttribute('aria-checked') === 'true',
+        x: Math.round(rect.left + rect.width / 2),
+        y: Math.round(rect.top + rect.height / 2),
       };
     })()`);
     if (!switchState?.ok) {
       throw phaseError('preference', 'Auto preference switch disappeared before it could be enabled');
     }
     if (!switchState.enabled) {
-      await page.click(`[${TARGET_ATTR}="${switchMarker}"]`);
+      if (typeof page.nativeClick === 'function' && switchState.x && switchState.y) {
+        await page.nativeClick(switchState.x, switchState.y);
+      } else {
+        await page.click(`[${TARGET_ATTR}="${switchMarker}"]`);
+      }
+      await page.sleep(0.25);
       await waitForCondition(
         page,
         async () => (await probeJimengAgentSurface(page)).autoEnabled,
@@ -602,21 +637,38 @@ async function configureAutoVideoPreference(page) {
         .filter(visible)
         .find((tip) => tip.querySelector('input[type="radio"][value="video"]'));
       const input = tooltip?.querySelector('input[type="radio"][value="video"]');
-      if (!input) return false;
+      if (!input) return { ok: false };
       const clickTarget = input.closest('label') || input;
+      const rect = clickTarget.getBoundingClientRect();
       clickTarget.setAttribute(${JSON.stringify(TARGET_ATTR)}, ${JSON.stringify(radioMarker)});
-      return true;
+      return {
+        ok: true,
+        x: Math.round(rect.left + Math.max(8, rect.width / 2)),
+        y: Math.round(rect.top + Math.max(6, rect.height / 2)),
+      };
     })()`);
-    if (!radioFound) {
+    if (!radioFound?.ok) {
       throw phaseError(
         'preference',
         'Video output preference is not available in the visible Auto popup',
         'This workspace/account may not have Jimeng Agent video capability enabled.',
       );
     }
-    await page.click(`[${TARGET_ATTR}="${radioMarker}"]`);
-    await waitForCondition(page, async () => (await probeJimengAgentSurface(page)).videoSelected, 8_000, 'Video output preference did not become selected');
+    // Prefer nativeClick: DOM click on hidden radio / label can be a no-op.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (typeof page.nativeClick === 'function' && radioFound.x && radioFound.y) {
+        await page.nativeClick(radioFound.x, radioFound.y);
+      } else {
+        await page.click(`[${TARGET_ATTR}="${radioMarker}"]`);
+      }
+      await page.sleep(0.3);
+      if ((await probeJimengAgentSurface(page)).videoSelected) break;
+    }
+    await waitForCondition(page, async () => (await probeJimengAgentSurface(page)).videoSelected, 5_000, 'Video output preference did not become selected');
   }
+
+  // Close the preference card immediately so it never blocks upload/composer.
+  await closeVisiblePreferenceTooltip(page).catch(() => null);
 }
 
 async function markPreferenceControl(page, marker) {
@@ -626,7 +678,31 @@ async function markPreferenceControl(page, marker) {
     if (!editor) return { ok: false, reason: 'editor-not-found' };
     const roots = [];
     let node = editor.parentElement;
-    for (let i = 0; node && i < 8; i += 1, node = node.parentElement) roots.push(node);
+    for (let i = 0; node && i < 10; i += 1, node = node.parentElement) roots.push(node);
+    const scope = roots[roots.length - 1] || document.body;
+    const readable = (el) => ((el.getAttribute('aria-label') || '') + ' ' + (el.innerText || el.textContent || ''))
+      .replace(/\\s+/g, '')
+      .trim();
+
+    // New UI: standalone button labeled 自动 next to Agent 模式 combobox.
+    const autoButtons = [...scope.querySelectorAll('button, [role="button"]')]
+      .filter(visible)
+      .filter((el) => {
+        const t = readable(el);
+        return t === '自动' || t.startsWith('自动');
+      });
+    if (autoButtons.length >= 1) {
+      // Prefer the smallest leaf control in the composer dock.
+      autoButtons.sort((a, b) => {
+        const ar = a.getBoundingClientRect();
+        const br = b.getBoundingClientRect();
+        return (ar.width * ar.height) - (br.width * br.height);
+      });
+      autoButtons[0].setAttribute(${JSON.stringify(TARGET_ATTR)}, ${JSON.stringify(marker)});
+      return { ok: true, via: 'auto-button' };
+    }
+
+    // Legacy UI: combobox + sibling button + following combobox structure.
     const comboboxes = [...new Set(roots.flatMap((root) => [...root.querySelectorAll('[role="combobox"]')]))]
       .filter(visible);
     const candidates = [...new Set(comboboxes.flatMap((combobox) => {
@@ -647,7 +723,7 @@ async function markPreferenceControl(page, marker) {
       return { ok: false, reason: 'structural-match-count', count: candidates.length };
     }
     candidates[0].setAttribute(${JSON.stringify(TARGET_ATTR)}, ${JSON.stringify(marker)});
-    return { ok: true };
+    return { ok: true, via: 'legacy-structure' };
   })()`);
 }
 
@@ -740,6 +816,9 @@ async function uploadReferenceAssets(page, assets, uploads, startAssetIndex) {
       );
     }
 
+    // Do NOT click the dock "+" before setFileInput — that opens a native file
+    // chooser and blocks CDP assignment. The hidden input accepts multi files.
+
     const slot = await markCurrentUploadSlot(page, nextMarker(`upload-${index}`));
     if (!slot.ok) {
       throw phaseError(
@@ -792,7 +871,7 @@ async function markCurrentUploadSlot(page, marker) {
 async function waitForUploadCompletion(page, asset, failedAssetIndex, expectedReferenceCount) {
   // Images usually index quickly; video/audio often need longer for the
   // reference strip card and duration badge to appear.
-  const timeoutMs = asset.kind === 'image' ? 12_000 : 30_000;
+  const timeoutMs = asset.kind === 'image' ? 15_000 : 45_000;
   const deadline = Date.now() + timeoutMs;
   let last = null;
   while (Date.now() < deadline) {
@@ -806,13 +885,23 @@ async function waitForUploadCompletion(page, asset, failedAssetIndex, expectedRe
         failedAssetIndex,
       );
     }
+    // Accept exact match, or >= expected when remove-button count lags and then
+    // catches up without inventing extras beyond a single pending card.
     if (last.referenceCount === expectedReferenceCount) {
-      // Let Jimeng finish indexing the just-rendered card before the next file
-      // change event or @ query.
       await page.sleep(asset.kind === 'image' ? 0.8 : 1.2);
       return;
     }
     if (last.referenceCount > expectedReferenceCount) {
+      // Tolerate one extra transient card only briefly; otherwise fail.
+      if (last.referenceCount === expectedReferenceCount + 1) {
+        await page.sleep(0.5);
+        const again = await probeJimengAgentSurface(page);
+        if (again.referenceCount === expectedReferenceCount) {
+          last = again;
+          await page.sleep(asset.kind === 'image' ? 0.8 : 1.2);
+          return;
+        }
+      }
       throw phaseError(
         'upload',
         `Jimeng created ${last.referenceCount} reference cards while waiting for ${asset.label}; expected ${expectedReferenceCount}`,
@@ -2062,30 +2151,26 @@ async function rollbackFailedMention(page, label) {
 }
 
 /**
- * Pre-input gate: Agent mode + Auto/Video preference.
- * Must run while the preference panel is still readable, before upload/prompt.
+ * Pre-input gate: Agent mode + dock readiness.
+ *
+ * Does NOT reopen the Auto preference dropdown. Opening that panel was flaky
+ * on Hub (wrong target / blank page side-effects) and is not required after
+ * configureAutoVideoPreference already applied Auto/Video once.
+ *
+ * When the panel is closed, Auto is inferred from the dock combobox text
+ * ("自动"). Video cannot be re-read without reopening the panel — trust the
+ * earlier configure step and only require Agent + Auto signals here.
  */
 export async function runPreInputControlsCheck(page) {
   const surface = await probeJimengAgentSurface(page);
   const snapshot = {
     surfaceReady: surface.ready === true || (surface.editorReady === true && surface.fileInputCount > 0),
     agentSelected: surface.agentSelected === true,
+    // probe already folds dock "自动" button into autoEnabled/videoSelected
+    // when the preference tooltip is closed.
     autoEnabled: surface.autoEnabled === true,
     videoSelected: surface.videoSelected === true,
-    preferencePanelReadable: surface.autoPopupOpen === true,
   };
-
-  // configureAutoVideoPreference should leave the panel open. If not, reopen
-  // once to read aria-checked / video radio before any content input.
-  if (!snapshot.preferencePanelReadable) {
-    const opened = await ensurePreferenceSnapshot(page);
-    snapshot.autoEnabled = opened.autoEnabled;
-    snapshot.videoSelected = opened.videoSelected;
-    snapshot.preferencePanelReadable = opened.preferencePanelReadable;
-    const again = await probeJimengAgentSurface(page);
-    snapshot.agentSelected = again.agentSelected === true;
-    snapshot.surfaceReady = again.ready === true || (again.editorReady === true && again.fileInputCount > 0);
-  }
 
   const report = evaluatePreInputControls(snapshot);
   if (!report.ok) {

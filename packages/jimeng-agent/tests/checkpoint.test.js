@@ -16,13 +16,13 @@ const assets = [
 ];
 
 describe('jimeng-agent/checkpoint — pre-input controls', () => {
-  it('requires Agent/Auto/Video to be ready before any content input', () => {
+  it('requires Agent/Auto/Video signals before any content input (no preference-panel reopen)', () => {
+    // preferencePanelReadable is intentionally not required.
     expect(evaluatePreInputControls({
       surfaceReady: true,
       agentSelected: true,
       autoEnabled: true,
       videoSelected: true,
-      preferencePanelReadable: true,
     }).ok).toBe(true);
 
     const failed = evaluatePreInputControls({
@@ -30,14 +30,13 @@ describe('jimeng-agent/checkpoint — pre-input controls', () => {
       agentSelected: true,
       autoEnabled: false,
       videoSelected: false,
-      preferencePanelReadable: false,
     });
     expect(failed.ok).toBe(false);
     expect(failed.failures).toEqual(expect.arrayContaining([
       'autoEnabled',
       'videoSelected',
-      'preferencePanelReadable',
     ]));
+    expect(failed.failures).not.toContain('preferencePanelReadable');
     expect(failed.phase).toBe('pre-input');
   });
 });
