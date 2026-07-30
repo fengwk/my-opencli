@@ -2,7 +2,7 @@
 
 Jimeng Agent workflow for video prompts with local references.
 
-The `ask` command:
+The `video` command:
 
 1. Clears leftover composer text and reference cards.
 2. Selects Agent mode.
@@ -18,7 +18,7 @@ The `ask` command:
 
 ```bash
 opencli plugin install /path/to/my-opencli/packages/jimeng-agent
-opencli jimeng-agent ask --help
+opencli jimeng-agent video --help
 opencli jimeng-agent status --help
 ```
 
@@ -26,7 +26,7 @@ opencli jimeng-agent status --help
 
 ```bash
 # Prepare only (default): green checkpoint required, no generation cost
-OPENCLI_BROWSER_COMMAND_TIMEOUT=300 opencli jimeng-agent ask \
+OPENCLI_BROWSER_COMMAND_TIMEOUT=300 opencli jimeng-agent video \
   --workspace <workspace-id> \
   --image ./人物.png \
   --prompt '请以@图片1作为人物形象参考。' \
@@ -36,7 +36,7 @@ OPENCLI_BROWSER_COMMAND_TIMEOUT=300 opencli jimeng-agent ask \
   --submit 0
 
 # Formal submit after the same checkpoint passes
-OPENCLI_BROWSER_COMMAND_TIMEOUT=300 opencli jimeng-agent ask \
+OPENCLI_BROWSER_COMMAND_TIMEOUT=300 opencli jimeng-agent video \
   --workspace <workspace-id> \
   --image ./人物.png \
   --video ./动作.mp4 \
@@ -51,7 +51,7 @@ OPENCLI_BROWSER_COMMAND_TIMEOUT=300 opencli jimeng-agent ask \
 Reference flags are repeatable. Labels are assigned independently by media kind
 and upload order: `图片1`, `图片2`, `视频1`, `音频1`, and so on.
 
-Each `ask` run auto-generates a 16-char hex `assetId`, embeds `资产编号：<id>` into
+Each `video` run auto-generates a 16-char hex `assetId`, embeds `资产编号：<id>` into
 the agent prompt, and returns it in the CLI result for later `status --search_key`.
 
 ## Two-phase gates

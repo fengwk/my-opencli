@@ -102,8 +102,8 @@ opencli chatgpt-agent ask '读这两个附件并概括' \
 # images export dir
 opencli chatgpt-agent ask '画一只猫' --op ~/Pictures/chatgpt-agent
 
-# prepare a Jimeng Agent draft (default --submit 0); result includes auto assetId
-opencli jimeng-agent ask \
+# prepare a Jimeng Agent video draft (default --submit 0); result includes auto assetId
+opencli jimeng-agent video \
   --workspace <workspace-id> \
   --image ./人物.png \
   --prompt '请以@图片1作为人物形象参考。' \
@@ -112,7 +112,7 @@ opencli jimeng-agent ask \
   --model_version seedance2.0
 
 # optional formal submit after checkpoint, then search/download by assetId
-opencli jimeng-agent ask ... --submit 1
+opencli jimeng-agent video ... --submit 1
 opencli jimeng-agent status --workspace <workspace-id> --search_key <assetId> --download 1
 ```
 
@@ -137,8 +137,8 @@ npm run validate:syntax
 
 Release process (maintainers):
 
-1. Keep plugin / root versions at the intended release (currently **`0.1.11`** for the next tag).
-2. Push tag **`v<opencli-plugin.json version>`** exactly (e.g. `v0.1.11`). Do **not** move an existing published tag such as `v0.1.0`.
+1. Keep plugin / root versions at the intended release (currently **`0.1.12`** for the next tag).
+2. Push tag **`v<opencli-plugin.json version>`** exactly (e.g. `v0.1.12`). Do **not** move an existing published tag such as `v0.1.0`.
 3. GitHub Actions `release.yml` runs the same checks, verifies the tag string, then creates a **GitHub Release with generated notes**.
 4. No `npm publish` and no binary artifacts — consumers install from git/path only. Remote install still follows the default branch (see **Version pinning limitation** above); tags document known-good trees but are not install pins.
 

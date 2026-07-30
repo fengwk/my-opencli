@@ -1,8 +1,8 @@
 /**
- * jimeng-agent ask — pure command-contract normalization.
+ * jimeng-agent video — pure command-contract normalization.
  *
  * This module is intentionally PREPARE-ONLY. It validates and reshapes the
- * OpenCLI kwarg surface for the future `opencli jimeng-agent ask` command and
+ * OpenCLI kwarg surface for the `opencli jimeng-agent video` command and
  * assembles the exact `agentPrompt` text the LLM-facing surface requires.
  *
  * No browser I/O, no submission, no generation. Anything that needs to talk
@@ -146,7 +146,7 @@ const CANONICAL_KEYS = Object.freeze([
 
 /**
  * Normalize, validate, and assemble the contract payload for
- * `opencli jimeng-agent ask`. Fail-closed: any malformed input throws
+ * `opencli jimeng-agent video`. Fail-closed: any malformed input throws
  * ArgumentError before any caller can do work with the result.
  *
  * @param {object} [kwargs={}]

@@ -9,9 +9,9 @@ import { prepareJimengAgentAsk, JIMENG_DOMAIN } from './src/agent-dom.js';
 import { normalizeAskArgs } from './src/contract.js';
 import { prepareBrowserReferenceAssets } from './src/media.js';
 
-export const askCommand = cli({
+export const videoCommand = cli({
   site: 'jimeng-agent',
-  name: 'ask',
+  name: 'video',
   access: 'write',
   description: 'Prepare Jimeng Agent video draft, require a green checkpoint, optionally submit with --submit 1',
   domain: JIMENG_DOMAIN,
