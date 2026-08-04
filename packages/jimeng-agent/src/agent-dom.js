@@ -1204,12 +1204,17 @@ async function waitForUploadCompletion(page, asset, failedAssetIndex, baselineCa
     if (newCards.length > 0) {
       const processing = newCards.some((card) => isProcessingCard(card));
       const ready = !processing && (!sawBusy || !snap.busy);
+      // Require exactly ONE new card per upload: Jimeng can transiently create
+      // a duplicate processing card on slow hosts; confirming two cards would
+      // shift @图片N numbering and the next pre-upload gate would fail
+      // ('found 4' ghost-card pattern). A single stable card is the contract.
+      const single = newCards.length === 1;
       // Require the same new-card set (identity) twice in a row so a
       // transient re-render does not count as "upload complete".
       const sameSet = lastCards !== null
         && lastCards.size === newIds.size
         && [...newIds].every((id) => lastCards.has(id));
-      if (ready && sameSet) {
+      if (ready && sameSet && single) {
         stablePolls += 1;
       } else {
         stablePolls = 0;
