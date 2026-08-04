@@ -1047,13 +1047,26 @@ async function uploadReferenceAssets(page, assets, uploads, startAssetIndex, bas
   for (let index = startAssetIndex; index < assets.length; index += 1) {
     const asset = assets[index];
     const before = await collectDockReferenceSnapshot(page);
-    // baselineSlots = unremovable empty upload slots kept from the draft; they
-    // never expose an asset to the mention picker, so upload accounting counts
-    // cards beyond them (or filled into them).
-    if (before.count !== baselineSlots + index) {
+    // Empty upload slots are unremovable placeholders that never expose an
+    // asset to the mention picker, and Jimeng may add/fill them differently
+    // on slow hosts (dock-input fallback creates card+slot instead of filling
+    // the existing slot). Count only real media cards: exactly `index` cards
+    // must be confirmed before the next upload, regardless of slot count.
+    const mediaCardCount = (before.cards || []).filter((card) => !isUploadSlotEntry(card)).length;
+    if (mediaCardCount !== index) {
+      const cardDump = (before.cards || []).map((card) => ({
+        id: card.identity,
+        slot: card.hasUploadSlot,
+        img: !!card.mediaSrc,
+        spin: card.hasSpin,
+        mask: card.hasMask,
+        remove: card.hasRemoveBtn,
+        cls: (card.classes || []).join(' ').slice(0, 50),
+      }));
       throw phaseError(
         'upload',
-        `Expected ${baselineSlots + index} confirmed Jimeng reference card(s) before ${asset.label} (${baselineSlots} slot(s) + ${index} upload(s)), found ${before.count}`,
+        `Expected ${index} confirmed Jimeng media card(s) before ${asset.label} (${index} upload(s)), found ${mediaCardCount}`
+        + ` (slots=${before.count - mediaCardCount}, details=${JSON.stringify(cardDump)})`,
         'No generation was submitted. The upload sequence stopped before writing the prompt.',
         index,
       );
