@@ -138,4 +138,18 @@ describe('jimeng-agent/upload-state — busy and failure text', () => {
     expect(hasUploadFailureText('upload failed')).toBe(true);
     expect(hasUploadFailureText('上传中')).toBe(false);
   });
+
+  it('detects content-moderation rejections', () => {
+    expect(hasUploadFailureText('图片审核未通过，请更换素材')).toBe(true);
+    expect(hasUploadFailureText('素材未通过审核')).toBe(true);
+    expect(hasUploadFailureText('内容违规，上传被拒绝')).toBe(true);
+    expect(hasUploadFailureText('检测到敏感内容，无法使用')).toBe(true);
+    expect(hasUploadFailureText('拒绝上传该素材')).toBe(true);
+    // Jimeng's actual rejection UI: card badge "未通过" + toast without the
+    // word 审核 ("可能涉及与公众人物相似的肖像").
+    expect(hasUploadFailureText('未通过')).toBe(true);
+    expect(hasUploadFailureText('该参考图可能涉及与公众人物相似的肖像，未通过审核')).toBe(true);
+    // "审核通过" success messages must not count as failures.
+    expect(hasUploadFailureText('素材审核通过')).toBe(false);
+  });
 });

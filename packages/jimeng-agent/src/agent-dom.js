@@ -380,6 +380,7 @@ async function collectDockReferenceSnapshot(page) {
           return {
             classes: [...el.classList],
             dataIndex: el.getAttribute('data-index'),
+            text: (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 80),
             hasSpin: !!el.querySelector('.spin, [class*="spin-"]'),
             hasMask: !!el.querySelector('[class*="mask-"]'),
             hasRemoveBtn: !!el.querySelector('[data-reference-remove-button="true"]'),
@@ -394,7 +395,14 @@ async function collectDockReferenceSnapshot(page) {
           };
         }),
       }));
-    return { ok: true, editorTop, bodyText, strips };
+    // Scoped failure signals for THIS upload: rejected-card badges and
+    // live toasts/alerts. document.body text mixes in chat history, so the
+    // rejection text must come from scoped elements, not bodyText tails.
+    const scopedFailures = [...document.querySelectorAll('[role="alert"], [class*="toast-"], [class^="toast"], [class*="Toast"]')]
+      .filter(visible)
+      .map((el) => (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim())
+      .filter((text) => text && /未通过|不通过|失败|违规|拒绝|审核|敏感|上传/.test(text));
+    return { ok: true, editorTop, bodyText, alerts: scopedFailures, strips };
   })()`);
 
   if (!raw?.ok) {
@@ -432,6 +440,13 @@ async function collectDockReferenceSnapshot(page) {
   const processingCards = cards.filter((card) => isProcessingCard(card));
   const busy = hasUploadBusyText(raw.bodyText) || processingCards.length > 0;
   const failure = hasUploadFailureText(raw.bodyText);
+  // Prefer THIS-upload signals over the whole-body text: a rejected card's
+  // badge text and live toast/alert messages, in that order.
+  const rejectedCardText = cards
+    .map((card) => card.text || '')
+    .find((text) => /未通过|不通过|失败|违规|拒绝|审核|敏感/.test(text)) || '';
+  const alertText = (raw.alerts || []).join(' | ');
+  const failureText = rejectedCardText || alertText || '';
   const countFromStyle = raw.strips
     .map((strip) => parseReferenceCountStyle(strip.groupStyle))
     .find((value) => value !== null);
@@ -440,6 +455,8 @@ async function collectDockReferenceSnapshot(page) {
     ok: true,
     editorTop: raw.editorTop,
     bodyText: raw.bodyText,
+    alerts: raw.alerts || [],
+    failureText,
     strips: raw.strips.length,
     count,
     countFromStyle,
@@ -1103,9 +1120,9 @@ async function markCurrentUploadSlot(page, marker) {
 }
 
 async function waitForUploadCompletion(page, asset, failedAssetIndex, baselineCards, baselineCount) {
-  // Images usually index quickly; video/audio often need longer for the
-  // reference strip card and duration badge to appear.
-  const timeoutMs = asset.kind === 'image' ? 30_000 : 60_000;
+  // Images usually index quickly, but content-moderation can keep the card in
+  // the processing state for a while; video/audio often need longer anyway.
+  const timeoutMs = asset.kind === 'image' ? 45_000 : 60_000;
   const deadline = Date.now() + timeoutMs;
   const baseline = new Set((baselineCards || []).filter((card) => card?.identity).map((card) => card.identity));
   // Empty upload slots can be filled in place by an upload (audio cards carry
@@ -1122,10 +1139,15 @@ async function waitForUploadCompletion(page, asset, failedAssetIndex, baselineCa
   while (Date.now() < deadline) {
     const snap = await collectDockReferenceSnapshot(page);
     if (snap.failure) {
+      const moderationHint = /审核|未通过|不通过|违规|敏感|拒绝|content.*review|violat/i.test(
+        snap.failureText || String(snap.bodyText || ''),
+      );
       throw phaseError(
         'upload',
-        `Jimeng rejected ${asset.label} (${asset.filename}): ${snap.bodyText.slice(-160)}`,
-        'No generation was submitted. The visible UI rejected this file; check account/workspace entitlement and retry later.',
+        `Jimeng rejected ${asset.label} (${asset.filename}): ${snap.failureText || snap.bodyText.slice(-160)}`,
+        moderationHint
+          ? 'No generation was submitted. The visible UI rejected this asset — likely by content moderation. Check the file content and retry with a different asset.'
+          : 'No generation was submitted. The visible UI rejected this file; check account/workspace entitlement and retry later.',
         failedAssetIndex,
       );
     }
@@ -2417,12 +2439,30 @@ async function typeMentionAsciiKey(page, char) {
 }
 
 async function insertSoftBreak(page) {
-  await clickPromptEditorEnd(page);
-  await focusPromptEditorEnd(page);
-  // Shift modifier bit = 8. Do not use bare nativeKeyPress('Enter'): current
-  // Chrome drops incomplete Enter descriptors (no code / no text).
-  await dispatchEnterKey(page, 8);
-  await page.sleep(0.25);
+  // Verify the break actually landed: Shift+Enter can be swallowed when the
+  // editor just committed a mention (flaky lineStructure checkpoints).
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await clickPromptEditorEnd(page);
+    await focusPromptEditorEnd(page);
+    // Shift modifier bit = 8. Do not use bare nativeKeyPress('Enter'): current
+    // Chrome drops incomplete Enter descriptors (no code / no text).
+    await dispatchEnterKey(page, 8);
+    await page.sleep(0.25);
+    const broke = await page.evaluate(`(() => {
+      ${buildPromptEditorLocatorScript()}
+      const editor = findPromptEditor();
+      if (!editor) return false;
+      const text = editor.innerText || '';
+      if (text.endsWith('\\n')) return true;
+      const blocks = [...editor.children].filter((el) => {
+        const cls = String(el.className || '');
+        return cls.includes('paragraph') || el.tagName === 'P' || el.tagName === 'BR';
+      });
+      return blocks.length >= 2;
+    })()`);
+    if (broke) return;
+    await page.sleep(0.2);
+  }
 }
 
 function buildMentionCandidateExpression(asset, marker) {

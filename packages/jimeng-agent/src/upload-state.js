@@ -135,10 +135,14 @@ export function hasUploadBusyText(bodyText) {
 }
 
 /**
- * True when the text shows a hard upload failure (alert/error).
+ * True when the text shows a hard upload failure (alert/error), including
+ * content-moderation rejections. Jimeng renders the rejected card with a
+ * plain "未通过" badge and a toast such as "可能涉及与公众人物相似的肖像"
+ * — the word "审核" is often absent, so 未通过/不通过 alone counts as a
+ * failure (the normal page never shows those words).
  */
 export function hasUploadFailureText(bodyText) {
-  return /上传失败|素材.*失败|解析失败|上传出错|upload.*fail|failed to upload/i.test(
+  return /上传失败|素材.*失败|解析失败|上传出错|未通过|不通过|违规|敏感|拒绝.*(?:上传|素材)|upload.*fail|failed to upload|content.*review/i.test(
     String(bodyText || ''),
   );
 }
