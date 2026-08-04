@@ -1034,6 +1034,9 @@ async function clearReferenceAssets(page) {
         'No generation was submitted. Inspect the visible reference strip and retry.',
       );
     }
+    // Keep the pointer away from the strip/history between deletions so no
+    // prompt-tooltip overlay can cover the next card's hover target.
+    await parkMouseAtComposer(page);
   }
 
   throw phaseError(
@@ -1041,6 +1044,25 @@ async function clearReferenceAssets(page) {
     `Jimeng still exposes reference cards after ${maxReferences} removal attempts`,
     'No generation was submitted. The reference strip exceeded the safe cleanup bound.',
   );
+}
+
+/**
+ * Park the mouse over the prompt editor (safe zone). CDP mouse moves leave the
+ * pointer parked at the last hovered element; if that is a reference/history
+ * card, Jimeng raises its prompt-tooltip overlay which covers the composer and
+ * breaks later hover/click work. Moving to the editor keeps the overlay away
+ * without changing focus (move only, never click).
+ */
+async function parkMouseAtComposer(page) {
+  const rect = await page.evaluate(`(() => {
+    ${buildPromptEditorLocatorScript()}
+    const editor = findPromptEditor();
+    if (!editor) return null;
+    const r = editor.getBoundingClientRect();
+    return { x: Math.round(r.left + Math.min(r.width / 2, 200)), y: Math.round(r.top + Math.min(r.height / 2, 24)) };
+  })()`).catch(() => null);
+  if (!rect) return;
+  await page.cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: rect.x, y: rect.y }).catch(() => null);
 }
 
 async function uploadReferenceAssets(page, assets, uploads, startAssetIndex, baselineSlots) {
@@ -1106,6 +1128,10 @@ async function uploadReferenceAssets(page, assets, uploads, startAssetIndex, bas
       before.cards,
       before.count,
     );
+    // The upload-wait loop never moves the mouse; it stays parked where the
+    // last clear hover ended. Move it to the composer so no history-card
+    // tooltip overlay can rise during the next upload's wait.
+    await parkMouseAtComposer(page);
     uploads[index] = asset;
     uploads.length = index + 1;
   }
