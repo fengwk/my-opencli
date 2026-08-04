@@ -192,7 +192,7 @@ describe('jimeng-agent/agent-dom — retry policy', () => {
     })).toEqual({ kind: 'fresh', startAssetIndex: 0 });
   });
 
-  it('forces a full reload for clear failures and collapsed composer', () => {
+  it('forces a full reload for clear failures', () => {
     const base = {
       retriesUsed: 0,
       retryBudget: 2,
@@ -203,11 +203,6 @@ describe('jimeng-agent/agent-dom — retry policy', () => {
     expect(chooseRetryPlan({
       ...base,
       errorPhase: 'clear-initial',
-    })).toEqual({ kind: 'fresh', startAssetIndex: 0 });
-    expect(chooseRetryPlan({
-      ...base,
-      errorPhase: 'upload',
-      composerExpanded: false,
     })).toEqual({ kind: 'fresh', startAssetIndex: 0 });
   });
 });

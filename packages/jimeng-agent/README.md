@@ -60,15 +60,17 @@ the agent prompt, and returns it in the CLI result for later `status --search_ke
 
 - Surface ready
 - Agent mode selected
-- Auto preference enabled
+- Auto preference enabled (read from the dock 自动 button when the panel is closed)
 - Video preference selected
-- Preference panel is readable at check time
 
-Failure phase: `pre-input`.
+Failure phase: `pre-input`. The Auto preference panel is **not** force-opened to
+re-read state (that was flaky on Hub); the dock's 自动 button is the source of
+truth once configured.
 
 ### Content checkpoint (after prompt is filled)
 
-- Reference card count matches uploaded assets
+- Reference card count matches uploaded assets (dock reference strip only;
+  empty upload slots kept from a restored draft are excluded)
 - Rich mention count/order matches the prompt
 - No raw `@` leftovers and no open mention menu
 - Prompt line structure matches the assembled agent prompt

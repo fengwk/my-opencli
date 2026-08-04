@@ -27,6 +27,16 @@ import {
   normalizePromptValidationText as normalizeCheckpointText,
 } from './checkpoint.js';
 
+import {
+  cardIdentity,
+  hasUploadBusyText,
+  hasUploadFailureText,
+  isNewUploadCard,
+  isProcessingCard,
+  isUploadSlotEntry,
+  parseReferenceCountStyle,
+} from './upload-state.js';
+
 export const JIMENG_DOMAIN = 'jimeng.jianying.com';
 export const JIMENG_GENERATE_URL = `https://${JIMENG_DOMAIN}/ai-tool/generate`;
 
@@ -148,8 +158,9 @@ export function buildMentionSegments(agentPrompt, assets) {
  * auditable. An in-page retry is allowed once for a healthy failed upload;
  * any later retry opens a fresh workspace and starts from the first asset.
  *
- * Clear/composer-collapsed failures always prefer a full page reload — in-page
- * resume is too weak when the dock is tucked away or reference cards are stuck.
+ * Clear/mention/prompt/surface failures always prefer a full page reload —
+ * in-page resume is too weak when reference cards are stuck or the composer
+ * is in an unknown state.
  */
 export function chooseRetryPlan({
   retriesUsed,
@@ -158,7 +169,6 @@ export function chooseRetryPlan({
   errorPhase,
   failedAssetIndex,
   surface,
-  composerExpanded = true,
 }) {
   if (retriesUsed >= retryBudget) return { kind: 'stop' };
 
@@ -170,7 +180,7 @@ export function chooseRetryPlan({
     'prompt',
     'surface',
   ]);
-  if (forceFreshPhases.has(errorPhase) || composerExpanded === false) {
+  if (forceFreshPhases.has(errorPhase)) {
     return { kind: 'fresh', startAssetIndex: 0 };
   }
 
@@ -181,7 +191,6 @@ export function chooseRetryPlan({
     && failedAssetIndex >= 0
     && surface?.ready === true
     && surface.fileInputCount > 0
-    && composerExpanded !== false
   ) {
     return { kind: 'resume', startAssetIndex: failedAssetIndex };
   }
@@ -210,19 +219,23 @@ export async function prepareJimengAgentAsk(page, canonical, preparedAssets) {
   let priorInPlaceRetry = false;
   let startAssetIndex = 0;
   let clearRefreshUsed = false;
+  let baselineSlots = 0;
   const mentionDebug = createMentionDebugSession(resolveMentionDebugOptions());
 
-  await openWorkspace(page, workspaceUrl, { fresh: false });
+  // Always start with a fresh reload: chat history + leftover reference cards
+  // are otherwise invisible to clearReferenceAssets (X only on hover) and
+  // would inflate the referenceCount for the next upload.
+  await openWorkspace(page, workspaceUrl);
 
   while (true) {
     try {
-      // If history scrolled up mid-session, reload once before any work.
-      if (!(await isComposerExpanded(page).catch(() => false))) {
-        await openWorkspace(page, workspaceUrl, { fresh: true });
-      }
       await waitForAgentSurface(page);
+      if (process.env.OPENCLI_JIMENG_SURFACE_VERBOSE) {
+        const s = await probeJimengAgentSurface(page);
+        console.error(`[jimeng-agent] surface modeText=${JSON.stringify(s.modeText)} dockText=${JSON.stringify(s.dockText)} agentSelected=${s.agentSelected} autoEnabled=${s.autoEnabled} videoSelected=${s.videoSelected} autoFromDock=${s.autoFromDock} autoPopupOpen=${s.autoPopupOpen} editorReady=${s.editorReady} fileInputs=${s.fileInputCount}`);
+      }
       if (startAssetIndex === 0) {
-        await clearInitialDraftState(page);
+        baselineSlots = await clearInitialDraftState(page);
       }
       await selectAgentMode(page);
       await configureAutoVideoPreference(page);
@@ -230,19 +243,11 @@ export async function prepareJimengAgentAsk(page, canonical, preparedAssets) {
       // here, then close it before any upload/prompt typing.
       await runPreInputControlsCheck(page);
       await closeVisiblePreferenceTooltip(page);
-      await uploadReferenceAssets(page, preparedAssets, uploads, startAssetIndex);
+      await uploadReferenceAssets(page, preparedAssets, uploads, startAssetIndex, baselineSlots);
       // Jimeng may insert an uploaded reference chip at the document start.
       // Match the established flow: clear that platform-added draft state
       // before writing the canonical prompt and its explicit @ mentions.
       await clearComposer(page, 'clear-after-upload');
-      // Re-check dock before typing: upload UI can leave history scrolled up.
-      if (!(await isComposerExpanded(page).catch(() => false))) {
-        throw phaseError(
-          'surface',
-          'Jimeng composer collapsed after upload (回到底部 / dock not expanded)',
-          'No generation was submitted. The page will reload and retry when budget allows.',
-        );
-      }
       await fillPromptWithRichMentions(page, canonical.agentPrompt, preparedAssets, mentionDebug);
 
       const checkpoint = await runContentCheckpoint(
@@ -274,7 +279,6 @@ export async function prepareJimengAgentAsk(page, canonical, preparedAssets) {
         ready: false,
         fileInputCount: 0,
       }));
-      const composerExpanded = await isComposerExpanded(page).catch(() => false);
 
       // Clear-path failures: always hard-reload (not soft same-URL skip).
       if (
@@ -287,7 +291,7 @@ export async function prepareJimengAgentAsk(page, canonical, preparedAssets) {
         priorInPlaceRetry = false;
         startAssetIndex = 0;
         uploads.splice(0);
-        await openWorkspace(page, workspaceUrl, { fresh: true });
+        await openWorkspace(page, workspaceUrl);
         continue;
       }
 
@@ -298,7 +302,6 @@ export async function prepareJimengAgentAsk(page, canonical, preparedAssets) {
         errorPhase: failure.phase,
         failedAssetIndex: failure.failedAssetIndex,
         surface,
-        composerExpanded,
       });
 
       if (plan.kind === 'stop') {
@@ -319,9 +322,132 @@ export async function prepareJimengAgentAsk(page, canonical, preparedAssets) {
       priorInPlaceRetry = false;
       startAssetIndex = 0;
       uploads.splice(0);
-      await openWorkspace(page, workspaceUrl, { fresh: true });
+      await openWorkspace(page, workspaceUrl);
     }
   }
+}
+
+/**
+ * Collect raw reference-strip facts from the visible dock.
+ *
+ * The dock reference strip (`references-<hash>`) only renders while cards
+ * exist, so an absent strip means zero cards. History-message chips use
+ * different classes and are excluded by filtering candidates to the dock
+ * band around the prompt editor and away from history containers.
+ *
+ * Returns plain data; the stable derivations (card count / identity /
+ * processing) are computed here in Node from the pure helpers so the
+ * decisions are unit-testable.
+ */
+async function collectDockReferenceSnapshot(page) {
+  const raw = await page.evaluate(`(() => {
+    ${buildPromptEditorLocatorScript()}
+    // \`visible\` comes from buildPromptEditorLocatorScript().
+    const editor = findPromptEditor();
+    const bodyText = (document.body.innerText || '').replace(/\\s+/g, ' ');
+    const editorRect = editor ? editor.getBoundingClientRect() : null;
+    const editorTop = editorRect ? editorRect.top : -1;
+    const editorBottom = editorRect ? editorRect.bottom : -1;
+    const stripCandidates = [...document.querySelectorAll('[class]')]
+      .filter((el) => [...el.classList].some((c) => /^references-[A-Za-z0-9_-]+$/.test(c)));
+    const strips = stripCandidates
+      .filter((strip) => {
+        if (!visible(strip)) return false;
+        const rect = strip.getBoundingClientRect();
+        // The dock strip sits on the same row as the composer, never far
+        // above it (history bubbles sit much higher).
+        if (editorTop >= 0 && (rect.top < editorTop - 220 || rect.top > editorBottom + 60)) {
+          return false;
+        }
+        // Skip strips nested inside obvious history containers.
+        for (let node = strip.parentElement; node; node = node.parentElement) {
+          if (/record|message|history/i.test(String(node.className || '')) && !node.querySelector('.tiptap')) {
+            return false;
+          }
+        }
+        return true;
+      })
+      .map((strip) => ({
+        classes: [...strip.classList],
+        groupStyle: (() => {
+          const group = [...strip.querySelectorAll('[class]')].find((el) =>
+            [...el.classList].some((c) => /^reference-group-[A-Za-z0-9_-]+$/.test(c)));
+          return group ? group.getAttribute('style') || '' : '';
+        })(),
+        descendants: [...strip.querySelectorAll('[class]')].map((el) => {
+          const media = el.querySelector('img[src], video[src], audio[src]');
+          const rect = el.getBoundingClientRect();
+          return {
+            classes: [...el.classList],
+            dataIndex: el.getAttribute('data-index'),
+            hasSpin: !!el.querySelector('.spin, [class*="spin-"]'),
+            hasMask: !!el.querySelector('[class*="mask-"]'),
+            hasRemoveBtn: !!el.querySelector('[data-reference-remove-button="true"]'),
+            hasUploadSlot: !!el.querySelector('[class*="reference-upload-"]'),
+            mediaSrc: media
+              ? media.getAttribute('src') || media.getAttribute('poster') || null
+              : null,
+            top: Math.round(rect.top),
+            left: Math.round(rect.left),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height),
+          };
+        }),
+      }));
+    return { ok: true, editorTop, bodyText, strips };
+  })()`);
+
+  if (!raw?.ok) {
+    return {
+      ok: false,
+      editorTop: -1,
+      bodyText: '',
+      strips: 0,
+      count: 0,
+      cards: [],
+      busy: false,
+      failure: false,
+    };
+  }
+
+  const cards = [];
+  for (const strip of raw.strips || []) {
+    for (const entry of strip.descendants || []) {
+      let isCard = false;
+      for (const name of entry.classes || []) {
+        if (name.startsWith('reference-item-content-')) {
+          isCard = false;
+          break;
+        }
+        if (name.startsWith('reference-item-')) {
+          isCard = true;
+          break;
+        }
+      }
+      if (isCard) cards.push({ ...entry, identity: cardIdentity(entry) });
+    }
+  }
+
+  const count = cards.length;
+  const processingCards = cards.filter((card) => isProcessingCard(card));
+  const busy = hasUploadBusyText(raw.bodyText) || processingCards.length > 0;
+  const failure = hasUploadFailureText(raw.bodyText);
+  const countFromStyle = raw.strips
+    .map((strip) => parseReferenceCountStyle(strip.groupStyle))
+    .find((value) => value !== null);
+
+  return {
+    ok: true,
+    editorTop: raw.editorTop,
+    bodyText: raw.bodyText,
+    strips: raw.strips.length,
+    count,
+    countFromStyle,
+    cards,
+    processing: processingCards.length,
+    busy,
+    failure,
+  };
 }
 
 /**
@@ -329,7 +455,7 @@ export async function prepareJimengAgentAsk(page, canonical, preparedAssets) {
  * does not call hidden application endpoints or inspect internal stores.
  */
 export async function probeJimengAgentSurface(page) {
-  return page.evaluate(`(() => {
+  const surface = await page.evaluate(`(() => {
     ${buildPromptEditorLocatorScript()}
     const readable = (el) => ((el.getAttribute('aria-label') || '') + ' ' + (el.innerText || el.textContent || ''))
       .replace(/\\s+/g, ' ')
@@ -337,9 +463,6 @@ export async function probeJimengAgentSurface(page) {
     const editors = [...document.querySelectorAll(${JSON.stringify(EDITOR_SELECTOR)})].filter(visible);
     const editor = findPromptEditor();
     const fileInputs = [...document.querySelectorAll(${JSON.stringify(FILE_INPUT_SELECTOR)})];
-    // Count only explicit remove buttons on reference cards. Thumbnail-based
-    // counting over-counts nested media and history tiles.
-    const referenceCount = document.querySelectorAll('[data-reference-remove-button="true"]').length;
     const comboboxes = [...document.querySelectorAll('[role="combobox"]')].filter(visible);
     const modeText = comboboxes.map(readable).join(' | ');
 
@@ -394,7 +517,6 @@ export async function probeJimengAgentSurface(page) {
       editorReady: !!editor,
       editorText: editor ? (editor.innerText || editor.textContent || '').replace(/\\u00a0/g, ' ') : '',
       fileInputCount: fileInputs.length,
-      referenceCount,
       fileInputs: fileInputs.map((input, index) => ({
         id: input.id || '',
         accept: input.accept || '',
@@ -417,109 +539,29 @@ export async function probeJimengAgentSurface(page) {
       ready: !!editor && fileInputs.length > 0,
     };
   })()`);
+
+  const dock = await collectDockReferenceSnapshot(page);
+  return {
+    ...surface,
+    // Reference cards are counted from the dock reference strip, never from
+    // remove-button attributes (those only exist/hover on some UI versions).
+    referenceCount: dock.count,
+    referenceStripFound: dock.strips > 0,
+    referenceProcessingCount: dock.processing,
+    uploadBusy: dock.busy,
+    uploadFailure: dock.failure,
+  };
 }
 
 /**
  * Open the Jimeng workspace in the current tab.
  *
- * - Same workspace + composer expanded → no reload (keep UI state).
- * - Same workspace + composer collapsed/missing → reload once to reset dock.
- * - Different page / blank → goto.
- * - `fresh: true` always reloads (recovery path).
- * - Never opens a new tab.
+ * Every prepare path reloads (`fresh`) so Jimeng's server-side draft
+ * (reference cards + composer text) is re-rendered deterministically before
+ * clear/upload. Never opens a new tab.
  */
-async function openWorkspace(page, workspaceUrl, { fresh = false } = {}) {
-  let currentHref = '';
-  try {
-    if (typeof page.url === 'function') {
-      currentHref = String(page.url() || '');
-    }
-  } catch {
-    currentHref = '';
-  }
-  if (!currentHref) {
-    currentHref = await page.evaluate('location.href').catch(() => '');
-  }
-
-  const alreadyThere = isSameJimengWorkspace(currentHref, workspaceUrl);
-  if (alreadyThere && !fresh) {
-    const expanded = await isComposerExpanded(page).catch(() => false);
-    if (expanded) {
-      return;
-    }
-    // Composer collapsed / not ready → full reload to restore dock.
-  }
-
+async function openWorkspace(page, workspaceUrl) {
   await page.goto(workspaceUrl);
-}
-
-/** True when both URLs point at the same Jimeng generate workspace id. */
-function isSameJimengWorkspace(currentHref, targetUrl) {
-  try {
-    const cur = new URL(String(currentHref || ''));
-    const tgt = new URL(String(targetUrl || ''));
-    if (cur.origin !== tgt.origin) return false;
-    const curPath = cur.pathname.replace(/\/+$/, '') || '/';
-    const tgtPath = tgt.pathname.replace(/\/+$/, '') || '/';
-    if (curPath !== tgtPath) return false;
-    const curWs = cur.searchParams.get('workspace');
-    const tgtWs = tgt.searchParams.get('workspace');
-    return !!tgtWs && curWs === tgtWs;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Detect whether the Agent composer input dock is expanded and usable.
- *
- * Collapsed signals (any → not expanded):
- * - no visible prompt editor / file input
- * - editor too short (collapsed strip)
- * - floating 「回到底部」 visible (history scrolled up, dock tucked away)
- */
-async function isComposerExpanded(page) {
-  return page.evaluate(`(() => {
-    ${buildPromptEditorLocatorScript()}
-    const editor = findPromptEditor();
-    if (!editor) return false;
-
-    const editorRect = editor.getBoundingClientRect();
-    // Collapsed dock usually keeps a tiny or off-screen editor.
-    if (editorRect.width < 80 || editorRect.height < 24) return false;
-    if (editorRect.bottom < 40 || editorRect.top > (window.innerHeight || 0) - 20) return false;
-
-    const fileInputs = [...document.querySelectorAll(${JSON.stringify(FILE_INPUT_SELECTOR)})];
-    if (fileInputs.length === 0) return false;
-
-    // 「回到底部」 can appear while the dock is still fully usable (history
-    // scrolled, input still open at the bottom). Only treat as collapsed when
-    // the editor is also not in the lower dock band / too short.
-    const backToBottom = [...document.querySelectorAll('button, [role="button"], div, span, a')]
-      .filter(visible)
-      .some((el) => {
-        const t = ((el.getAttribute('aria-label') || '') + ' ' + (el.innerText || el.textContent || ''))
-          .replace(/\\s+/g, '');
-        return t.includes('回到底部');
-      });
-    const vh = window.innerHeight || 0;
-    const inDockBand = editorRect.top > vh * 0.45 && editorRect.bottom <= vh + 8;
-    if (backToBottom && (!inDockBand || editorRect.height < 36)) return false;
-
-    // Agent mode combobox near the editor is a strong "dock expanded" signal.
-    const roots = [];
-    let node = editor.parentElement;
-    for (let i = 0; node && i < 10; i += 1, node = node.parentElement) roots.push(node);
-    const scope = roots[roots.length - 1] || document.body;
-    const hasAgentControl = [...scope.querySelectorAll('[role="combobox"], button, [role="button"]')]
-      .filter(visible)
-      .some((el) => /Agent\\s*模式/i.test(
-        ((el.getAttribute('aria-label') || '') + ' ' + (el.innerText || el.textContent || '')).replace(/\\s+/g, ' '),
-      ));
-    if (!hasAgentControl) return false;
-
-    return true;
-  })()`);
 }
 
 async function waitForAgentSurface(page, timeoutMs = 25_000) {
@@ -773,68 +815,205 @@ async function markPreferenceControl(page, marker) {
 
 async function clearInitialDraftState(page) {
   await clearComposer(page, 'clear-initial');
-  await clearReferenceAssets(page);
+  const { keptSlots } = await clearReferenceAssets(page);
   const composer = await getComposerClearState(page);
   const surface = await probeJimengAgentSurface(page);
-  if (!composer.empty || surface.referenceCount !== 0) {
+  // Empty upload slots cannot be removed by the UI; they are tolerated as
+  // baseline because they expose no asset to the mention picker. Any other
+  // leftover card would shift @图片N numbering and fails the cleanup.
+  if (!composer.empty || surface.referenceCount !== keptSlots) {
     throw phaseError(
       'clear-initial',
-      `Jimeng initial draft cleanup was incomplete (${composer.textLength} text character(s), ${composer.mentionCount} mention node(s), ${surface.referenceCount} reference card(s))`,
+      `Jimeng initial draft cleanup was incomplete (${composer.textLength} text character(s), ${composer.mentionCount} mention node(s), ${surface.referenceCount} reference card(s), ${keptSlots} unremovable slot(s))`,
       'No generation was submitted. Inspect the visible composer and reference strip before retrying.',
     );
   }
+  return keptSlots;
+}
+
+/**
+ * Remove removable reference cards from the dock strip.
+ *
+ * Jimeng renders the remove button (`[data-reference-remove-button="true"]`)
+ * only after the reference group has been hovered, and it becomes clickable
+ * while the specific card is hovered. We first hover the group area so the
+ * buttons render, then hover the card itself, then click its remove button.
+ *
+ * Empty upload slots (draft references whose media is gone) expose no remove
+ * control and cannot be cleared; they are kept and reported as `keptSlots` so
+ * callers can treat them as baseline (they expose no asset to the mention
+ * picker and do not shift @图片N numbering).
+ *
+ * Returns { removed, keptSlots }.
+ */
+async function markReferenceRemoveControl(page, marker) {
+  return page.evaluate(`(() => {
+    // The button may still be opacity-0 / zero-sized until the hover CSS
+    // transition finishes; synthetic clicks do not need hit-testing, so only
+    // exclude buttons that are not rendered at all (display:none / hidden).
+    const candidates = [...document.querySelectorAll('[data-reference-remove-button="true"]')]
+      .filter((el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        return style.display !== 'none' && style.visibility !== 'hidden';
+      });
+    if (candidates.length === 0) return { ok: false, count: 0 };
+    candidates[0].setAttribute(${JSON.stringify(TARGET_ATTR)}, ${JSON.stringify(marker)});
+    return { ok: true, count: candidates.length };
+  })()`);
 }
 
 async function clearReferenceAssets(page) {
   const maxReferences = 24;
   for (let removed = 0; removed < maxReferences; removed += 1) {
-    const marker = nextMarker(`reference-remove-${removed}`);
-    const state = await page.evaluate(`(() => {
-      const visible = (el) => {
-        if (!(el instanceof HTMLElement)) return false;
-        const style = window.getComputedStyle(el);
-        const rect = el.getBoundingClientRect();
-        return style.display !== 'none'
-          && style.visibility !== 'hidden'
-          && rect.width > 0
-          && rect.height > 0;
+    const before = await collectDockReferenceSnapshot(page);
+    if (before.count === 0) return { removed, keptSlots: 0 };
+
+    const removable = before.cards.find((entry) => (
+      entry.identity
+      && entry.width > 0
+      && entry.height > 0
+      && !isUploadSlotEntry(entry)
+    ));
+    if (!removable) {
+      // Only empty upload slots remain — nothing can be removed.
+      return { removed, keptSlots: before.count };
+    }
+
+    // Pass 1: hover the group so the remove buttons render into the DOM.
+    await page.cdp('Input.dispatchMouseEvent', {
+      type: 'mouseMoved',
+      x: Math.round(removable.left + removable.width / 2),
+      y: Math.round(removable.top + removable.height / 2),
+    }).catch(() => null);
+    await page.sleep(0.5);
+
+    // Pass 2: hover the card element itself (real move + synthetic events).
+    const cardX = Math.round(removable.left + removable.width / 2);
+    const cardY = Math.round(removable.top + Math.max(8, removable.height / 2));
+    await page.cdp('Input.dispatchMouseEvent', {
+      type: 'mouseMoved',
+      x: cardX,
+      y: cardY,
+    }).catch(() => null);
+    await page.evaluate(`(() => {
+      const card = [...document.querySelectorAll('[class]')].find((el) => {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0
+          && Math.abs((r.left + r.width / 2) - ${cardX}) < 12
+          && Math.abs((r.top + r.height / 2) - ${cardY}) < 12
+          && /reference-item-/.test(String(el.className || ''));
+      });
+      if (!card) return;
+      const init = {
+        bubbles: true,
+        cancelable: true,
+        view: window,
+        clientX: ${cardX},
+        clientY: ${cardY},
       };
-      const controls = [...document.querySelectorAll('[data-reference-remove-button="true"]')];
-      if (controls.length === 0) return { done: true, count: 0 };
-      const visibleControls = controls.filter(visible);
-      if (visibleControls.length === 0) {
-        return { done: false, count: controls.length, reason: 'remove-controls-hidden' };
-      }
-      visibleControls[0].setAttribute(${JSON.stringify(TARGET_ATTR)}, ${JSON.stringify(marker)});
-      return {
-        done: false,
-        count: controls.length,
-        selector: '[${TARGET_ATTR}="${marker}"]',
-      };
+      try { card.dispatchEvent(new PointerEvent('pointerover', init)); } catch (_) {}
+      try { card.dispatchEvent(new PointerEvent('pointermove', init)); } catch (_) {}
+      card.dispatchEvent(new MouseEvent('mouseover', init));
+      card.dispatchEvent(new MouseEvent('mousemove', init));
+      try { card.dispatchEvent(new MouseEvent('mouseenter', init)); } catch (_) {}
     })()`);
-    if (state?.done) return;
-    if (!state?.selector) {
+    await page.sleep(0.4);
+
+    const marker = nextMarker(`reference-remove-${removed}`);
+    let marked = await markReferenceRemoveControl(page, marker);
+    if (!marked?.ok) {
+      // Layout may have shifted since the snapshot (previous card removal
+      // animates the strip), so re-collect and hover several hotspot points
+      // around the card before giving up.
+      const refreshed = await collectDockReferenceSnapshot(page);
+      const target = (refreshed.cards || []).find((entry) => (
+        entry.identity
+        && entry.width > 0
+        && entry.height > 0
+        && !isUploadSlotEntry(entry)
+      )) || removable;
+      const points = [
+        [target.left + target.width / 2, target.top + target.height / 2],
+        [target.left + 4, target.top + 4],
+        [target.left + target.width - 4, target.top + 4],
+        [target.left + 4, target.top + target.height - 4],
+        [target.left + target.width - 4, target.top + target.height - 4],
+      ];
+      for (const [hotX, hotY] of points) {
+        await page.cdp('Input.dispatchMouseEvent', {
+          type: 'mouseMoved',
+          x: Math.round(hotX),
+          y: Math.round(hotY),
+        }).catch(() => null);
+        await page.evaluate(`(() => {
+          const card = [...document.querySelectorAll('[class]')].find((el) => {
+            const r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0
+              && Math.abs((r.left + r.width / 2) - ${hotX}) < 12
+              && Math.abs((r.top + r.height / 2) - ${hotY}) < 12
+              && /reference-item-/.test(String(el.className || ''));
+          });
+          if (!card) return;
+          const init = {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+            clientX: ${hotX},
+            clientY: ${hotY},
+          };
+          try { card.dispatchEvent(new PointerEvent('pointerover', init)); } catch (_) {}
+          try { card.dispatchEvent(new PointerEvent('pointermove', init)); } catch (_) {}
+          card.dispatchEvent(new MouseEvent('mouseover', init));
+          card.dispatchEvent(new MouseEvent('mousemove', init));
+          try { card.dispatchEvent(new MouseEvent('mouseenter', init)); } catch (_) {}
+        })()`);
+        await page.sleep(0.35);
+        marked = await markReferenceRemoveControl(page, marker);
+        if (marked?.ok) break;
+      }
+    }
+    if (!marked?.ok) {
+      const diagnostics = (before.cards || []).map((card) => ({
+        id: card.identity,
+        cls: (card.classes || []).join(' ').slice(0, 80),
+        w: card.width,
+        h: card.height,
+        img: !!card.mediaSrc,
+        spin: card.hasSpin,
+        mask: card.hasMask,
+        remove: card.hasRemoveBtn,
+        slot: card.hasUploadSlot,
+      }));
       throw phaseError(
         'clear-references',
-        `Jimeng retained ${state?.count ?? 'unknown'} reference card(s), but no visible remove control was available`,
+        `Jimeng reference card remove control stayed hidden after hover (${before.count} card(s)): ${JSON.stringify(diagnostics)}`,
         'No generation was submitted. Inspect the visible reference strip and clear stale cards manually.',
       );
     }
 
-    await page.click(state.selector);
-    const deadline = Date.now() + 2_000;
-    let remaining = state.count;
+    // Click via synthetic events (mousedown/mouseup/click). The remove
+    // button sits under a hover-trigger overlay, so a coordinate click would
+    // hit the overlay; React's delegated listeners respond to bubbled events.
+    await page.evaluate(`(() => {
+      const button = document.querySelector('[${TARGET_ATTR}="${marker}"]');
+      if (!button) return;
+      const init = { bubbles: true, cancelable: true, view: window };
+      button.dispatchEvent(new MouseEvent('mousedown', init));
+      button.dispatchEvent(new MouseEvent('mouseup', init));
+      button.dispatchEvent(new MouseEvent('click', init));
+    })()`);
+    const deadline = Date.now() + 3_000;
+    let after = before;
     while (Date.now() < deadline) {
-      remaining = await page.evaluate(
-        `document.querySelectorAll('[data-reference-remove-button="true"]').length`,
-      );
-      if (remaining < state.count) break;
-      await page.sleep(0.1);
+      after = await collectDockReferenceSnapshot(page);
+      if (after.count < before.count) break;
+      await page.sleep(0.25);
     }
-    if (remaining >= state.count) {
+    if (after.count >= before.count) {
       throw phaseError(
         'clear-references',
-        `Jimeng reference count did not decrease after clicking a remove control (${state.count} card(s))`,
+        `Jimeng reference count did not decrease after clicking a remove control (${before.count} card(s))`,
         'No generation was submitted. Inspect the visible reference strip and retry.',
       );
     }
@@ -847,14 +1026,17 @@ async function clearReferenceAssets(page) {
   );
 }
 
-async function uploadReferenceAssets(page, assets, uploads, startAssetIndex) {
+async function uploadReferenceAssets(page, assets, uploads, startAssetIndex, baselineSlots) {
   for (let index = startAssetIndex; index < assets.length; index += 1) {
     const asset = assets[index];
-    const before = await probeJimengAgentSurface(page);
-    if (before.referenceCount !== index) {
+    const before = await collectDockReferenceSnapshot(page);
+    // baselineSlots = unremovable empty upload slots kept from the draft; they
+    // never expose an asset to the mention picker, so upload accounting counts
+    // cards beyond them (or filled into them).
+    if (before.count !== baselineSlots + index) {
       throw phaseError(
         'upload',
-        `Expected ${index} confirmed Jimeng reference card(s) before ${asset.label}, found ${before.referenceCount}`,
+        `Expected ${baselineSlots + index} confirmed Jimeng reference card(s) before ${asset.label} (${baselineSlots} slot(s) + ${index} upload(s)), found ${before.count}`,
         'No generation was submitted. The upload sequence stopped before writing the prompt.',
         index,
       );
@@ -887,7 +1069,13 @@ async function uploadReferenceAssets(page, assets, uploads, startAssetIndex) {
       );
     }
 
-    await waitForUploadCompletion(page, asset, index, index + 1);
+    await waitForUploadCompletion(
+      page,
+      asset,
+      index,
+      before.cards,
+      before.count,
+    );
     uploads[index] = asset;
     uploads.length = index + 1;
   }
@@ -897,13 +1085,15 @@ async function markCurrentUploadSlot(page, marker) {
   return page.evaluate(`(() => {
     const inputs = [...document.querySelectorAll(${JSON.stringify(FILE_INPUT_SELECTOR)})];
     const preferred = inputs.filter((input) => /reference-upload/i.test(input.id || ''));
+    // When the strip renders an upload slot it carries the real per-card file
+    // input; prefer the newest slot, otherwise fall back to the dock input.
     const candidates = preferred.length > 0
       ? preferred
       : inputs.filter((input) => input.multiple || input.accept.includes('image') || input.accept.includes('video') || input.accept.includes('audio'));
-    if (candidates.length !== 1) {
-      return { ok: false, count: candidates.length, ids: candidates.map((input) => input.id || '') };
+    if (candidates.length === 0) {
+      return { ok: false, count: 0, ids: [] };
     }
-    const input = candidates[0];
+    const input = candidates[candidates.length - 1];
     input.setAttribute(${JSON.stringify(UPLOAD_SLOT_ATTR)}, ${JSON.stringify(marker)});
     return {
       ok: true,
@@ -912,59 +1102,107 @@ async function markCurrentUploadSlot(page, marker) {
   })()`);
 }
 
-async function waitForUploadCompletion(page, asset, failedAssetIndex, expectedReferenceCount) {
+async function waitForUploadCompletion(page, asset, failedAssetIndex, baselineCards, baselineCount) {
   // Images usually index quickly; video/audio often need longer for the
   // reference strip card and duration badge to appear.
-  const timeoutMs = asset.kind === 'image' ? 15_000 : 45_000;
+  const timeoutMs = asset.kind === 'image' ? 30_000 : 60_000;
   const deadline = Date.now() + timeoutMs;
-  let last = null;
+  const baseline = new Set((baselineCards || []).filter((card) => card?.identity).map((card) => card.identity));
+  // Empty upload slots can be filled in place by an upload (audio cards carry
+  // no blob src, so their identity stays `index:N`); treat such a slot→card
+  // transition as a new card too.
+  const baselineSlotIdentities = new Set(
+    (baselineCards || [])
+      .filter((card) => isUploadSlotEntry(card) && card.identity)
+      .map((card) => card.identity),
+  );
+  let sawBusy = false;
+  let stablePolls = 0;
+  let lastCards = null;
   while (Date.now() < deadline) {
-    last = await probeJimengAgentSurface(page);
-    const failure = last.alerts.find((text) => /上传失败|素材.*失败|upload.*fail/i.test(text));
-    if (failure) {
+    const snap = await collectDockReferenceSnapshot(page);
+    if (snap.failure) {
       throw phaseError(
         'upload',
-        `Jimeng rejected ${asset.label} (${asset.filename}): ${failure}`,
+        `Jimeng rejected ${asset.label} (${asset.filename}): ${snap.bodyText.slice(-160)}`,
         'No generation was submitted. The visible UI rejected this file; check account/workspace entitlement and retry later.',
         failedAssetIndex,
       );
     }
-    // Accept exact match, or >= expected when remove-button count lags and then
-    // catches up without inventing extras beyond a single pending card.
-    if (last.referenceCount === expectedReferenceCount) {
-      await page.sleep(asset.kind === 'image' ? 0.8 : 1.2);
-      return;
-    }
-    if (last.referenceCount > expectedReferenceCount) {
-      // Tolerate one extra transient card only briefly; otherwise fail.
-      if (last.referenceCount === expectedReferenceCount + 1) {
-        await page.sleep(0.5);
-        const again = await probeJimengAgentSurface(page);
-        if (again.referenceCount === expectedReferenceCount) {
-          last = again;
-          await page.sleep(asset.kind === 'image' ? 0.8 : 1.2);
-          return;
-        }
+    if (snap.busy) sawBusy = true;
+
+    // A new card is one whose identity is not part of the pre-upload baseline
+    // (draft cards restored by Jimeng count as baseline, so leftovers never
+    // inflate the upload result), or a baseline upload slot that was filled
+    // in place (audio cards have no blob source to change identity).
+    const newCards = (snap.cards || []).filter(
+      (card) => isNewUploadCard(card, baseline, baselineSlotIdentities),
+    );
+    const newIds = new Set(newCards.map((card) => card.identity));
+
+    if (newCards.length > 0) {
+      const processing = newCards.some((card) => isProcessingCard(card));
+      const ready = !processing && (!sawBusy || !snap.busy);
+      // Require the same new-card set (identity) twice in a row so a
+      // transient re-render does not count as "upload complete".
+      const sameSet = lastCards !== null
+        && lastCards.size === newIds.size
+        && [...newIds].every((id) => lastCards.has(id));
+      if (ready && sameSet) {
+        stablePolls += 1;
+      } else {
+        stablePolls = 0;
       }
-      throw phaseError(
-        'upload',
-        `Jimeng created ${last.referenceCount} reference cards while waiting for ${asset.label}; expected ${expectedReferenceCount}`,
-        'No generation was submitted. Clear the visible reference strip and retry.',
-        failedAssetIndex,
-      );
+      if (stablePolls >= 2) {
+        await page.sleep(asset.kind === 'image' ? 0.8 : 1.2);
+        return;
+      }
+    } else {
+      stablePolls = 0;
     }
-    await page.sleep(0.25);
+    lastCards = newIds;
+    await page.sleep(0.5);
   }
 
+  const final = await collectDockReferenceSnapshot(page).catch(() => null);
+  const cardDump = (final?.cards || []).map((card) => ({
+    id: card.identity,
+    slot: card.hasUploadSlot,
+    img: !!card.mediaSrc,
+    spin: card.hasSpin,
+    mask: card.hasMask,
+    remove: card.hasRemoveBtn,
+    cls: (card.classes || []).join(' ').slice(0, 50),
+  }));
   throw phaseError(
     'upload',
-    `Jimeng did not create a reference card for ${asset.label} (${asset.filename}) within ${Math.round(timeoutMs / 1000)} seconds`,
+    `Jimeng did not create a reference card for ${asset.label} (${asset.filename}) within ${Math.round(timeoutMs / 1000)} seconds`
+    + ` (baseline=${baselineCount}, cards=${final?.count ?? '?'}, processing=${final?.processing ?? '?'}, busy=${final?.busy ?? '?'}`
+    + `, details=${JSON.stringify(cardDump)})`,
     'No generation was submitted. The upload was not acknowledged; verify the visible reference strip and file type.',
     failedAssetIndex,
   );
 }
 
 async function fillPromptWithRichMentions(page, agentPrompt, assets, mentionDebug) {
+  // Jimeng can re-inject the server-side draft text into the composer after
+  // the post-upload clear; typing the canonical prompt on top of that draft
+  // shifts the caret and breaks the mention picker. Re-clear until empty.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const state = await getComposerClearState(page);
+    if (state.empty) break;
+    await clearComposer(page, 'clear-after-upload');
+    await page.sleep(0.3);
+  }
+  const finalState = await getComposerClearState(page);
+  if (!finalState.empty) {
+    throw phaseError(
+      'prompt',
+      `Jimeng re-injected draft text into the composer after upload (${finalState.textLength} character(s), ${finalState.mentionCount} mention(s))`,
+      'No generation was submitted. Clear the visible composer and retry.',
+    );
+  }
+
   const normalizedPrompt = agentPrompt.replace(/\\n/g, '\n');
   const segments = buildMentionSegments(normalizedPrompt, assets);
   let expectedMentionCount = 0;
@@ -1014,6 +1252,31 @@ async function fillPromptWithRichMentions(page, agentPrompt, assets, mentionDebu
   if (lastTextMayLeaveMentionMenuOpen) {
     await page.nativeKeyPress('Escape');
     await page.sleep(0.12);
+  }
+
+  // Let TipTap merge the final mention commit back into one paragraph before
+  // the checkpoint reads the line structure. Right after the last Enter the
+  // DOM can briefly show a split/extra block (flaky lineStructure failures);
+  // require two identical consecutive polls before proceeding.
+  const settleDeadline = Date.now() + 3_000;
+  let lastLines = null;
+  let settleStable = 0;
+  while (Date.now() < settleDeadline) {
+    const settleSnapshot = await collectContentCheckpointSnapshot(page);
+    const lines = settleSnapshot.editorLines;
+    const mentionsOk = settleSnapshot.mentionCount >= expectedMentionCount;
+    const sameLines = lastLines !== null && lines.join('|') === lastLines.join('|');
+    if (mentionsOk && sameLines) {
+      settleStable += 1;
+      if (settleStable >= 2) break;
+    } else {
+      settleStable = 0;
+    }
+    lastLines = lines;
+    await page.sleep(0.25);
+  }
+  if (settleStable < 2) {
+    await page.sleep(0.3);
   }
 
   // Line structure is re-checked by the mandatory preparation checkpoint.
@@ -1157,12 +1420,28 @@ async function isMentionPickerVisible(page) {
   })()`);
 }
 
-/** Poll until the mention picker shows real 图片N/视频N/音频N options. */
-async function waitForMentionPicker(page, timeoutMs) {
+/**
+ * Poll until the mention picker shows real candidate options.
+ *
+ * The `.suggestion` decoration appears immediately after '@' (often empty or
+ * showing the raw query), so it must NOT count as success — only real
+ * 图片N/视频N/音频N options mean the candidate list has loaded.
+ */
+async function waitForMentionCandidates(page, timeoutMs) {
   const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
+  let lastFramePush = 0;
+  const framePath = path.join(os.tmpdir(), `jimeng-agent-poll-frame-${process.pid}.png`);
   while (Date.now() < deadline) {
     if (await isMentionPickerVisible(page)) return true;
-    await page.sleep(0.12);
+    // A hidden/background tab pauses frame-driven React work; capturing a
+    // frame lets the mention candidate list finish rendering. 1 Hz while the
+    // picker is still missing.
+    const now = Date.now();
+    if (now - lastFramePush > 1_000) {
+      lastFramePush = now;
+      await page.screenshot({ path: framePath }).catch(() => null);
+    }
+    await page.sleep(0.15);
   }
   return isMentionPickerVisible(page);
 }
@@ -1216,8 +1495,8 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
   const label = asset.label;
   // Hub/NAS is slower than local; fixed 0.5s after '@' was too short and caused
   // false "picker missing" → re-type '@' → "@@图片1".
-  const pickerWaitAfterAtMs = 2_000;
-  const pickerWaitAfterLabelMs = 1_500;
+  const pickerWaitAfterAtMs = 8_000;
+  const pickerWaitAfterLabelMs = 2_000;
 
   for (let fullAttempt = 0; fullAttempt < maxFullAttempts; fullAttempt += 1) {
     const before = await getMentionState(page, asset);
@@ -1241,7 +1520,7 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
       // Guard: never stack another '@' on top of an existing bare '@'.
       await stripTrailingBareAtsAtEnd(page);
       await typeMentionQuery(page, '@');
-      const opened = await waitForMentionPicker(page, pickerWaitAfterAtMs);
+      const opened = await waitForMentionCandidates(page, pickerWaitAfterAtMs);
       await captureMentionDebug(page, mentionDebug, 'after-at', asset, {
         fullAttempt: fullAttempt + 1,
         atAttempt: atAttempt + 1,
@@ -1282,7 +1561,7 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
     // Do NOT click/refocus the editor here — that can close the picker.
     await page.sleep(MENTION_KEY_GAP_S);
     await typeMentionQuery(page, label);
-    const labelPickerOk = await waitForMentionPicker(page, pickerWaitAfterLabelMs);
+    const labelPickerOk = await waitForMentionCandidates(page, pickerWaitAfterLabelMs);
     await captureMentionDebug(page, mentionDebug, 'after-label', asset, {
       fullAttempt: fullAttempt + 1,
       expectedMentionCount,
@@ -1290,19 +1569,32 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
     });
 
     if (!labelPickerOk) {
+      const suggestion = await page.evaluate(`(() => {
+        const s = document.querySelector('.suggestion, [class*="suggestion"]');
+        const opts = [...document.querySelectorAll(${JSON.stringify(MENTION_OPTION_SELECTOR)})]
+          .filter(visible)
+          .map((el) => (el.innerText || el.textContent || '').replace(/\\s+/g, '').slice(0, 30));
+        return {
+          suggestion: s ? String(s.className) + ' ' + (s.innerText || '').replace(/\\s+/g, ' ').slice(0, 60) : null,
+          opts,
+        };
+      })()`);
+      console.error(
+        `[jimeng-agent] mention label picker missing for ${label} suggestion=${JSON.stringify(suggestion)}`,
+      );
       // Label typing lost the picker → rewind (label chars + '@') and full-retry.
       await rewindMentionKeystrokes(page, label, 'label');
       continue;
     }
 
     // ---------- Phase 3: unique candidate + Enter ----------
-    await page.sleep(MENTION_KEY_GAP_S);
+    await page.sleep(0.5);
     const marker = nextMarker(`mention-${label}`);
     const candidate = await waitForMarker(
       page,
       marker,
       buildMentionCandidateExpression(asset, marker),
-      3_000,
+      5_000,
     );
 
     let committed = false;
@@ -1328,8 +1620,9 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
           await page.sleep(MENTION_KEY_GAP_S);
           const enterGuard = await selectMentionCandidateWithGuardedEnter(page, marker, asset);
           // Do NOT Escape after Enter — picker closes itself; Escape thrashs the dock.
-          await page.sleep(0.45);
-          const after = await getMentionState(page, asset);
+          // Chip rendering can lag behind the Enter key on slow hosts, so poll
+          // for the commit instead of a single fixed sleep.
+          const commit = await waitForMentionCommit(page, asset, before, enterGuard, 4_000);
           await captureMentionDebug(page, mentionDebug, 'after-enter', asset, {
             fullAttempt: fullAttempt + 1,
             expectedMentionCount,
@@ -1337,7 +1630,7 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
             candidateTarget,
             enterGuard,
             before,
-            after,
+            after: commit.after,
           });
           if (mentionDebug.enabled && mentionDebug.stopPhase === 'after-click') {
             throw phaseError(
@@ -1346,14 +1639,13 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
               'No generation was submitted.',
             );
           }
-          // Success:
-          //  - chip count for this asset increased, OR
-          //  - Enter allowed and raw @label gone (repeat mention may not add a 2nd chip)
-          if (
-            after.matchingMentionCount > before.matchingMentionCount
-            || (enterGuard?.status === 'allowed' && !after.hasRaw)
-          ) {
+          if (commit.committed) {
             committed = true;
+          } else {
+            console.error(
+              `[jimeng-agent] mention commit not observed for ${label} guard=${enterGuard?.status} `
+              + `after=${JSON.stringify(commit.after)}`,
+            );
           }
         } catch (err) {
           if (mentionDebug.enabled && mentionDebug.stopPhase === 'after-click') throw err;
@@ -1363,6 +1655,10 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
           });
         }
       }
+    } else {
+      console.error(
+        `[jimeng-agent] mention candidate not found for ${label} within timeout: ${JSON.stringify(candidate)}`,
+      );
     }
 
     // Double-check: chip may have landed even if Enter status was noisy.
@@ -1557,6 +1853,22 @@ async function captureMentionDebug(page, debug, phase, asset, extra = {}) {
           marked: option.hasAttribute(${JSON.stringify(TARGET_ATTR)}),
         };
       });
+    // Broad dump of any visible floating layer (mention menus use custom
+    // classes that drift between builds; this records their real structure).
+    const floating = [...document.querySelectorAll(
+      '[role="menu"], [role="listbox"], [role="option"], [class*="popup"], [class*="popper"], [class*="dropdown"], [class*="floating"], [class*="suggestion"]',
+    )]
+      .filter(visible)
+      .map((el) => {
+        const rect = el.getBoundingClientRect();
+        return {
+          tag: el.tagName,
+          className: String(el.className || '').slice(0, 90),
+          text: compactText(el).replace(/\\s+/g, ' ').trim().slice(0, 60),
+          rect: rectValue(rect),
+        };
+      })
+      .filter((item) => item.text || /menu|option|dropdown|popup|suggestion/i.test(item.className));
     const mentions = editor
       ? [...editor.querySelectorAll('.node-reference-mention-tag')].map((node) => ({
         text: compactText(node).replace(/\\s+/g, ' ').trim(),
@@ -1594,6 +1906,7 @@ async function captureMentionDebug(page, debug, phase, asset, extra = {}) {
         rangeRect: rectValue(range?.getBoundingClientRect()),
       },
       options,
+      floating,
       mentions,
     };
   })()`);
@@ -2134,10 +2447,19 @@ function buildMentionCandidateExpression(asset, marker) {
     }));
     const matches = named.filter(({ name }) => variants.some((variant) => name.includes(variant)));
     if (matches.length !== 1) {
+      const suggestion = document.querySelector('.suggestion, [class*="suggestion"]');
+      const menus = [...document.querySelectorAll('[role="listbox"], [role="menu"], [class*="mention"], [class*="suggestion"]')]
+        .filter(visible)
+        .map((el) => ({
+          cls: String(el.className || '').slice(0, 70),
+          text: (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 50),
+        }));
       return {
         ok: false,
         count: matches.length,
         options: named.map(({ name }) => name).filter(Boolean).slice(0, 8),
+        suggestion: suggestion ? String(suggestion.className) + ' ' + (suggestion.innerText || '').replace(/\\s+/g, ' ').slice(0, 40) : null,
+        menus,
       };
     }
     matches[0].option.setAttribute(${JSON.stringify(TARGET_ATTR)}, ${JSON.stringify(marker)});
@@ -2233,38 +2555,27 @@ async function getMentionState(page, asset) {
   })()`);
 }
 
-/** @deprecated Prefer restoreComposerToBaseline(page, baselineTakenBeforeAt). */
-async function rollbackFailedMention(page, label) {
-  await page.nativeKeyPress('Escape');
-  await page.sleep(0.1);
-  await ensurePromptEditorCaret(page);
-  const hasRaw = await page.evaluate(`(() => {
-    ${buildPromptEditorLocatorScript()}
-    const editor = findPromptEditor();
-    if (!editor) return false;
-    const text = (editor.innerText || editor.textContent || '').replace(/\\u00a0/g, ' ');
-    return text.slice(-${Math.max(160, label.length * 8)}).includes(${JSON.stringify(`@${label}`)});
-  })()`);
-  if (!hasRaw) {
-    // Strip a bare trailing @ if present.
-    const bareAt = await page.evaluate(`(() => {
-      ${buildPromptEditorLocatorScript()}
-      const editor = findPromptEditor();
-      if (!editor) return false;
-      const text = (editor.innerText || editor.textContent || '').replace(/[\\u00a0\\u200b\\s]+$/g, '');
-      return /@$/.test(text);
-    })()`);
-    if (bareAt) {
-      await page.nativeKeyPress('Backspace');
-      return true;
+/**
+ * Poll after the guarded Enter until the mention commit is observable:
+ * - the chip count for this asset increased, or
+ * - Enter was allowed and the raw '@label' token is gone (repeat mentions of
+ *   the same asset may not add a second chip node).
+ * Chip rendering can lag behind the key event on slow hosts.
+ */
+async function waitForMentionCommit(page, asset, before, enterGuard, timeoutMs) {
+  const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
+  let after = before;
+  while (Date.now() < deadline) {
+    after = await getMentionState(page, asset);
+    const committed = after.matchingMentionCount > before.matchingMentionCount
+      || (enterGuard?.status === 'allowed' && !after.hasRaw);
+    if (committed) {
+      await page.sleep(0.15);
+      return { committed: true, after };
     }
-    return false;
+    await page.sleep(0.25);
   }
-  for (let i = 0; i < label.length + 1; i += 1) {
-    await page.nativeKeyPress('Backspace');
-  }
-  await page.sleep(0.2);
-  return true;
+  return { committed: false, after };
 }
 
 /**
@@ -2306,61 +2617,36 @@ export async function runPreInputControlsCheck(page) {
  */
 export async function runContentCheckpoint(page, agentPrompt, assets, options = {}) {
   const snapshot = await collectContentCheckpointSnapshot(page);
+  // Reference cards are counted from the dock strip, never from remove-button
+  // attributes (those only exist/hover on some UI versions). Empty upload
+  // slots (trailing "+" placeholder) are not references and are excluded.
+  const dock = await collectDockReferenceSnapshot(page);
+  snapshot.referenceCount = (dock.cards || []).filter(
+    (card) => !isUploadSlotEntry(card),
+  ).length;
   snapshot.requireSubmitArmed = options.requireSubmitArmed === true;
   const expectations = buildCheckpointExpectations(agentPrompt, assets);
   const report = evaluateContentCheckpoint(snapshot, expectations);
   if (!report.ok) {
+    const diagnostic = {
+      failures: report.failures,
+      expectedLines: expectations.expectedLines,
+      observedLines: snapshot.editorLines,
+      expectedMentions: expectations.expectedMentions,
+      observedMentions: snapshot.mentionCount,
+      expectedReferences: expectations.expectedReferences,
+      observedReferences: snapshot.referenceCount,
+      observedLabels: snapshot.observedMentionLabels,
+      rawAt: snapshot.rawAt,
+      menuVisible: snapshot.menuVisible,
+    };
     throw phaseError(
       'checkpoint',
-      `Content checkpoint failed: ${report.failures.join(', ')}`,
+      `Content checkpoint failed: ${report.failures.join(', ')} (${JSON.stringify(diagnostic)})`,
       'No generation was submitted. Inspect uploaded references and the composed prompt/mentions.',
     );
   }
   return report;
-}
-
-/** @deprecated Prefer runContentCheckpoint. */
-export async function runPreparationCheckpoint(page, agentPrompt, assets, options = {}) {
-  return runContentCheckpoint(page, agentPrompt, assets, options);
-}
-
-async function ensurePreferenceSnapshot(page) {
-  let surface = await probeJimengAgentSurface(page);
-  if (surface.autoPopupOpen) {
-    return {
-      autoEnabled: surface.autoEnabled === true,
-      videoSelected: surface.videoSelected === true,
-      preferencePanelReadable: true,
-    };
-  }
-
-  const marker = nextMarker('preinput-pref');
-  const marked = await markPreferenceControl(page, marker);
-  if (!marked?.ok) {
-    return {
-      autoEnabled: false,
-      videoSelected: false,
-      preferencePanelReadable: false,
-    };
-  }
-  await page.click(`[${TARGET_ATTR}="${marker}"]`);
-  const deadline = Date.now() + 4_000;
-  while (Date.now() < deadline) {
-    surface = await probeJimengAgentSurface(page);
-    if (surface.autoPopupOpen) {
-      return {
-        autoEnabled: surface.autoEnabled === true,
-        videoSelected: surface.videoSelected === true,
-        preferencePanelReadable: true,
-      };
-    }
-    await page.sleep(0.15);
-  }
-  return {
-    autoEnabled: false,
-    videoSelected: false,
-    preferencePanelReadable: false,
-  };
 }
 
 async function collectContentCheckpointSnapshot(page) {
@@ -2411,7 +2697,8 @@ async function collectContentCheckpointSnapshot(page) {
     });
     return {
       surfaceReady,
-      referenceCount: document.querySelectorAll('[data-reference-remove-button="true"]').length,
+      // Overridden by runContentCheckpoint with the dock-strip count.
+      referenceCount: 0,
       mentionCount: observedMentionLabels.length,
       observedMentionLabels,
       rawAt: editorText.includes('@'),
