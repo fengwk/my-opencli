@@ -43,7 +43,7 @@ import {
   recoverChatSurfaceAfterFailure,
 } from './src/session-recovery.js';
 
-const DEFAULT_TIMEOUT_SEC = 300;
+const DEFAULT_TIMEOUT_SEC = 900;
 /**
  * Capture all WebSockets on the automation tab.
  * A dedicated chatgpt-agent tab only talks to ChatGPT; filtering by URL is harmful
@@ -127,7 +127,7 @@ export const askCommand = cli({
     const timeoutSec = requirePositiveInt(
       Number(kwargs.timeout ?? DEFAULT_TIMEOUT_SEC),
       'chatgpt-agent ask --timeout',
-      'Example: opencli chatgpt-agent ask "hello" --timeout 300',
+      'Example: opencli chatgpt-agent ask "hello" --timeout 900',
     );
     const timeoutMs = timeoutSec * 1000;
     const session = kwargs.session != null && String(kwargs.session).trim()
