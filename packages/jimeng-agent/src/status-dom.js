@@ -30,6 +30,7 @@ const AGENTIC_RECORD_SELECTOR = '[class*="agentic-record-"]';
 const VIDEO_RECORD_SELECTOR = '[class*="video-record-"]';
 const VIDEO_CARD_SELECTOR = '[class*="video-card-container"], [class*="agentic-video-card"]';
 const IMAGE_CARD_SELECTOR = '[class*="image-card-container"]';
+const CURRENT_RECORD_ROOT_TOKEN_RE_SOURCE = '^record-[A-Za-z0-9]+$';
 const TASK_SEARCH_INPUT_SELECTOR = [
   'input[placeholder="搜索"]',
   'input[placeholder*="搜索"]',
@@ -38,6 +39,18 @@ const TASK_SEARCH_INPUT_SELECTOR = [
 ].join(', ');
 
 export { JIMENG_DOMAIN };
+
+export function isCurrentJimengRecordRootToken(token) {
+  return new RegExp(CURRENT_RECORD_ROOT_TOKEN_RE_SOURCE).test(String(token || ''));
+}
+
+export function isJimengTaskListReady(state) {
+  return Boolean(
+    state?.searchInputVisible
+    && state?.recordListVisible
+    && !state?.skeletonVisible,
+  );
+}
 
 /**
  * Search Jimeng history for tasks matching searchKey.
@@ -55,6 +68,7 @@ export async function runJimengStatus(page, canonical) {
   await page.goto(url);
   await page.sleep(2.5);
   await dismissModals(page);
+  await waitForTaskListReady(page, { timeoutMs: 12_000 });
 
   let matches = [];
   let source = 'dom';
@@ -78,7 +92,10 @@ export async function runJimengStatus(page, canonical) {
   // 2) DOM fallback (Agent cards + classic video-record cards).
   if (matches.length === 0) {
     const filtered = await applyTaskPromptFilter(page, canonical.searchKey);
-    if (filtered) await resetTaskListToLatest(page);
+    if (filtered) {
+      await waitForTaskListReady(page, { timeoutMs: 8_000 });
+      await resetTaskListToLatest(page);
+    }
     matches = await findTaskRecords(page, {
       searchKey: canonical.searchKey,
       limit: Math.max(canonical.limit, 5),
@@ -86,6 +103,7 @@ export async function runJimengStatus(page, canonical) {
     });
     if (matches.length === 0 && filtered) {
       await applyTaskPromptFilter(page, '');
+      await waitForTaskListReady(page, { timeoutMs: 8_000 });
       await resetTaskListToLatest(page);
       matches = await findTaskRecords(page, {
         searchKey: canonical.searchKey,
@@ -179,6 +197,36 @@ function pickPrimaryMatch(matches, preferredType) {
   const readyAny = matches.find((item) => item.status === 'ready');
   if (readyAny) return readyAny;
   return matches[0];
+}
+
+async function waitForTaskListReady(page, { timeoutMs = 12_000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const state = await page.evaluate(`(() => {
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== 'none'
+          && style.visibility !== 'hidden'
+          && rect.width > 0
+          && rect.height > 0;
+      };
+      const searchInputVisible = [...document.querySelectorAll(${JSON.stringify(TASK_SEARCH_INPUT_SELECTOR)})]
+        .some(visible);
+      const skeletonVisible = [
+        ...document.querySelectorAll(
+          '#ssr-generated-record-feed-skeleton, [id*="generated-record-feed-skeleton"], [class*="record-feed-skeleton"]',
+        ),
+      ].some(visible);
+      const recordListVisible = [...document.querySelectorAll('[class*="record-list"]')]
+        .some(visible);
+      return { searchInputVisible, skeletonVisible, recordListVisible };
+    })()`).catch(() => null);
+    if (isJimengTaskListReady(state)) return true;
+    await page.sleep(0.35);
+  }
+  return false;
 }
 
 async function applyTaskPromptFilter(page, searchKey) {
@@ -434,13 +482,28 @@ async function findTaskRecords(page, { searchKey, limit, maxPages }) {
         }
         return true;
       };
+      const isCurrentRecordRoot = (el) => {
+        const tokens = String(el.className || '').split(/\\s+/);
+        const re = new RegExp(${JSON.stringify(CURRENT_RECORD_ROOT_TOKEN_RE_SOURCE)});
+        if (!tokens.some((token) => re.test(token))) return false;
+        let parent = el.parentElement;
+        while (parent) {
+          const parentTokens = String(parent.className || '').split(/\\s+/);
+          if (parentTokens.some((token) => re.test(token))) return false;
+          parent = parent.parentElement;
+        }
+        return true;
+      };
 
       const classic = [...document.querySelectorAll(${JSON.stringify(RECORD_ITEM_SELECTOR)})];
+      const currentRecords = [...document.querySelectorAll('[class*="record-"]')]
+        .filter(isCurrentRecordRoot);
       const agentic = [...document.querySelectorAll(${JSON.stringify(AGENTIC_RECORD_SELECTOR)})]
         .filter((el) => isPrefixedRecordRoot(el, 'agentic-record'));
       const videoRecords = [...document.querySelectorAll(${JSON.stringify(VIDEO_RECORD_SELECTOR)})]
         .filter((el) => isPrefixedRecordRoot(el, 'video-record'));
-      const nodes = [...new Set([...classic, ...agentic, ...videoRecords])].filter(visible);
+      const nodes = [...new Set([...classic, ...currentRecords, ...agentic, ...videoRecords])].filter(visible);
+      const reCurrentRecordRoot = new RegExp(${JSON.stringify(CURRENT_RECORD_ROOT_TOKEN_RE_SOURCE)});
 
       return nodes.map((el, index) => {
         const text = (el.innerText || el.textContent || '').trim();
@@ -460,6 +523,9 @@ async function findTaskRecords(page, { searchKey, limit, maxPages }) {
 
         const rawId = el.getAttribute('data-id')
           || el.getAttribute('data-record-id')
+          || String(el.className || '')
+            .split(/\\s+/)
+            .find((token) => reCurrentRecordRoot.test(token))
           || '';
         // Keep synthetic ids ASCII-safe: never embed raw prompt text
         // (newlines/quotes break later evaluate selectors).

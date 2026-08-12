@@ -6,7 +6,12 @@ import {
   normalizeStatusArgs,
   textMatchesSearchKey,
 } from '../src/status-contract.js';
-import { parseSearchNetworkEntries, toNodeLocalPath } from '../src/status-dom.js';
+import {
+  isCurrentJimengRecordRootToken,
+  isJimengTaskListReady,
+  parseSearchNetworkEntries,
+  toNodeLocalPath,
+} from '../src/status-dom.js';
 
 describe('jimeng-agent/status-contract', () => {
   it('normalizes search args with download defaulting to false', () => {
@@ -47,6 +52,32 @@ describe('jimeng-agent/status-contract', () => {
       '甚至来不及问,身体已经先一步照做,往左挪了半步;叶归年',
     )).toBe(true);
     expect(textMatchesSearchKey('资产编号：b7e4f19a2c0d5e68', 'b7e4f19a2c0d5e68')).toBe(true);
+  });
+
+  it('recognizes current hashed record roots without mistaking list/content wrappers', () => {
+    expect(isCurrentJimengRecordRootToken('record-5JpNAj')).toBe(true);
+    expect(isCurrentJimengRecordRootToken('record-a1B2c3')).toBe(true);
+    expect(isCurrentJimengRecordRootToken('record-list-L6hAeF')).toBe(false);
+    expect(isCurrentJimengRecordRootToken('record-list-container-PR5UbM')).toBe(false);
+    expect(isCurrentJimengRecordRootToken('agentic-record-content-wYywAq')).toBe(false);
+  });
+
+  it('waits for the record list to have a search input and no feed skeleton', () => {
+    expect(isJimengTaskListReady({
+      searchInputVisible: true,
+      recordListVisible: true,
+      skeletonVisible: false,
+    })).toBe(true);
+    expect(isJimengTaskListReady({
+      searchInputVisible: true,
+      recordListVisible: true,
+      skeletonVisible: true,
+    })).toBe(false);
+    expect(isJimengTaskListReady({
+      searchInputVisible: true,
+      recordListVisible: false,
+      skeletonVisible: false,
+    })).toBe(false);
   });
 
   it('parses captured search API entries into status rows', () => {
