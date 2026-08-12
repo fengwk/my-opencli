@@ -15,6 +15,7 @@
     "check": "npm run validate && npm test"
   },
   "devDependencies": {
+    "@jackwener/opencli": "https://github.com/fengwk/OpenCLI/releases/download/fork-v1.8.7-fengwk.8/jackwener-opencli-1.8.7-fengwk.8.tgz",
     "vitest": "^3.2.4"
   }
 }
