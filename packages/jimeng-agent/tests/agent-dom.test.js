@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 import { describe, expect, it } from 'vitest';
 import { ArgumentError } from '@jackwener/opencli/errors';
 
@@ -10,6 +12,16 @@ import {
   normalizePromptValidationLines,
   resolveMentionDebugOptions,
 } from '../src/agent-dom.js';
+
+const agentDomSource = readFileSync(new URL('../src/agent-dom.js', import.meta.url), 'utf8');
+
+function sourceBetween(start, end) {
+  const startIndex = agentDomSource.indexOf(start);
+  const endIndex = agentDomSource.indexOf(end, startIndex + start.length);
+  expect(startIndex).toBeGreaterThanOrEqual(0);
+  expect(endIndex).toBeGreaterThan(startIndex);
+  return agentDomSource.slice(startIndex, endIndex);
+}
 
 const assets = [
   {
@@ -85,7 +97,7 @@ describe('jimeng-agent/agent-dom — rich mention segmentation', () => {
   });
 });
 
-describe('jimeng-agent/agent-dom — guarded mention selection', () => {
+describe('jimeng-agent/agent-dom — Enter event descriptors', () => {
   it('builds complete Chromium Enter events recognized by ProseMirror keymaps', () => {
     expect(buildEnterKeyEvents()).toEqual([
       {
@@ -130,6 +142,37 @@ describe('jimeng-agent/agent-dom — guarded mention selection', () => {
         modifiers: 8,
       },
     ]);
+  });
+});
+
+describe('jimeng-agent/agent-dom — mention input safety', () => {
+  it('uses one atomic DOM click without Escape or bare Enter in the normal mention path', () => {
+    const insertion = sourceBetween(
+      'async function insertRichMention(',
+      '/** True if the composer has an orphan bare',
+    );
+    const candidateExpression = sourceBetween(
+      'function buildMentionCandidateExpression(',
+      'async function inspectMentionCandidateTarget(',
+    );
+
+    expect(insertion).not.toMatch(/(?:pressKeyWithGap|nativeKeyPress)\(page,\s*['"]Escape['"]/);
+    expect(insertion).not.toContain('selectMentionCandidateWithGuardedEnter');
+    expect(insertion).not.toContain('dispatchEnterKey(page');
+    expect(insertion).toContain('page.evaluate(buildMentionCandidateExpression(asset, marker, true))');
+    expect(candidateExpression).toContain('matches.length !== 1');
+    expect(candidateExpression).toContain('marked[0] !== matches[0].option');
+    expect(candidateExpression).toContain('matches[0].option.click();');
+    expect(candidateExpression).not.toContain('Input.dispatchKeyEvent');
+    expect(candidateExpression).not.toMatch(/nativeKeyPress\(['"]Enter['"]/);
+  });
+
+  it('keeps Escape in the existing failed-attempt rewind path', () => {
+    const rewind = sourceBetween(
+      'async function rewindMentionKeystrokes(',
+      '/**\n * Pure DOM read of the mention picker.',
+    );
+    expect(rewind).toContain("pressKeyWithGap(page, 'Escape', 0.12)");
   });
 });
 

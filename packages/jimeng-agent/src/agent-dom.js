@@ -9,8 +9,9 @@
  *   -> content checkpoint (references + prompt only)
  *   -> optional formal submit (--submit 1) only when content checkpoint passes
  *
- * Mention selection uses guarded Enter. Generation is never submitted unless
- * the content checkpoint is green and the caller explicitly requests submit.
+ * Mention selection atomically revalidates and clicks one unique candidate.
+ * Generation is never submitted unless the content checkpoint is green and
+ * the caller explicitly requests submit.
  */
 
 import fs from 'node:fs';
@@ -1550,7 +1551,7 @@ async function stripTrailingBareAtsAtEnd(page) {
  *      - if still invisible: strip ALL trailing bare '@', re-type ONE '@' (max 3)
  *   2. type label → poll picker still visible
  *      - invisible: rewind (label.length + 1) and full-retry
- *   3. Enter unique candidate → verify chip; strip orphan bare '@' after commit
+ *   3. click unique candidate → verify chip; strip orphan bare '@' after commit
  *
  * Critical: never type a second '@' while a bare '@' is still in the composer
  * (that produced the Hub-visible "@@图片1" flash on slow machines).
@@ -1567,8 +1568,8 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
   for (let fullAttempt = 0; fullAttempt < maxFullAttempts; fullAttempt += 1) {
     const before = await getMentionState(page, asset);
 
-    // Prepare a clean caret only at the start of a full attempt.
-    await pressKeyWithGap(page, 'Escape', 0.12);
+    // Do not press Escape when no picker is open: Jimeng may collapse the
+    // composer. Failure rewind still closes an actually open picker.
     await ensurePromptEditorCaret(page);
     await page.sleep(MENTION_KEY_GAP_S);
     // Drop any leftover bare '@' from a previous attempt before we type a new one.
@@ -1653,7 +1654,7 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
       continue;
     }
 
-    // ---------- Phase 3: unique candidate + Enter ----------
+    // ---------- Phase 3: unique candidate + atomic click ----------
     await page.sleep(0.5);
     const marker = nextMarker(`mention-${label}`);
     const candidate = await waitForMarker(
@@ -1666,7 +1667,7 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
     let committed = false;
     if (candidate.ok) {
       const candidateTarget = await inspectMentionCandidateTarget(page, marker, asset);
-      await captureMentionDebug(page, mentionDebug, 'before-enter', asset, {
+      await captureMentionDebug(page, mentionDebug, 'before-click', asset, {
         fullAttempt: fullAttempt + 1,
         expectedMentionCount,
         candidate,
@@ -1680,21 +1681,22 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
         );
       }
 
-      // Unique visible candidate is enough. Do not re-click the editor before Enter.
+      // Do not re-focus the editor: the selector revalidates and clicks the
+      // marked unique candidate in one browser-side turn.
       if (candidateTarget?.ok || candidateTarget?.reason === 'candidate-center-obscured') {
         try {
           await page.sleep(MENTION_KEY_GAP_S);
-          const enterGuard = await selectMentionCandidateWithGuardedEnter(page, marker, asset);
-          // Do NOT Escape after Enter — picker closes itself; Escape thrashs the dock.
-          // Chip rendering can lag behind the Enter key on slow hosts, so poll
+          const selection = await page.evaluate(buildMentionCandidateExpression(asset, marker, true));
+          // Do NOT Escape after click — picker closes itself; Escape thrashs the dock.
+          // Chip rendering can lag behind the click on slow hosts, so poll
           // for the commit instead of a single fixed sleep.
-          const commit = await waitForMentionCommit(page, asset, before, enterGuard, 4_000);
-          await captureMentionDebug(page, mentionDebug, 'after-enter', asset, {
+          const commit = await waitForMentionCommit(page, asset, before, selection, 4_000);
+          await captureMentionDebug(page, mentionDebug, 'after-click', asset, {
             fullAttempt: fullAttempt + 1,
             expectedMentionCount,
             candidate,
             candidateTarget,
-            enterGuard,
+            selection,
             before,
             after: commit.after,
           });
@@ -1709,13 +1711,13 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
             committed = true;
           } else {
             console.error(
-              `[jimeng-agent] mention commit not observed for ${label} guard=${enterGuard?.status} `
+              `[jimeng-agent] mention commit not observed for ${label} selection=${selection?.status} `
               + `after=${JSON.stringify(commit.after)}`,
             );
           }
         } catch (err) {
           if (mentionDebug.enabled && mentionDebug.stopPhase === 'after-click') throw err;
-          await captureMentionDebug(page, mentionDebug, 'enter-failed', asset, {
+          await captureMentionDebug(page, mentionDebug, 'click-failed', asset, {
             fullAttempt: fullAttempt + 1,
             error: err?.message || String(err),
           });
@@ -1727,7 +1729,7 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
       );
     }
 
-    // Double-check: chip may have landed even if Enter status was noisy.
+    // Double-check: chip may have landed even if click status was noisy.
     if (!committed) {
       const check = await getMentionState(page, asset);
       if (check.matchingMentionCount > before.matchingMentionCount) {
@@ -1736,7 +1738,7 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
         // Repeat mention of same asset: raw token gone, at least one chip present.
         // (before.hasRaw is typically false at the start of an attempt.)
       }
-      // Repeat-mention case: Enter consumed @label without adding a second chip node.
+      // Repeat-mention case: selection consumed @label without adding a second chip node.
       if (!committed && !check.hasRaw) {
         const stillHasRawQuery = await page.evaluate(`(() => {
           ${buildPromptEditorLocatorScript()}
@@ -1746,7 +1748,7 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
           return text.includes(${JSON.stringify(`@${label}`)});
         })()`);
         if (!stillHasRawQuery && check.matchingMentionCount >= 1) {
-          // Only accept if we no longer have the raw token and had a successful Enter path
+          // Only accept if we no longer have the raw token and had a successful click path
           // or the picker closed after our attempt (best-effort for duplicate labels).
           committed = true;
         }
@@ -1768,7 +1770,7 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
       return;
     }
 
-    // Enter/commit failed → rewind (label + '@') and full-retry.
+    // Click/commit failed → rewind (label + '@') and full-retry.
     await rewindMentionKeystrokes(page, label, 'label');
   }
 
@@ -1995,136 +1997,6 @@ async function captureMentionDebug(page, debug, phase, asset, extra = {}) {
   if (debug.sleepMs > 0) {
     await page.sleep(debug.sleepMs / 1000);
   }
-}
-
-async function selectMentionCandidateWithGuardedEnter(page, marker, asset) {
-  const guardKey = `__opencliJimengMentionEnterGuard_${marker}`;
-  const initial = await page.evaluate(`(() => {
-    ${buildPromptEditorLocatorScript()}
-    const guardKey = ${JSON.stringify(guardKey)};
-    const marker = ${JSON.stringify(marker)};
-    const label = ${JSON.stringify(asset.label)};
-    const prior = window[guardKey];
-    prior?.abortController?.abort();
-
-    const abortController = new AbortController();
-    const compact = (value) => String(value || '').replace(/[\\u00a0\\u200b\\s]+/g, '');
-    const inspect = () => {
-      const editor = findPromptEditor();
-      const candidate = document.querySelector(
-        '[' + ${JSON.stringify(TARGET_ATTR)} + '="' + CSS.escape(marker) + '"]',
-      );
-      const selection = window.getSelection();
-      const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
-      const rect = candidate?.getBoundingClientRect();
-      const hit = rect && rect.width > 0 && rect.height > 0
-        ? document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
-        : null;
-      const candidateVisible = !!candidate && !!rect
-        && rect.width > 0
-        && rect.height > 0
-        && getComputedStyle(candidate).visibility !== 'hidden'
-        && getComputedStyle(candidate).display !== 'none';
-      // Enter selection does not need a clear mouse hit on the candidate center.
-      // Require a unique visible matching candidate + caret still in the editor.
-      const candidateHit = !!candidate && !!hit && (hit === candidate || candidate.contains(hit));
-      const candidateMatches = !!candidate && [candidate, ...candidate.querySelectorAll('*')]
-        .some((node) => {
-          const text = compact(node.innerText || node.textContent);
-          return text === compact(label) || text.includes(compact(label));
-        });
-      const selectionInEditor = !!editor
-        && !!selection
-        && selection.rangeCount >= 1
-        && editor.contains(selection.anchorNode)
-        && editor.contains(selection.focusNode);
-      const suggestionMatches = !!editor && (
-        [...editor.querySelectorAll('.suggestion, [class*="suggestion"]')]
-          .some((node) => compact(node.innerText || node.textContent).includes(compact(label)))
-        // Raw trailing @label is also a valid pre-commit state.
-        || compact(editor.innerText || editor.textContent || '').includes(compact('@' + label))
-      );
-      const activeInEditor = !!editor
-        && (document.activeElement === editor || editor.contains(document.activeElement));
-      // Unique visible candidate + editor ownership is enough for Enter.
-      // Do not require activeElement/suggestion extras — CJK insertText can
-      // briefly blur the editor while the picker is still valid.
-      return {
-        safe: candidateVisible
-          && candidateMatches
-          && (selectionInEditor || activeInEditor || suggestionMatches),
-        candidateVisible,
-        candidateHit,
-        candidateMatches,
-        selectionInEditor,
-        suggestionMatches,
-        activeInEditor,
-        selectionText: range ? String(range.toString()) : '',
-      };
-    };
-    const state = {
-      status: 'armed',
-      initial: inspect(),
-      keydown: null,
-    };
-    const block = (event) => {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-    };
-    window.addEventListener('keydown', (event) => {
-      if (event.key !== 'Enter') return;
-      const keydown = inspect();
-      state.keydown = keydown;
-      if (!keydown.safe) {
-        state.status = 'blocked';
-        block(event);
-        return;
-      }
-      state.status = 'allowed';
-    }, { capture: true, signal: abortController.signal });
-    window.addEventListener('keyup', (event) => {
-      if (event.key !== 'Enter') return;
-      if (state.status !== 'allowed') block(event);
-    }, { capture: true, signal: abortController.signal });
-    window[guardKey] = { abortController, state };
-    return state.initial;
-  })()`);
-
-  if (!initial.safe) {
-    // Soft failure: let the attempt loop restore to pre-@ and retry.
-    // Hard-throwing here previously left a dangling '@' in the composer.
-    await page.evaluate(`(() => {
-      const guard = window[${JSON.stringify(guardKey)}];
-      guard?.abortController?.abort();
-      delete window[${JSON.stringify(guardKey)}];
-    })()`).catch(() => null);
-    return { status: 'not-armed', initial };
-  }
-
-  await dispatchEnterKey(page);
-  // The browser bridge can acknowledge the CDP command before a busy Jimeng
-  // renderer has delivered the DOM keydown. Keep the capture guard armed
-  // until the event loop has had time to process both key events.
-  await page.sleep(0.15);
-  const outcome = await page.evaluate(`(() => {
-    const guard = window[${JSON.stringify(guardKey)}];
-    if (!guard) return { status: 'missing', keydown: null };
-    guard.abortController.abort();
-    delete window[${JSON.stringify(guardKey)}];
-    return {
-      status: guard.state.status,
-      keydown: guard.state.keydown,
-    };
-  })()`);
-  if (outcome.status !== 'allowed' || outcome.keydown?.safe !== true) {
-    // Soft failure for the attempt loop (restore pre-@ + retry).
-    return {
-      status: outcome.status || 'blocked',
-      keydown: outcome.keydown,
-      safe: false,
-    };
-  }
-  return outcome;
 }
 
 async function dispatchEnterKey(page, modifiers = 0) {
@@ -2509,7 +2381,7 @@ async function insertSoftBreak(page) {
   }
 }
 
-function buildMentionCandidateExpression(asset, marker) {
+function buildMentionCandidateExpression(asset, marker, click = false) {
   return `(() => {
     const visible = (el) => {
       if (!(el instanceof HTMLElement)) return false;
@@ -2546,10 +2418,22 @@ function buildMentionCandidateExpression(asset, marker) {
         menus,
       };
     }
+    const marked = [...document.querySelectorAll(
+      '[${TARGET_ATTR}="${marker}"]',
+    )];
+    if (${JSON.stringify(click)} && (marked.length !== 1 || marked[0] !== matches[0].option)) {
+      return {
+        ok: false,
+        status: 'candidate-changed',
+        markedCount: marked.length,
+      };
+    }
     matches[0].option.setAttribute(${JSON.stringify(TARGET_ATTR)}, ${JSON.stringify(marker)});
     const rect = matches[0].option.getBoundingClientRect();
+    if (${JSON.stringify(click)}) matches[0].option.click();
     return {
       ok: true,
+      status: ${JSON.stringify(click)} ? 'clicked' : 'ready',
       x: Math.round(rect.left + rect.width / 2),
       y: Math.round(rect.top + rect.height / 2),
       width: Math.round(rect.width),
@@ -2581,7 +2465,7 @@ async function inspectMentionCandidateTarget(page, marker, asset) {
     const x = Math.round(rect.left + rect.width / 2);
     const y = Math.round(rect.top + rect.height / 2);
     const hit = document.elementFromPoint(x, y);
-    // Center-obscured is non-fatal for Enter-based selection; report it but
+    // Center-obscured is non-fatal for DOM click selection; report it but
     // still mark ok when the unique candidate is visible and text-matched.
     const centerClear = !!(hit && option.contains(hit));
     return {
@@ -2640,19 +2524,19 @@ async function getMentionState(page, asset) {
 }
 
 /**
- * Poll after the guarded Enter until the mention commit is observable:
+ * Poll after the atomic candidate click until the mention commit is observable:
  * - the chip count for this asset increased, or
- * - Enter was allowed and the raw '@label' token is gone (repeat mentions of
+ * - the click ran and the raw '@label' token is gone (repeat mentions of
  *   the same asset may not add a second chip node).
- * Chip rendering can lag behind the key event on slow hosts.
+ * Chip rendering can lag behind the click on slow hosts.
  */
-async function waitForMentionCommit(page, asset, before, enterGuard, timeoutMs) {
+async function waitForMentionCommit(page, asset, before, selection, timeoutMs) {
   const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
   let after = before;
   while (Date.now() < deadline) {
     after = await getMentionState(page, asset);
     const committed = after.matchingMentionCount > before.matchingMentionCount
-      || (enterGuard?.status === 'allowed' && !after.hasRaw);
+      || (selection?.status === 'clicked' && !after.hasRaw);
     if (committed) {
       await page.sleep(0.15);
       return { committed: true, after };
