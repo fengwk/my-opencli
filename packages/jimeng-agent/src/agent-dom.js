@@ -1690,7 +1690,14 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
           // Do NOT Escape after click — picker closes itself; Escape thrashs the dock.
           // Chip rendering can lag behind the click on slow hosts, so poll
           // for the commit instead of a single fixed sleep.
-          const commit = await waitForMentionCommit(page, asset, before, selection, 4_000);
+          const commit = await waitForMentionCommit(
+            page,
+            asset,
+            before,
+            selection,
+            expectedMentionCount,
+            4_000,
+          );
           await captureMentionDebug(page, mentionDebug, 'after-click', asset, {
             fullAttempt: fullAttempt + 1,
             expectedMentionCount,
@@ -1727,32 +1734,6 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
       console.error(
         `[jimeng-agent] mention candidate not found for ${label} within timeout: ${JSON.stringify(candidate)}`,
       );
-    }
-
-    // Double-check: chip may have landed even if click status was noisy.
-    if (!committed) {
-      const check = await getMentionState(page, asset);
-      if (check.matchingMentionCount > before.matchingMentionCount) {
-        committed = true;
-      } else if (!check.hasRaw && before.hasRaw === false && check.matchingMentionCount >= 1) {
-        // Repeat mention of same asset: raw token gone, at least one chip present.
-        // (before.hasRaw is typically false at the start of an attempt.)
-      }
-      // Repeat-mention case: selection consumed @label without adding a second chip node.
-      if (!committed && !check.hasRaw) {
-        const stillHasRawQuery = await page.evaluate(`(() => {
-          ${buildPromptEditorLocatorScript()}
-          const editor = findPromptEditor();
-          if (!editor) return false;
-          const text = (editor.innerText || editor.textContent || '').replace(/\\u00a0/g, ' ');
-          return text.includes(${JSON.stringify(`@${label}`)});
-        })()`);
-        if (!stillHasRawQuery && check.matchingMentionCount >= 1) {
-          // Only accept if we no longer have the raw token and had a successful click path
-          // or the picker closed after our attempt (best-effort for duplicate labels).
-          committed = true;
-        }
-      }
     }
 
     if (committed) {
@@ -2381,7 +2362,7 @@ async function insertSoftBreak(page) {
   }
 }
 
-function buildMentionCandidateExpression(asset, marker, click = false) {
+export function buildMentionCandidateExpression(asset, marker, click = false) {
   return `(() => {
     const visible = (el) => {
       if (!(el instanceof HTMLElement)) return false;
@@ -2391,6 +2372,13 @@ function buildMentionCandidateExpression(asset, marker, click = false) {
     };
     const compact = (value) => String(value || '').replace(/\\s+/g, '').toLocaleLowerCase();
     const variants = ${JSON.stringify([asset.label, asset.filename, asset.mentionName])}.map(compact).filter(Boolean);
+    const registryKey = '__opencliJimengMentionCandidateRegistry';
+    let registry = window[registryKey];
+    if (!(registry instanceof Map)) {
+      registry = new Map();
+      window[registryKey] = registry;
+    }
+    if (!${JSON.stringify(click)}) registry.clear();
     const options = [...document.querySelectorAll(${JSON.stringify(MENTION_OPTION_SELECTOR)})]
       .filter(visible)
       .filter((option) => {
@@ -2403,6 +2391,11 @@ function buildMentionCandidateExpression(asset, marker, click = false) {
     }));
     const matches = named.filter(({ name }) => variants.some((variant) => name.includes(variant)));
     if (matches.length !== 1) {
+      if (${JSON.stringify(click)}) {
+        registry.delete(${JSON.stringify(marker)});
+        document.querySelectorAll('[${TARGET_ATTR}="${marker}"]')
+          .forEach((node) => node.removeAttribute(${JSON.stringify(TARGET_ATTR)}));
+      }
       const suggestion = document.querySelector('.suggestion, [class*="suggestion"]');
       const menus = [...document.querySelectorAll('[role="listbox"], [role="menu"], [class*="mention"], [class*="suggestion"]')]
         .filter(visible)
@@ -2421,16 +2414,36 @@ function buildMentionCandidateExpression(asset, marker, click = false) {
     const marked = [...document.querySelectorAll(
       '[${TARGET_ATTR}="${marker}"]',
     )];
-    if (${JSON.stringify(click)} && (marked.length !== 1 || marked[0] !== matches[0].option)) {
-      return {
-        ok: false,
-        status: 'candidate-changed',
-        markedCount: marked.length,
-      };
+    if (${JSON.stringify(click)}) {
+      const approved = registry.get(${JSON.stringify(marker)});
+      const sameCandidate = approved instanceof HTMLElement
+        && approved.isConnected
+        && marked.length === 1
+        && marked[0] === approved
+        && approved === matches[0].option;
+      if (!sameCandidate) {
+        registry.delete(${JSON.stringify(marker)});
+        marked.forEach((node) => node.removeAttribute(${JSON.stringify(TARGET_ATTR)}));
+        return {
+          ok: false,
+          status: 'candidate-changed',
+          markedCount: marked.length,
+          approvedConnected: approved instanceof HTMLElement && approved.isConnected,
+        };
+      }
+    } else {
+      registry.set(${JSON.stringify(marker)}, matches[0].option);
     }
     matches[0].option.setAttribute(${JSON.stringify(TARGET_ATTR)}, ${JSON.stringify(marker)});
     const rect = matches[0].option.getBoundingClientRect();
-    if (${JSON.stringify(click)}) matches[0].option.click();
+    if (${JSON.stringify(click)}) {
+      try {
+        matches[0].option.click();
+      } finally {
+        registry.delete(${JSON.stringify(marker)});
+        matches[0].option.removeAttribute(${JSON.stringify(TARGET_ATTR)});
+      }
+    }
     return {
       ok: true,
       status: ${JSON.stringify(click)} ? 'clicked' : 'ready',
@@ -2490,7 +2503,14 @@ async function getMentionState(page, asset) {
     ${buildPromptEditorLocatorScript()}
     // \`visible\` comes from buildPromptEditorLocatorScript().
     const editor = findPromptEditor();
-    if (!editor) return { hasRaw: false, matchingMentionCount: 0, menuVisible: false };
+    if (!editor) {
+      return {
+        hasRaw: false,
+        matchingMentionCount: 0,
+        menuVisible: false,
+        mentionLabels: [],
+      };
+    }
     const compact = (value) => String(value || '').replace(/\\u200b/g, '').replace(/\\s+/g, '').toLocaleLowerCase();
     const read = (node) => {
       let text = node.innerText || node.textContent || '';
@@ -2504,6 +2524,10 @@ async function getMentionState(page, asset) {
     const editorText = (editor.innerText || editor.textContent || '').replace(/\\u00a0/g, ' ');
     const tail = compact(editorText.slice(-Math.max(160, ${JSON.stringify(asset.label)}.length * 8)));
     const mentionNodes = [...editor.querySelectorAll(${JSON.stringify(MENTION_NODE_SELECTOR)})].filter(visible);
+    const mentionLabels = [...editor.querySelectorAll('.node-reference-mention-tag')]
+      .filter(visible)
+      .map((node) => compact(read(node)))
+      .filter(Boolean);
     const matchingMentionCount = mentionNodes.filter((node) => {
       const text = compact(read(node));
       return variants.some((variant) => text.includes(variant));
@@ -2511,33 +2535,59 @@ async function getMentionState(page, asset) {
     const menuVisible = [...document.querySelectorAll(${JSON.stringify(MENTION_OPTION_SELECTOR)})]
       .filter(visible)
       .some((node) => {
-        const text = compact(read(node));
-        return variants.some((variant) => text.includes(variant));
+        const text = String(read(node) || '').replace(/\\s+/g, '');
+        return /(?:图片|视频|音频)\\d+/.test(text);
       });
     return {
       hasRaw: tail.includes(compact('@' + ${JSON.stringify(asset.label)})),
       matchingMentionCount,
       menuVisible,
-      mentionTotal: mentionNodes.length,
+      mentionLabels,
     };
   })()`);
 }
 
+export function isStrictMentionCommit(before, after, selection, asset, expectedMentionCount) {
+  if (selection?.status !== 'clicked' || after?.hasRaw !== false || after?.menuVisible !== false) {
+    return false;
+  }
+  if (!Array.isArray(before?.mentionLabels) || !Array.isArray(after?.mentionLabels)) {
+    return false;
+  }
+  if (
+    before.mentionLabels.length !== expectedMentionCount - 1
+    || after.mentionLabels.length !== expectedMentionCount
+  ) {
+    return false;
+  }
+  for (let i = 0; i < before.mentionLabels.length; i += 1) {
+    if (before.mentionLabels[i] !== after.mentionLabels[i]) return false;
+  }
+  const compact = (value) => String(value || '').replace(/\s+/g, '').toLocaleLowerCase();
+  const appended = after.mentionLabels[after.mentionLabels.length - 1] || '';
+  return appended === compact(asset?.label);
+}
+
 /**
  * Poll after the atomic candidate click until the mention commit is observable:
- * - the chip count for this asset increased, or
- * - the click ran and the raw '@label' token is gone (repeat mentions of
- *   the same asset may not add a second chip node).
+ * - the click ran;
+ * - exactly one ordered .node-reference-mention-tag was appended for this asset;
+ * - the raw query is gone and the mention menu is closed.
  * Chip rendering can lag behind the click on slow hosts.
  */
-async function waitForMentionCommit(page, asset, before, selection, timeoutMs) {
+async function waitForMentionCommit(
+  page,
+  asset,
+  before,
+  selection,
+  expectedMentionCount,
+  timeoutMs,
+) {
   const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
   let after = before;
   while (Date.now() < deadline) {
     after = await getMentionState(page, asset);
-    const committed = after.matchingMentionCount > before.matchingMentionCount
-      || (selection?.status === 'clicked' && !after.hasRaw);
-    if (committed) {
+    if (isStrictMentionCommit(before, after, selection, asset, expectedMentionCount)) {
       await page.sleep(0.15);
       return { committed: true, after };
     }
