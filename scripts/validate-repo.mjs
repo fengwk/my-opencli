@@ -18,6 +18,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const MANIFEST_FILE = 'opencli-plugin.json';
 const ROOT_PACKAGE_FILE = 'package.json';
+const ROOT_LOCK_FILE = 'package-lock.json';
 const OPENCLI_PEER = '@jackwener/opencli';
 
 /** Plugin / path segment names: lowercase alnum, hyphen/underscore, no leading punctuation. */
@@ -173,6 +174,28 @@ function validateManifestAndPackages() {
         );
       } else if (typeof manifest.version === 'string') {
         ok(`Root package.json version=${rootPkg.version} matches ${MANIFEST_FILE}`);
+      }
+    }
+  }
+
+  const rootLockPath = path.join(ROOT, ROOT_LOCK_FILE);
+  if (!fs.existsSync(rootLockPath)) {
+    fail(`Missing root ${ROOT_LOCK_FILE}`);
+  } else {
+    const rootLock = readJson(rootLockPath);
+    if (rootLock && typeof manifest.version === 'string') {
+      const lockVersions = [
+        ['top-level', rootLock.version],
+        ['packages[""]', rootLock.packages?.['']?.version],
+      ];
+      for (const [field, version] of lockVersions) {
+        if (version !== manifest.version) {
+          fail(
+            `Root ${ROOT_LOCK_FILE} ${field} version "${version}" !== ${MANIFEST_FILE} version "${manifest.version}"`,
+          );
+        } else {
+          ok(`Root ${ROOT_LOCK_FILE} ${field} version=${version}`);
+        }
       }
     }
   }
