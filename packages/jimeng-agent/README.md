@@ -80,9 +80,8 @@ Failure phase: `checkpoint`. This gate does **not** reopen or re-check the Auto 
 
 ## Safety boundary
 
-- Mention selection uses Enter only after a synchronous capture-phase guard
-  confirms the unique candidate, active suggestion, editor focus, and collapsed
-  selection are still valid.
+- Mention selection revalidates and clicks the unique marked resource candidate
+  in one browser-side operation; it does not dispatch bare Enter.
 - Default `--submit 0` never starts generation.
 - `--submit 1` is the only path that clicks the generate control, and only after
   a green checkpoint.
