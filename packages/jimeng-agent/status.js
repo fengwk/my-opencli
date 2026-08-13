@@ -15,7 +15,10 @@ export const statusCommand = cli({
   domain: JIMENG_DOMAIN,
   strategy: Strategy.COOKIE,
   browser: true,
-  siteSession: 'persistent',
+  // Status navigates independently and must not replace the persistent video draft tab.
+  siteSession: 'ephemeral',
+  // Jimeng leaves the history feed in a permanent skeleton in background tabs.
+  defaultWindowMode: 'foreground',
   navigateBefore: false,
   args: [
     {
