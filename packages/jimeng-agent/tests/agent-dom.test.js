@@ -375,6 +375,34 @@ describe('jimeng-agent/agent-dom — mention input safety', () => {
     );
     expect(rewind).toContain("pressKeyWithGap(page, 'Escape', 0.12)");
   });
+
+  it('clears the composer without sending Escape that can collapse the dock', () => {
+    const clear = sourceBetween(
+      'async function clearComposer(',
+      'async function getComposerClearState(',
+    );
+    expect(clear).not.toMatch(/nativeKeyPress\(['"]Escape['"]/);
+    expect(clear).toContain("nativeKeyPress('a', ['Ctrl'])");
+    expect(clear).toContain("nativeKeyPress('Backspace')");
+  });
+
+  it('attributes upload failures without reading historical document body text', () => {
+    const snapshot = sourceBetween(
+      'async function collectDockReferenceSnapshot(',
+      '/**\n * Visible page health snapshot.',
+    );
+    const wait = sourceBetween(
+      'async function waitForUploadCompletion(',
+      'async function fillPromptWithRichMentions(',
+    );
+    expect(snapshot).not.toContain('document.body.innerText');
+    expect(snapshot).not.toContain('raw.bodyText');
+    expect(wait).toContain(
+      'observeCurrentUploadFailure({',
+    );
+    expect(wait).not.toContain('snap.bodyText');
+    expect(snapshot).toContain('registry?.[id] === el');
+  });
 });
 
 describe('jimeng-agent/agent-dom — prompt structure validation', () => {

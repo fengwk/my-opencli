@@ -31,10 +31,10 @@ import {
 import {
   cardIdentity,
   hasUploadBusyText,
-  hasUploadFailureText,
   isNewUploadCard,
   isProcessingCard,
   isUploadSlotEntry,
+  observeCurrentUploadFailure,
   parseReferenceCountStyle,
 } from './upload-state.js';
 
@@ -57,6 +57,9 @@ const MENTION_OPTION_SELECTOR = [
 ].join(', ');
 const LEADING_MENTION_GUARD = '\u200b';
 const UPLOAD_SLOT_ATTR = 'data-opencli-jimeng-upload-slot';
+const UPLOAD_ALERT_BASELINE_ATTR = 'data-opencli-jimeng-upload-alert-baseline';
+const UPLOAD_ALERT_ID_ATTR = 'data-opencli-jimeng-upload-alert-id';
+const UPLOAD_ALERT_REGISTRY_KEY = '__opencliJimengUploadAlertBaselineRegistry';
 const TARGET_ATTR = 'data-opencli-jimeng-target';
 const MENTION_DEBUG_ENABLED_ENV = 'OPENCLI_JIMENG_MENTION_DEBUG';
 const MENTION_DEBUG_SLEEP_ENV = 'OPENCLI_JIMENG_MENTION_DEBUG_SLEEP_MS';
@@ -340,12 +343,11 @@ export async function prepareJimengAgentAsk(page, canonical, preparedAssets) {
  * processing) are computed here in Node from the pure helpers so the
  * decisions are unit-testable.
  */
-async function collectDockReferenceSnapshot(page) {
+async function collectDockReferenceSnapshot(page, alertBaselineMarker = '') {
   const raw = await page.evaluate(`(() => {
     ${buildPromptEditorLocatorScript()}
     // \`visible\` comes from buildPromptEditorLocatorScript().
     const editor = findPromptEditor();
-    const bodyText = (document.body.innerText || '').replace(/\\s+/g, ' ');
     const editorRect = editor ? editor.getBoundingClientRect() : null;
     const editorTop = editorRect ? editorRect.top : -1;
     const editorBottom = editorRect ? editorRect.bottom : -1;
@@ -396,26 +398,35 @@ async function collectDockReferenceSnapshot(page) {
           };
         }),
       }));
-    // Scoped failure signals for THIS upload: rejected-card badges and
-    // live toasts/alerts. document.body text mixes in chat history, so the
-    // rejection text must come from scoped elements, not bodyText tails.
-    const scopedFailures = [...document.querySelectorAll('[role="alert"], [class*="toast-"], [class^="toast"], [class*="Toast"]')]
+    // Capture visible live toasts/alerts separately from chat history. Upload
+    // callers compare them with their pre-upload baseline before attribution.
+    const scopedAlerts = [...document.querySelectorAll('[role="alert"], [class*="toast-"], [class^="toast"], [class*="Toast"]')]
       .filter(visible)
-      .map((el) => (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim())
-      .filter((text) => text && /未通过|不通过|失败|违规|拒绝|审核|敏感|上传/.test(text));
-    return { ok: true, editorTop, bodyText, alerts: scopedFailures, strips };
+      .map((el) => {
+        const id = el.getAttribute(${JSON.stringify(UPLOAD_ALERT_ID_ATTR)}) || '';
+        const registry = window[${JSON.stringify(UPLOAD_ALERT_REGISTRY_KEY)}]?.[${JSON.stringify(alertBaselineMarker)}];
+        return {
+          text: (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim(),
+          baselineId: (
+            el.getAttribute(${JSON.stringify(UPLOAD_ALERT_BASELINE_ATTR)}) === ${JSON.stringify(alertBaselineMarker)}
+            && id
+            && registry?.[id] === el
+          ) ? id : '',
+        };
+      })
+      .filter((alert) => alert.text);
+    return { ok: true, editorTop, alerts: scopedAlerts, strips };
   })()`);
 
   if (!raw?.ok) {
     return {
       ok: false,
       editorTop: -1,
-      bodyText: '',
+      alerts: [],
       strips: 0,
       count: 0,
       cards: [],
       busy: false,
-      failure: false,
     };
   }
 
@@ -439,15 +450,7 @@ async function collectDockReferenceSnapshot(page) {
 
   const count = cards.length;
   const processingCards = cards.filter((card) => isProcessingCard(card));
-  const busy = hasUploadBusyText(raw.bodyText) || processingCards.length > 0;
-  const failure = hasUploadFailureText(raw.bodyText);
-  // Prefer THIS-upload signals over the whole-body text: a rejected card's
-  // badge text and live toast/alert messages, in that order.
-  const rejectedCardText = cards
-    .map((card) => card.text || '')
-    .find((text) => /未通过|不通过|失败|违规|拒绝|审核|敏感/.test(text)) || '';
-  const alertText = (raw.alerts || []).join(' | ');
-  const failureText = rejectedCardText || alertText || '';
+  const busy = processingCards.length > 0;
   const countFromStyle = raw.strips
     .map((strip) => parseReferenceCountStyle(strip.groupStyle))
     .find((value) => value !== null);
@@ -455,16 +458,13 @@ async function collectDockReferenceSnapshot(page) {
   return {
     ok: true,
     editorTop: raw.editorTop,
-    bodyText: raw.bodyText,
     alerts: raw.alerts || [],
-    failureText,
     strips: raw.strips.length,
     count,
     countFromStyle,
     cards,
     processing: processingCards.length,
     busy,
-    failure,
   };
 }
 
@@ -567,7 +567,6 @@ export async function probeJimengAgentSurface(page) {
     referenceStripFound: dock.strips > 0,
     referenceProcessingCount: dock.processing,
     uploadBusy: dock.busy,
-    uploadFailure: dock.failure,
   };
 }
 
@@ -1107,28 +1106,36 @@ async function uploadReferenceAssets(page, assets, uploads, startAssetIndex, bas
         index,
       );
     }
+    const alertBaselineMarker = nextMarker(`upload-alerts-${index}`);
+    const baselineAlerts = await markVisibleUploadAlertBaseline(page, alertBaselineMarker);
 
     try {
-      // Assign exactly one file per change event. Jimeng can silently discard a
-      // heterogeneous multi-file assignment, so every card is acknowledged
-      // before the next resource is offered.
-      await page.setFileInput([asset.browserPath], slot.selector);
-    } catch (err) {
-      throw phaseError(
-        'upload',
-        `setFileInput failed for ${asset.label} (${asset.filename}): ${describeError(err)}`,
-        'Verify the file is readable by the browser host and no native file chooser is open.',
-        index,
-      );
-    }
+      try {
+        // Assign exactly one file per change event. Jimeng can silently discard a
+        // heterogeneous multi-file assignment, so every card is acknowledged
+        // before the next resource is offered.
+        await page.setFileInput([asset.browserPath], slot.selector);
+      } catch (err) {
+        throw phaseError(
+          'upload',
+          `setFileInput failed for ${asset.label} (${asset.filename}): ${describeError(err)}`,
+          'Verify the file is readable by the browser host and no native file chooser is open.',
+          index,
+        );
+      }
 
-    await waitForUploadCompletion(
-      page,
-      asset,
-      index,
-      before.cards,
-      before.count,
-    );
+      await waitForUploadCompletion(
+        page,
+        asset,
+        index,
+        before.cards,
+        before.count,
+        alertBaselineMarker,
+        baselineAlerts,
+      );
+    } finally {
+      await clearUploadAlertBaseline(page, alertBaselineMarker);
+    }
     // The upload-wait loop never moves the mouse; it stays parked where the
     // last clear hover ended. Move it to the composer so no history-card
     // tooltip overlay can rise during the next upload's wait.
@@ -1159,7 +1166,50 @@ async function markCurrentUploadSlot(page, marker) {
   })()`);
 }
 
-async function waitForUploadCompletion(page, asset, failedAssetIndex, baselineCards, baselineCount) {
+async function markVisibleUploadAlertBaseline(page, marker) {
+  return page.evaluate(`(() => {
+    ${buildPromptEditorLocatorScript()}
+    const registryKey = ${JSON.stringify(UPLOAD_ALERT_REGISTRY_KEY)};
+    const registries = window[registryKey] || (window[registryKey] = Object.create(null));
+    const registry = Object.create(null);
+    registries[${JSON.stringify(marker)}] = registry;
+    const alerts = [...document.querySelectorAll(
+      '[role="alert"], [class*="toast-"], [class^="toast"], [class*="Toast"]',
+    )].filter(visible);
+    return alerts.map((el, index) => {
+      const id = ${JSON.stringify(marker)} + '-' + index;
+      const text = (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+      el.setAttribute(${JSON.stringify(UPLOAD_ALERT_BASELINE_ATTR)}, ${JSON.stringify(marker)});
+      el.setAttribute(${JSON.stringify(UPLOAD_ALERT_ID_ATTR)}, id);
+      registry[id] = el;
+      return { id, text };
+    }).filter((alert) => alert.text);
+  })()`);
+}
+
+async function clearUploadAlertBaseline(page, marker) {
+  await page.evaluate(`(() => {
+    const registryKey = ${JSON.stringify(UPLOAD_ALERT_REGISTRY_KEY)};
+    const registries = window[registryKey];
+    if (registries) delete registries[${JSON.stringify(marker)}];
+    for (const el of document.querySelectorAll(
+      '[${UPLOAD_ALERT_BASELINE_ATTR}="${marker}"]',
+    )) {
+      el.removeAttribute(${JSON.stringify(UPLOAD_ALERT_BASELINE_ATTR)});
+      el.removeAttribute(${JSON.stringify(UPLOAD_ALERT_ID_ATTR)});
+    }
+  })()`).catch(() => null);
+}
+
+async function waitForUploadCompletion(
+  page,
+  asset,
+  failedAssetIndex,
+  baselineCards,
+  baselineCount,
+  alertBaselineMarker,
+  baselineAlerts = [],
+) {
   // Images usually index quickly, but content-moderation can keep the card in
   // the processing state for a while; video/audio often need longer anyway.
   const timeoutMs = asset.kind === 'image' ? 45_000 : 60_000;
@@ -1173,26 +1223,11 @@ async function waitForUploadCompletion(page, asset, failedAssetIndex, baselineCa
       .filter((card) => isUploadSlotEntry(card) && card.identity)
       .map((card) => card.identity),
   );
-  let sawBusy = false;
+  let activeBaselineAlertIds = baselineAlerts.map((alert) => alert.id);
   let stablePolls = 0;
   let lastCards = null;
   while (Date.now() < deadline) {
-    const snap = await collectDockReferenceSnapshot(page);
-    if (snap.failure) {
-      const moderationHint = /审核|未通过|不通过|违规|敏感|拒绝|content.*review|violat/i.test(
-        snap.failureText || String(snap.bodyText || ''),
-      );
-      throw phaseError(
-        'upload',
-        `Jimeng rejected ${asset.label} (${asset.filename}): ${snap.failureText || snap.bodyText.slice(-160)}`,
-        moderationHint
-          ? 'No generation was submitted. The visible UI rejected this asset — likely by content moderation. Check the file content and retry with a different asset.'
-          : 'No generation was submitted. The visible UI rejected this file; check account/workspace entitlement and retry later.',
-        failedAssetIndex,
-      );
-    }
-    if (snap.busy) sawBusy = true;
-
+    const snap = await collectDockReferenceSnapshot(page, alertBaselineMarker);
     // A new card is one whose identity is not part of the pre-upload baseline
     // (draft cards restored by Jimeng count as baseline, so leftovers never
     // inflate the upload result), or a baseline upload slot that was filled
@@ -1201,10 +1236,31 @@ async function waitForUploadCompletion(page, asset, failedAssetIndex, baselineCa
       (card) => isNewUploadCard(card, baseline, baselineSlotIdentities),
     );
     const newIds = new Set(newCards.map((card) => card.identity));
-
+    const failureObservation = observeCurrentUploadFailure({
+      cards: newCards,
+      alerts: snap.alerts,
+      baselineAlerts,
+      activeBaselineAlertIds,
+    });
+    activeBaselineAlertIds = failureObservation.activeBaselineAlertIds;
+    const { failureText } = failureObservation;
+    if (failureText) {
+      const moderationHint = /审核|未通过|不通过|违规|敏感|拒绝|content.*review|violat/i.test(
+        failureText,
+      );
+      throw phaseError(
+        'upload',
+        `Jimeng rejected ${asset.label} (${asset.filename}): ${failureText}`,
+        moderationHint
+          ? 'No generation was submitted. The visible UI rejected this asset — likely by content moderation. Check the file content and retry with a different asset.'
+          : 'No generation was submitted. The visible UI rejected this file; check account/workspace entitlement and retry later.',
+        failedAssetIndex,
+      );
+    }
     if (newCards.length > 0) {
       const processing = newCards.some((card) => isProcessingCard(card));
-      const ready = !processing && (!sawBusy || !snap.busy);
+      const busyText = hasUploadBusyText(newCards.map((card) => card.text || '').join(' '));
+      const ready = !processing && !busyText;
       // Require exactly ONE new card per upload: Jimeng can transiently create
       // a duplicate processing card on slow hosts; confirming two cards would
       // shift @图片N numbering and the next pre-upload gate would fail
@@ -1352,8 +1408,6 @@ async function fillPromptWithRichMentions(page, agentPrompt, assets, mentionDebu
 async function clearComposer(page, phase = 'clear-initial') {
   let last = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    await page.nativeKeyPress('Escape');
-    await page.sleep(0.12);
     await focusPromptEditorEnd(page);
     // OpenCLI's CDP helper expects a lowercase printable key for Ctrl+A.
     await page.nativeKeyPress('a', ['Ctrl']);

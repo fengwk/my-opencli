@@ -146,3 +146,63 @@ export function hasUploadFailureText(bodyText) {
     String(bodyText || ''),
   );
 }
+
+/**
+ * Observe failures attributable to the current upload.
+ *
+ * A pre-upload alert stays exempt only while the same marked DOM node remains
+ * visible with unchanged text. Once absent, its id is retired permanently, so
+ * a later same-text alert is treated as new.
+ */
+export function observeCurrentUploadFailure({
+  cards = [],
+  alerts = [],
+  baselineAlerts = [],
+  activeBaselineAlertIds = [],
+} = {}) {
+  const baselineTextById = new Map(
+    baselineAlerts
+      .map((alert) => [
+        String(alert?.id || ''),
+        String(alert?.text || '').replace(/\s+/g, ' ').trim(),
+      ])
+      .filter(([id]) => id),
+  );
+  const currentBaselineTextById = new Map(
+    alerts
+      .map((alert) => [
+        String(alert?.baselineId || ''),
+        String(alert?.text || '').replace(/\s+/g, ' ').trim(),
+      ])
+      .filter(([id]) => id),
+  );
+  const nextActiveBaselineAlertIds = Array.from(activeBaselineAlertIds || [])
+    .map(String)
+    .filter((id) => (
+      currentBaselineTextById.has(id)
+      && currentBaselineTextById.get(id) === baselineTextById.get(id)
+    ));
+
+  for (const card of cards || []) {
+    const text = String(card?.text || '').replace(/\s+/g, ' ').trim();
+    if (hasUploadFailureText(text)) {
+      return { failureText: text, activeBaselineAlertIds: nextActiveBaselineAlertIds };
+    }
+  }
+
+  const active = new Set(nextActiveBaselineAlertIds);
+  for (const alert of alerts || []) {
+    const text = String(alert?.text || '').replace(/\s+/g, ' ').trim();
+    if (!hasUploadFailureText(text)) continue;
+    const baselineId = String(alert?.baselineId || '');
+    if (
+      baselineId
+      && active.has(baselineId)
+      && baselineTextById.get(baselineId) === text
+    ) {
+      continue;
+    }
+    return { failureText: text, activeBaselineAlertIds: nextActiveBaselineAlertIds };
+  }
+  return { failureText: '', activeBaselineAlertIds: nextActiveBaselineAlertIds };
+}

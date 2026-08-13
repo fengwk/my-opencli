@@ -13,6 +13,7 @@ import {
   isProcessingCard,
   isReferenceStripClasses,
   isUploadSlotEntry,
+  observeCurrentUploadFailure,
   parseReferenceCountStyle,
 } from '../src/upload-state.js';
 
@@ -151,5 +152,80 @@ describe('jimeng-agent/upload-state — busy and failure text', () => {
     expect(hasUploadFailureText('该参考图可能涉及与公众人物相似的肖像，未通过审核')).toBe(true);
     // "审核通过" success messages must not count as failures.
     expect(hasUploadFailureText('素材审核通过')).toBe(false);
+  });
+});
+
+describe('jimeng-agent/upload-state — current upload failure attribution', () => {
+  it('accepts a failure badge on the current upload card', () => {
+    expect(observeCurrentUploadFailure({
+      cards: [{ text: '未通过' }],
+    })).toMatchObject({ failureText: '未通过' });
+  });
+
+  it('ignores the same marked baseline alert while its text is unchanged', () => {
+    expect(observeCurrentUploadFailure({
+      alerts: [{ baselineId: 'old-1', text: '上传失败，请重试' }],
+      baselineAlerts: [{ id: 'old-1', text: '上传失败，请重试' }],
+      activeBaselineAlertIds: ['old-1'],
+    })).toEqual({
+      failureText: '',
+      activeBaselineAlertIds: ['old-1'],
+    });
+  });
+
+  it('accepts a new node or changed baseline node as a current failure', () => {
+    const baselineAlerts = [{ id: 'old-1', text: '上传失败，请重试' }];
+    expect(observeCurrentUploadFailure({
+      alerts: [{ baselineId: '', text: '上传失败，请重试' }],
+      baselineAlerts,
+      activeBaselineAlertIds: ['old-1'],
+    })).toMatchObject({ failureText: '上传失败，请重试' });
+    expect(observeCurrentUploadFailure({
+      alerts: [{ baselineId: 'old-1', text: '素材解析失败' }],
+      baselineAlerts,
+      activeBaselineAlertIds: ['old-1'],
+    })).toMatchObject({ failureText: '素材解析失败' });
+  });
+
+  it('retires a disappeared baseline node so same-text reappearance is new', () => {
+    const baselineAlerts = [{ id: 'old-1', text: '上传失败，请重试' }];
+    const disappeared = observeCurrentUploadFailure({
+      alerts: [],
+      baselineAlerts,
+      activeBaselineAlertIds: ['old-1'],
+    });
+    expect(disappeared).toEqual({
+      failureText: '',
+      activeBaselineAlertIds: [],
+    });
+    expect(observeCurrentUploadFailure({
+      alerts: [{ baselineId: 'old-1', text: '上传失败，请重试' }],
+      baselineAlerts,
+      activeBaselineAlertIds: disappeared.activeBaselineAlertIds,
+    })).toMatchObject({ failureText: '上传失败，请重试' });
+  });
+
+  it('retires a baseline node after any observed text change', () => {
+    const baselineAlerts = [{ id: 'old-1', text: '上传失败，请重试' }];
+    const changed = observeCurrentUploadFailure({
+      alerts: [{ baselineId: 'old-1', text: '上传完成' }],
+      baselineAlerts,
+      activeBaselineAlertIds: ['old-1'],
+    });
+    expect(changed).toEqual({
+      failureText: '',
+      activeBaselineAlertIds: [],
+    });
+    expect(observeCurrentUploadFailure({
+      alerts: [{ baselineId: 'old-1', text: '上传失败，请重试' }],
+      baselineAlerts,
+      activeBaselineAlertIds: changed.activeBaselineAlertIds,
+    })).toMatchObject({ failureText: '上传失败，请重试' });
+  });
+
+  it('does not infer a failure from an unrelated ready card', () => {
+    expect(observeCurrentUploadFailure({
+      cards: [{ text: '图片1 已完成' }],
+    })).toMatchObject({ failureText: '' });
   });
 });
