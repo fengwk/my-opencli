@@ -10,8 +10,10 @@ import {
   buildMentionSegments,
   buildWorkspaceUrl,
   chooseRetryPlan,
+  findSpacedNeedleRange,
   isMentionChipAppended,
   isStrictMentionCommit,
+  mentionTextMatchesVariant,
   normalizePromptValidationLines,
   resolveMentionDebugOptions,
 } from '../src/agent-dom.js';
@@ -245,6 +247,8 @@ describe('jimeng-agent/agent-dom — mention input safety', () => {
     expect(insertion).not.toMatch(/(?:pressKeyWithGap|nativeKeyPress)\(page,\s*['"]Escape['"]/);
     expect(insertion).not.toContain('selectMentionCandidateWithGuardedEnter');
     expect(insertion).not.toContain('dispatchEnterKey(page');
+    expect(insertion).toContain('openMentionPickerViaToolbar(page)');
+    expect(insertion).toContain('if (!uniqueBeforeLabel?.ok)');
     expect(insertion).toContain('page.evaluate(buildMentionCandidateExpression(asset, marker, true))');
     expect(candidateExpression).toContain('matches.length !== 1');
     expect(candidateExpression).toContain('approved === matches[0].option');
@@ -291,6 +295,24 @@ describe('jimeng-agent/agent-dom — mention input safety', () => {
     expect(harness.run(buildMentionCandidateExpression(asset, marker, true)))
       .toMatchObject({ ok: false, status: 'candidate-changed' });
     expect(clone.clicked).toBe(0);
+  });
+
+  it('matches mention labels as whole tokens, not prefixes', () => {
+    expect(mentionTextMatchesVariant('图片1 hero.png', '图片1')).toBe(true);
+    expect(mentionTextMatchesVariant('图片10 scene.png', '图片1')).toBe(false);
+    expect(mentionTextMatchesVariant('音频3 voice.mp3', '音频3')).toBe(true);
+  });
+
+  it('does not treat 图片10 as a unique match for 图片1', () => {
+    const asset = { label: '图片1', filename: 'hero.png', mentionName: 'hero' };
+    const marker = 'candidate-marker';
+    const harness = createCandidateHarness([
+      { text: '图片10 scene.png' },
+      { text: '图片1 hero.png' },
+    ], marker);
+    expect(harness.run(buildMentionCandidateExpression(asset, marker)))
+      .toMatchObject({ ok: true, status: 'ready' });
+    expect(harness.elements[1].getAttribute('data-opencli-jimeng-target')).toBe(marker);
   });
 
   it('refuses to click when the final candidate scan is no longer unique', () => {
@@ -399,7 +421,15 @@ describe('jimeng-agent/agent-dom — mention input safety', () => {
     );
     expect(wait).toContain('isMentionChipAppended(before, after, asset, expectedMentionCount)');
     expect(wait).toContain('stripLeftoverRawMentionQuery(page, asset)');
-    expect(wait).toContain('after?.hasRaw');
+    expect(wait).toContain('stripAttempts < 3');
+    expect(wait).not.toContain('after?.hasRaw');
+  });
+
+  it('finds leftover @图片N even when Jimeng wraps the typed query across a line break', () => {
+    expect(findSpacedNeedleRange('以@图片2为环境', '@图片2')).toEqual({ start: 1, end: 5 });
+    expect(findSpacedNeedleRange('以@图\n片2为环境', '@图片2')).toEqual({ start: 1, end: 6 });
+    expect(findSpacedNeedleRange('以@图\n片2 图片2', '@图片2')).toEqual({ start: 1, end: 6 });
+    expect(findSpacedNeedleRange('没有这个标签', '@图片2')).toBeNull();
   });
 
   it('treats any visible resource option as an open mention picker', () => {

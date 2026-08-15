@@ -157,6 +157,18 @@ export function buildMentionSegments(agentPrompt, assets) {
   return parts;
 }
 
+export function mentionTextMatchesVariant(name, variant) {
+  const compact = (value) => String(value || '').replace(/[\s\u00a0\u200b]/g, '').toLocaleLowerCase();
+  const haystack = compact(name);
+  const needle = compact(variant);
+  if (!haystack || !needle) return false;
+  if (haystack === needle) return true;
+  const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Jimeng option text is often compacted to "图片1hero.png". Treat 图片1 as a
+  // match there, but reject 图片10 because the label continues with a digit.
+  return new RegExp(`${escaped}(?!\\p{N})`, 'u').test(haystack);
+}
+
 /**
  * Retry decisions are pure to make the "avoid refresh when possible" policy
  * auditable. An in-page retry is allowed once for a healthy failed upload;
@@ -1636,17 +1648,27 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
       before,
     });
 
-    // ---------- Phase 1: type ONE '@', require picker (poll, not fixed sleep) ----------
+    // ---------- Phase 1: open picker via toolbar '@' (keyboard is fallback) ----------
     let atOpened = false;
     for (let atAttempt = 0; atAttempt < maxAtAttempts; atAttempt += 1) {
       // Guard: never stack another '@' on top of an existing bare '@'.
       await stripTrailingBareAtsAtEnd(page);
-      await typeMentionQuery(page, '@');
-      const opened = await waitForMentionCandidates(page, pickerWaitAfterAtMs);
+      const toolbar = await openMentionPickerViaToolbar(page);
+      let opened = false;
+      if (toolbar?.ok) {
+        opened = await waitForMentionCandidates(page, pickerWaitAfterAtMs);
+      }
+      if (!opened) {
+        // Fallback: one typed '@' if the dock button is missing or inert.
+        await stripTrailingBareAtsAtEnd(page);
+        await typeMentionQuery(page, '@');
+        opened = await waitForMentionCandidates(page, pickerWaitAfterAtMs);
+      }
       await captureMentionDebug(page, mentionDebug, 'after-at', asset, {
         fullAttempt: fullAttempt + 1,
         atAttempt: atAttempt + 1,
         pickerVisible: opened,
+        toolbar,
       });
 
       if (opened) {
@@ -1674,20 +1696,26 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
       }
       throw phaseError(
         'mention',
-        `Rich @ mention picker did not open after ${maxAtAttempts} '@' attempt${maxAtAttempts === 1 ? '' : 's'} for ${label} (${asset.filename})`,
-        `Ensure Jimeng is focused and reference assets are uploaded before typing '@${label}'.`,
+        `Rich @ mention picker did not open after ${maxAtAttempts} toolbar/@ attempt${maxAtAttempts === 1 ? '' : 's'} for ${label} (${asset.filename})`,
+        `Ensure Jimeng is focused, the composer '@' button is visible, and reference assets are uploaded before selecting '${label}'.`,
       );
     }
 
-    // ---------- Phase 2: type label, require picker still visible ----------
+    // ---------- Phase 2: type label only when the unique option is not already visible ----------
     // Do NOT click/refocus the editor here — that can close the picker.
     await page.sleep(MENTION_KEY_GAP_S);
-    await typeMentionQuery(page, label);
-    const labelPickerOk = await waitForMentionCandidates(page, pickerWaitAfterLabelMs);
+    const uniqueBeforeLabel = await page.evaluate(buildMentionCandidateExpression(asset, nextMarker(`mention-prefilter-${label}`)));
+    if (!uniqueBeforeLabel?.ok) {
+      await typeMentionQuery(page, label);
+    }
+    const labelPickerOk = uniqueBeforeLabel?.ok
+      ? true
+      : await waitForMentionCandidates(page, pickerWaitAfterLabelMs);
     await captureMentionDebug(page, mentionDebug, 'after-label', asset, {
       fullAttempt: fullAttempt + 1,
       expectedMentionCount,
       pickerVisible: labelPickerOk,
+      typedLabel: !uniqueBeforeLabel?.ok,
     });
 
     if (!labelPickerOk) {
@@ -2355,6 +2383,48 @@ async function insertNativeText(page, text) {
   await page.insertText(text);
 }
 
+/**
+ * Open the mention picker by clicking the composer dock '@' button.
+ * This is more reliable than synthesizing '@' / Shift+2, which often inserts
+ * the character without triggering Jimeng's mention plugin.
+ */
+async function openMentionPickerViaToolbar(page) {
+  const marker = nextMarker('mention-at');
+  const marked = await page.evaluate(`(() => {
+    ${buildPromptEditorLocatorScript()}
+    const editor = findPromptEditor();
+    if (!editor) return { ok: false, reason: 'editor-not-found' };
+    const roots = [];
+    let node = editor.parentElement;
+    for (let i = 0; node && i < 10; i += 1, node = node.parentElement) roots.push(node);
+    const scope = roots[roots.length - 1] || document.body;
+    const readable = (el) => ((el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('title') || '') + ' ' + (el.innerText || el.textContent || ''))
+      .replace(/\\s+/g, '')
+      .trim();
+    const buttons = [...scope.querySelectorAll('button, [role="button"]')].filter(visible);
+    const scored = buttons.map((el) => {
+      const text = readable(el);
+      const cls = String(el.className || '');
+      let score = 0;
+      if (text === '@' || text.endsWith('@') || text.includes('提及') || text.includes('mention')) score += 80;
+      if (cls.includes('toolbar-button') && cls.includes('icon-only') && !text) score += 40;
+      if (cls.includes('toolbar-button') && cls.includes('icon-only')) score += 15;
+      if (cls.includes('voice-input') || cls.includes('submit-button')) score -= 200;
+      if (text === '自动' || text.startsWith('自动') || text.includes('技能') || text.includes('Agent')) score -= 200;
+      return { el, score, text };
+    }).filter((item) => item.score > 0);
+    scored.sort((a, b) => b.score - a.score || (
+      a.el.getBoundingClientRect().left - b.el.getBoundingClientRect().left
+    ));
+    if (scored.length === 0) return { ok: false, reason: 'button-not-found', count: buttons.length };
+    scored[0].el.setAttribute(${JSON.stringify(TARGET_ATTR)}, ${JSON.stringify(marker)});
+    return { ok: true, via: 'toolbar-at', text: scored[0].text, score: scored[0].score };
+  })()`);
+  if (!marked?.ok) return marked;
+  await page.click(`[${TARGET_ATTR}="${marker}"]`);
+  return marked;
+}
+
 async function typeMentionQuery(page, text) {
   for (const char of text) {
     if (char === '@' || /^[0-9]$/.test(char)) {
@@ -2428,6 +2498,7 @@ export function buildMentionCandidateExpression(asset, marker, click = false) {
     };
     const compact = (value) => String(value || '').replace(/\\s+/g, '').toLocaleLowerCase();
     const variants = ${JSON.stringify([asset.label, asset.filename, asset.mentionName])}.map(compact).filter(Boolean);
+    const matchesVariant = ${mentionTextMatchesVariant.toString()};
     const registryKey = '__opencliJimengMentionCandidateRegistry';
     let registry = window[registryKey];
     if (!(registry instanceof Map)) {
@@ -2445,7 +2516,7 @@ export function buildMentionCandidateExpression(asset, marker, click = false) {
       option,
       name: compact((option.getAttribute('aria-label') || '') + ' ' + (option.innerText || option.textContent || '')),
     }));
-    const matches = named.filter(({ name }) => variants.some((variant) => name.includes(variant)));
+    const matches = named.filter(({ name }) => variants.some((variant) => matchesVariant(name, variant)));
     if (matches.length !== 1) {
       if (${JSON.stringify(click)}) {
         registry.delete(${JSON.stringify(marker)});
@@ -2527,7 +2598,8 @@ async function inspectMentionCandidateTarget(page, marker, asset) {
     const name = compact(
       (option.getAttribute('aria-label') || '') + ' ' + (option.innerText || option.textContent || ''),
     );
-    if (!variants.some((variant) => name.includes(variant))) {
+    const matchesVariant = ${mentionTextMatchesVariant.toString()};
+    if (!variants.some((variant) => matchesVariant(name, variant))) {
       return { ok: false, reason: 'candidate-text-changed', name };
     }
     const rect = option.getBoundingClientRect();
@@ -2584,9 +2656,10 @@ async function getMentionState(page, asset) {
       .filter(visible)
       .map((node) => compact(read(node)))
       .filter(Boolean);
+    const matchesVariant = ${mentionTextMatchesVariant.toString()};
     const matchingMentionCount = mentionNodes.filter((node) => {
       const text = compact(read(node));
-      return variants.some((variant) => text.includes(variant));
+      return variants.some((variant) => matchesVariant(text, variant));
     }).length;
     const menuVisible = [...document.querySelectorAll(${JSON.stringify(MENTION_OPTION_SELECTOR)})]
       .filter(visible)
@@ -2629,6 +2702,32 @@ export function isStrictMentionCommit(before, after, selection, asset, expectedM
 }
 
 /**
+ * Locate `@图片N` even when Jimeng wraps/breaks the typed query (`@图` + newline + `片2`).
+ * Returns the last match so leftover query after a chip is preferred.
+ */
+export function findSpacedNeedleRange(joined, needle) {
+  const compactNeedle = String(needle || '').replace(/[\s\u00a0\u200b]/g, '');
+  if (!compactNeedle) return null;
+  const ignorable = /[\s\u00a0\u200b]/;
+  let best = null;
+  for (let i = 0; i < joined.length; i += 1) {
+    let needleIndex = 0;
+    let start = -1;
+    for (let j = i; j < joined.length && needleIndex < compactNeedle.length; j += 1) {
+      const ch = joined[j];
+      if (ignorable.test(ch)) continue;
+      if (ch !== compactNeedle[needleIndex]) break;
+      if (start < 0) start = j;
+      needleIndex += 1;
+      if (needleIndex === compactNeedle.length) {
+        best = { start, end: j + 1 };
+      }
+    }
+  }
+  return best;
+}
+
+/**
  * Poll after the atomic candidate click until the mention commit is observable:
  * - the click ran;
  * - exactly one ordered .node-reference-mention-tag was appended for this asset;
@@ -2645,23 +2744,22 @@ async function waitForMentionCommit(
 ) {
   const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
   let after = before;
-  let strippedRawQuery = false;
+  let stripAttempts = 0;
   while (Date.now() < deadline) {
     after = await getMentionState(page, asset);
     if (isStrictMentionCommit(before, after, selection, asset, expectedMentionCount)) {
       await page.sleep(0.15);
       return { committed: true, after };
     }
-    // Hub sometimes inserts the chip but leaves the typed "@图片N" query in
-    // place. Strip that leftover text once the ordered chip is visible, then
-    // re-read instead of treating a successful click as a failed commit.
+    // Hub/toolbar flow can insert the chip while leaving the typed filter
+    // ("@图片N" or just "图片N") in the composer. Strip leftover text once
+    // the ordered chip is visible, then re-read.
     if (
-      !strippedRawQuery
-      && after?.hasRaw
+      stripAttempts < 3
       && after?.menuVisible === false
       && isMentionChipAppended(before, after, asset, expectedMentionCount)
     ) {
-      strippedRawQuery = true;
+      stripAttempts += 1;
       await stripLeftoverRawMentionQuery(page, asset);
       continue;
     }
@@ -2681,7 +2779,7 @@ async function stripLeftoverRawMentionQuery(page, asset) {
     ${buildPromptEditorLocatorScript()}
     const editor = findPromptEditor();
     if (!editor) return { ok: false, reason: 'no-editor' };
-    const needle = ${JSON.stringify('@' + label)};
+    const needles = ${JSON.stringify(['@' + label, label])};
     const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
     const chunks = [];
     while (walker.nextNode()) {
@@ -2701,22 +2799,21 @@ async function stripLeftoverRawMentionQuery(page, asset) {
       });
       joined += chunk.value;
     }
-    const compactJoined = joined.replace(/[\\u00a0\\u200b]/g, '');
-    const compactNeedle = needle.replace(/[\\u00a0\\u200b]/g, '');
-    if (!compactJoined.includes(compactNeedle) && !joined.includes(needle)) {
-      return { ok: false, reason: 'not-found' };
+    const findSpacedNeedleRange = ${findSpacedNeedleRange.toString()};
+    let hit = null;
+    for (const needle of needles) {
+      const candidate = findSpacedNeedleRange(joined, needle);
+      if (candidate && (!hit || candidate.start >= hit.start)) hit = candidate;
     }
-    const at = joined.lastIndexOf(needle);
-    if (at < 0) return { ok: false, reason: 'not-found' };
-    const end = at + needle.length;
-    const startSpan = spans.find((span) => at >= span.start && at < span.end);
-    const endSpan = spans.find((span) => end > span.start && end <= span.end) || startSpan;
+    if (!hit) return { ok: false, reason: 'not-found' };
+    const startSpan = spans.find((span) => hit.start >= span.start && hit.start < span.end);
+    const endSpan = spans.find((span) => hit.end > span.start && hit.end <= span.end) || startSpan;
     if (!startSpan || !endSpan) return { ok: false, reason: 'span-mismatch' };
     const range = document.createRange();
-    range.setStart(startSpan.node, at - startSpan.start);
-    range.setEnd(endSpan.node, end - endSpan.start);
+    range.setStart(startSpan.node, hit.start - startSpan.start);
+    range.setEnd(endSpan.node, hit.end - endSpan.start);
     range.deleteContents();
-    return { ok: true };
+    return { ok: true, start: hit.start, end: hit.end };
   })()`);
   if (removed?.ok) {
     await placeCaretAtPromptEditorEnd(page).catch(() => null);
