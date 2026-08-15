@@ -252,6 +252,20 @@ describe('jimeng-agent/agent-dom — mention input safety', () => {
     expect(candidateExpression).not.toMatch(/nativeKeyPress\(['"]Enter['"]/);
   });
 
+  it('injects visible into the label-picker-missing diagnostic so a closed picker cannot crash prepare', () => {
+    const insertion = sourceBetween(
+      'async function insertRichMention(',
+      '/** True if the composer has an orphan bare',
+    );
+    const logAt = insertion.indexOf('mention label picker missing');
+    expect(logAt).toBeGreaterThanOrEqual(0);
+    const evalAt = insertion.lastIndexOf('page.evaluate', logAt);
+    expect(evalAt).toBeGreaterThanOrEqual(0);
+    const diagnostic = insertion.slice(evalAt, logAt);
+    expect(diagnostic).toContain('buildPromptEditorLocatorScript()');
+    expect(diagnostic).toContain('.filter(visible)');
+  });
+
   it('clicks only the same uniquely matched candidate marked by the preflight scan', () => {
     const asset = { label: '图片1', filename: 'hero.png', mentionName: 'hero' };
     const marker = 'candidate-marker';

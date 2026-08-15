@@ -1617,7 +1617,8 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
   // Hub/NAS is slower than local; fixed 0.5s after '@' was too short and caused
   // false "picker missing" → re-type '@' → "@@图片1".
   const pickerWaitAfterAtMs = 8_000;
-  const pickerWaitAfterLabelMs = 2_000;
+  // Hub/NAS can drop the filtered list briefly after CJK + digit label input.
+  const pickerWaitAfterLabelMs = 8_000;
 
   for (let fullAttempt = 0; fullAttempt < maxFullAttempts; fullAttempt += 1) {
     const before = await getMentionState(page, asset);
@@ -1691,6 +1692,7 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
 
     if (!labelPickerOk) {
       const suggestion = await page.evaluate(`(() => {
+        ${buildPromptEditorLocatorScript()}
         const s = document.querySelector('.suggestion, [class*="suggestion"]');
         const opts = [...document.querySelectorAll(${JSON.stringify(MENTION_OPTION_SELECTOR)})]
           .filter(visible)
