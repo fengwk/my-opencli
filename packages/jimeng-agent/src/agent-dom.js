@@ -1752,7 +1752,7 @@ async function insertRichMention(page, asset, expectedMentionCount, mentionDebug
             before,
             selection,
             expectedMentionCount,
-            4_000,
+            6_000,
           );
           await captureMentionDebug(page, mentionDebug, 'after-click', asset, {
             fullAttempt: fullAttempt + 1,
@@ -2603,10 +2603,7 @@ async function getMentionState(page, asset) {
   })()`);
 }
 
-export function isStrictMentionCommit(before, after, selection, asset, expectedMentionCount) {
-  if (selection?.status !== 'clicked' || after?.hasRaw !== false || after?.menuVisible !== false) {
-    return false;
-  }
+export function isMentionChipAppended(before, after, asset, expectedMentionCount) {
   if (!Array.isArray(before?.mentionLabels) || !Array.isArray(after?.mentionLabels)) {
     return false;
   }
@@ -2622,6 +2619,13 @@ export function isStrictMentionCommit(before, after, selection, asset, expectedM
   const compact = (value) => String(value || '').replace(/\s+/g, '').toLocaleLowerCase();
   const appended = after.mentionLabels[after.mentionLabels.length - 1] || '';
   return appended === compact(asset?.label);
+}
+
+export function isStrictMentionCommit(before, after, selection, asset, expectedMentionCount) {
+  if (selection?.status !== 'clicked' || after?.hasRaw !== false || after?.menuVisible !== false) {
+    return false;
+  }
+  return isMentionChipAppended(before, after, asset, expectedMentionCount);
 }
 
 /**
@@ -2641,15 +2645,83 @@ async function waitForMentionCommit(
 ) {
   const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
   let after = before;
+  let strippedRawQuery = false;
   while (Date.now() < deadline) {
     after = await getMentionState(page, asset);
     if (isStrictMentionCommit(before, after, selection, asset, expectedMentionCount)) {
       await page.sleep(0.15);
       return { committed: true, after };
     }
+    // Hub sometimes inserts the chip but leaves the typed "@图片N" query in
+    // place. Strip that leftover text once the ordered chip is visible, then
+    // re-read instead of treating a successful click as a failed commit.
+    if (
+      !strippedRawQuery
+      && after?.hasRaw
+      && after?.menuVisible === false
+      && isMentionChipAppended(before, after, asset, expectedMentionCount)
+    ) {
+      strippedRawQuery = true;
+      await stripLeftoverRawMentionQuery(page, asset);
+      continue;
+    }
     await page.sleep(0.25);
   }
   return { committed: false, after };
+}
+
+/**
+ * Delete leftover "@图片N" / "@视频N" / "@音频N" text that sits outside mention
+ * chips after Jimeng inserts the chip without consuming the typed query.
+ */
+async function stripLeftoverRawMentionQuery(page, asset) {
+  const label = String(asset?.label || '');
+  if (!label) return;
+  const removed = await page.evaluate(`(() => {
+    ${buildPromptEditorLocatorScript()}
+    const editor = findPromptEditor();
+    if (!editor) return { ok: false, reason: 'no-editor' };
+    const needle = ${JSON.stringify('@' + label)};
+    const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
+    const chunks = [];
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      if (node.parentElement?.closest('.node-reference-mention-tag, [data-type*="mention"], [data-node-type*="mention"]')) {
+        continue;
+      }
+      chunks.push({ node, value: node.nodeValue || '' });
+    }
+    let joined = '';
+    const spans = [];
+    for (const chunk of chunks) {
+      spans.push({
+        node: chunk.node,
+        start: joined.length,
+        end: joined.length + chunk.value.length,
+      });
+      joined += chunk.value;
+    }
+    const compactJoined = joined.replace(/[\\u00a0\\u200b]/g, '');
+    const compactNeedle = needle.replace(/[\\u00a0\\u200b]/g, '');
+    if (!compactJoined.includes(compactNeedle) && !joined.includes(needle)) {
+      return { ok: false, reason: 'not-found' };
+    }
+    const at = joined.lastIndexOf(needle);
+    if (at < 0) return { ok: false, reason: 'not-found' };
+    const end = at + needle.length;
+    const startSpan = spans.find((span) => at >= span.start && at < span.end);
+    const endSpan = spans.find((span) => end > span.start && end <= span.end) || startSpan;
+    if (!startSpan || !endSpan) return { ok: false, reason: 'span-mismatch' };
+    const range = document.createRange();
+    range.setStart(startSpan.node, at - startSpan.start);
+    range.setEnd(endSpan.node, end - endSpan.start);
+    range.deleteContents();
+    return { ok: true };
+  })()`);
+  if (removed?.ok) {
+    await placeCaretAtPromptEditorEnd(page).catch(() => null);
+    await page.sleep(MENTION_KEY_GAP_S);
+  }
 }
 
 /**

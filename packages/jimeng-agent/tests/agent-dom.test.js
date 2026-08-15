@@ -10,6 +10,7 @@ import {
   buildMentionSegments,
   buildWorkspaceUrl,
   chooseRetryPlan,
+  isMentionChipAppended,
   isStrictMentionCommit,
   normalizePromptValidationLines,
   resolveMentionDebugOptions,
@@ -366,6 +367,39 @@ describe('jimeng-agent/agent-dom — mention input safety', () => {
       asset,
       2,
     )).toBe(false);
+  });
+
+  it('treats an ordered chip append as success even when leftover raw @query remains to be stripped', () => {
+    const asset = { label: '图片2', filename: 'scene.png', mentionName: 'scene' };
+    const before = {
+      hasRaw: true,
+      menuVisible: false,
+      mentionLabels: ['图片1'],
+    };
+    const after = {
+      hasRaw: true,
+      menuVisible: false,
+      mentionLabels: ['图片1', '图片2'],
+    };
+    expect(isMentionChipAppended(before, after, asset, 2)).toBe(true);
+    expect(isStrictMentionCommit(before, after, { status: 'clicked' }, asset, 2)).toBe(false);
+    expect(isStrictMentionCommit(
+      before,
+      { ...after, hasRaw: false },
+      { status: 'clicked' },
+      asset,
+      2,
+    )).toBe(true);
+  });
+
+  it('strips leftover raw mention query after the chip is appended instead of failing the commit', () => {
+    const wait = sourceBetween(
+      'async function waitForMentionCommit(',
+      'async function stripLeftoverRawMentionQuery(',
+    );
+    expect(wait).toContain('isMentionChipAppended(before, after, asset, expectedMentionCount)');
+    expect(wait).toContain('stripLeftoverRawMentionQuery(page, asset)');
+    expect(wait).toContain('after?.hasRaw');
   });
 
   it('treats any visible resource option as an open mention picker', () => {
