@@ -6,7 +6,9 @@ import { describe, expect, it } from 'vitest';
 import {
   cardIdentity,
   classifyReferenceItemClass,
+  countVisibleMediaReferences,
   countStripCards,
+  hasCollapsedReferenceMore,
   hasUploadBusyText,
   hasUploadFailureText,
   isNewUploadCard,
@@ -62,6 +64,18 @@ describe('jimeng-agent/upload-state — strip card counting', () => {
     expect(isUploadSlotEntry(descendant(['reference-item-V8Tkbi'], { hasUploadSlot: true }))).toBe(true);
     expect(isUploadSlotEntry(descendant(['reference-item-V8Tkbi'], { hasUploadSlot: false }))).toBe(false);
     expect(isUploadSlotEntry(null)).toBe(false);
+  });
+
+  it('recognizes collapsed more entries and counts visible media separately from the upload slot', () => {
+    const cards = [
+      descendant(['reference-item-V8Tkbi'], { hasMoreEntry: false }),
+      descendant(['reference-item-V8Tkbi'], { hasMoreEntry: true }),
+      descendant(['reference-item-V8Tkbi'], { hasUploadSlot: true }),
+    ];
+    expect(hasCollapsedReferenceMore(cards)).toBe(true);
+    expect(countVisibleMediaReferences(cards)).toBe(2);
+    expect(hasCollapsedReferenceMore(cards.slice(0, 1))).toBe(false);
+    expect(countVisibleMediaReferences(null)).toBe(0);
   });
 
   it('parses the --reference-count style variable', () => {

@@ -109,6 +109,25 @@ export function isUploadSlotEntry(entry) {
 }
 
 /**
+ * Jimeng collapses a long reference strip to the first and last visible
+ * references and renders the last one through a "more" entry. The hidden
+ * references still exist and remain available to the mention picker.
+ */
+export function hasCollapsedReferenceMore(cards) {
+  return Array.isArray(cards) && cards.some((card) => card?.hasMoreEntry === true);
+}
+
+/**
+ * Count media cards that are actually visible in the dock. A collapsed "more"
+ * entry is intentionally included here; callers that need the logical total
+ * can combine this count with hasCollapsedReferenceMore().
+ */
+export function countVisibleMediaReferences(cards) {
+  if (!Array.isArray(cards)) return 0;
+  return cards.filter((card) => !isUploadSlotEntry(card)).length;
+}
+
+/**
  * Decide whether a card observed after an upload is a NEW upload result.
  *
  * A card counts as new when:

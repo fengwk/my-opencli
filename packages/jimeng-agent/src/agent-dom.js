@@ -30,7 +30,9 @@ import {
 
 import {
   cardIdentity,
+  countVisibleMediaReferences,
   hasUploadBusyText,
+  hasCollapsedReferenceMore,
   isNewUploadCard,
   isProcessingCard,
   isUploadSlotEntry,
@@ -400,6 +402,7 @@ async function collectDockReferenceSnapshot(page, alertBaselineMarker = '') {
             hasMask: !!el.querySelector('[class*="mask-"]'),
             hasRemoveBtn: !!el.querySelector('[data-reference-remove-button="true"]'),
             hasUploadSlot: !!el.querySelector('[class*="reference-upload-"]'),
+            hasMoreEntry: !!el.querySelector('[class*="collapsed-more-entry-"]'),
             mediaSrc: media
               ? media.getAttribute('src') || media.getAttribute('poster') || null
               : null,
@@ -438,6 +441,7 @@ async function collectDockReferenceSnapshot(page, alertBaselineMarker = '') {
       strips: 0,
       count: 0,
       cards: [],
+      hasCollapsedMoreEntry: false,
       busy: false,
     };
   }
@@ -461,6 +465,7 @@ async function collectDockReferenceSnapshot(page, alertBaselineMarker = '') {
   }
 
   const count = cards.length;
+  const hasCollapsedMoreEntry = hasCollapsedReferenceMore(cards);
   const processingCards = cards.filter((card) => isProcessingCard(card));
   const busy = processingCards.length > 0;
   const countFromStyle = raw.strips
@@ -475,6 +480,7 @@ async function collectDockReferenceSnapshot(page, alertBaselineMarker = '') {
     count,
     countFromStyle,
     cards,
+    hasCollapsedMoreEntry,
     processing: processingCards.length,
     busy,
   };
@@ -576,6 +582,7 @@ export async function probeJimengAgentSurface(page) {
     // Reference cards are counted from the dock reference strip, never from
     // remove-button attributes (those only exist/hover on some UI versions).
     referenceCount: dock.count,
+    referenceMoreEntry: dock.hasCollapsedMoreEntry === true,
     referenceStripFound: dock.strips > 0,
     referenceProcessingCount: dock.processing,
     uploadBusy: dock.busy,
@@ -1036,13 +1043,23 @@ async function clearReferenceAssets(page) {
     let after = before;
     while (Date.now() < deadline) {
       after = await collectDockReferenceSnapshot(page);
-      if (after.count < before.count) break;
+      const removedIdentity = removable.identity;
+      const identityStillVisible = (after.cards || []).some(
+        (card) => card.identity === removedIdentity,
+      );
+      // In a collapsed reference strip, removing one hidden/visible resource
+      // can replace it with another visible resource, so the DOM card count
+      // stays constant even though the targeted identity is gone.
+      if (after.count < before.count || !identityStillVisible) break;
       await page.sleep(0.25);
     }
-    if (after.count >= before.count) {
+    const identityStillVisible = (after.cards || []).some(
+      (card) => card.identity === removable.identity,
+    );
+    if (after.count >= before.count && identityStillVisible) {
       throw phaseError(
         'clear-references',
-        `Jimeng reference count did not decrease after clicking a remove control (${before.count} card(s))`,
+        `Jimeng reference identity remained after clicking a remove control (${removable.identity}; ${before.count} card(s))`,
         'No generation was submitted. Inspect the visible reference strip and retry.',
       );
     }
@@ -1083,11 +1100,12 @@ async function uploadReferenceAssets(page, assets, uploads, startAssetIndex, bas
     const before = await collectDockReferenceSnapshot(page);
     // Empty upload slots are unremovable placeholders that never expose an
     // asset to the mention picker, and Jimeng may add/fill them differently
-    // on slow hosts (dock-input fallback creates card+slot instead of filling
-    // the existing slot). Count only real media cards: exactly `index` cards
-    // must be confirmed before the next upload, regardless of slot count.
-    const mediaCardCount = (before.cards || []).filter((card) => !isUploadSlotEntry(card)).length;
-    if (mediaCardCount !== index) {
+    // on slow hosts. When the strip is collapsed, the visible "more" card
+    // represents hidden references, so the visible media count can be lower
+    // than the number already confirmed by this upload loop.
+    const mediaCardCount = countVisibleMediaReferences(before.cards);
+    const collapsedMore = hasCollapsedReferenceMore(before.cards);
+    if (mediaCardCount !== index && !(collapsedMore && mediaCardCount < index)) {
       const cardDump = (before.cards || []).map((card) => ({
         id: card.identity,
         slot: card.hasUploadSlot,
@@ -2860,15 +2878,20 @@ export async function runPreInputControlsCheck(page) {
  */
 export async function runContentCheckpoint(page, agentPrompt, assets, options = {}) {
   const snapshot = await collectContentCheckpointSnapshot(page);
+  const expectations = buildCheckpointExpectations(agentPrompt, assets);
   // Reference cards are counted from the dock strip, never from remove-button
   // attributes (those only exist/hover on some UI versions). Empty upload
   // slots (trailing "+" placeholder) are not references and are excluded.
   const dock = await collectDockReferenceSnapshot(page);
-  snapshot.referenceCount = (dock.cards || []).filter(
-    (card) => !isUploadSlotEntry(card),
-  ).length;
+  const visibleReferenceCount = countVisibleMediaReferences(dock.cards);
+  snapshot.referenceCount = (
+    dock.hasCollapsedMoreEntry === true
+    && visibleReferenceCount < expectations.expectedReferences
+    && snapshot.mentionCount === expectations.expectedMentions
+  )
+    ? expectations.expectedReferences
+    : visibleReferenceCount;
   snapshot.requireSubmitArmed = options.requireSubmitArmed === true;
-  const expectations = buildCheckpointExpectations(agentPrompt, assets);
   const report = evaluateContentCheckpoint(snapshot, expectations);
   if (!report.ok) {
     const diagnostic = {

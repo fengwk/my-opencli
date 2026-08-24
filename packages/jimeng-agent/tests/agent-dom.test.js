@@ -481,6 +481,16 @@ describe('jimeng-agent/agent-dom — mention input safety', () => {
     expect(wait).not.toContain('snap.bodyText');
     expect(snapshot).toContain('registry?.[id] === el');
   });
+
+  it('accepts a collapsed-strip removal when the visible card count stays constant', () => {
+    const clear = sourceBetween(
+      'const deadline = Date.now() + 3_000;',
+      '// Keep the pointer away from the strip/history',
+    );
+    expect(clear).toContain('identityStillVisible');
+    expect(clear).toContain('after.count < before.count || !identityStillVisible');
+    expect(clear).toContain('reference identity remained');
+  });
 });
 
 describe('jimeng-agent/agent-dom — prompt structure validation', () => {

@@ -70,7 +70,10 @@ truth once configured.
 ### Content checkpoint (after prompt is filled)
 
 - Reference card count matches uploaded assets (dock reference strip only;
-  empty upload slots kept from a restored draft are excluded)
+  empty upload slots kept from a restored draft are excluded). Current Jimeng
+  may collapse a long strip to a first/last "more" entry; the checkpoint
+  treats that visible proxy as valid only when all expected rich mentions are
+  committed.
 - Rich mention count/order matches the prompt
 - No raw `@` leftovers and no open mention menu
 - Prompt line structure matches the assembled agent prompt
