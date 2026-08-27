@@ -1,6 +1,6 @@
 {
   "name": "my-opencli",
-  "version": "0.1.33",
+  "version": "0.1.34",
   "private": true,
   "description": "Personal OpenCLI plugins monorepo (validation + tests only at root)",
   "engines": {
@@ -15,7 +15,7 @@
     "check": "npm run validate && npm test"
   },
   "devDependencies": {
-    "@jackwener/opencli": "https://github.com/fengwk/OpenCLI/releases/download/fork-v1.8.7-fengwk.8/jackwener-opencli-1.8.7-fengwk.8.tgz",
+    "@jackwener/opencli": "https://github.com/fengwk/OpenCLI/releases/download/fork-v1.8.7-fengwk.9/jackwener-opencli-1.8.7-fengwk.9.tgz",
     "vitest": "^3.2.4"
   }
 }

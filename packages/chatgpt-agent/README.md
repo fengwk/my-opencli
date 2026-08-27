@@ -13,8 +13,8 @@ Protocol-first ChatGPT web adapter:
 
 | Host | Minimum | Current verified release |
 |------|---------|--------------------------|
-| `@jackwener/opencli` (fork) | `>=1.8.7` | package `1.8.7-fengwk.8` (git tag `fork-v1.8.7-fengwk.8`) |
-| Browser Bridge / Extension | **`>=1.0.24`** | paired Extension **`1.0.29`** | CDP/WS capture + file-chooser behavior must match the CLI |
+| `@jackwener/opencli` (fork) | `>=1.8.7` | package `1.8.7-fengwk.9` (git tag `fork-v1.8.7-fengwk.9`) |
+| Browser Bridge / Extension | **`>=1.0.24`** | paired Extension **`1.0.30`** | CDP/WS capture + file-chooser behavior must match the CLI |
 
 Needs fork APIs: `page.startWsCapture` / `page.readWsCapture`, hardened `page.setFileInput`, and optional `Arg.repeatable` for multi `--file`.
 

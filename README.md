@@ -15,8 +15,8 @@ This plugin **requires an OpenCLI fork**, not stock upstream alone:
 
 | Component | Minimum | Current verified release | Why |
 |-----------|---------|--------------------------|-----|
-| CLI (`@jackwener/opencli`) | **`>=1.8.7`** | package `1.8.7-fengwk.8` (git tag `fork-v1.8.7-fengwk.8`) | `page.startWsCapture` / `page.readWsCapture`, hardened `page.setFileInput`, `Arg.repeatable` |
-| Browser Bridge / Extension | **`>=1.0.24`** | paired Extension **`1.0.29`** | CDP/WS capture + file-chooser behavior must match the CLI |
+| CLI (`@jackwener/opencli`) | **`>=1.8.7`** | package `1.8.7-fengwk.9` (git tag `fork-v1.8.7-fengwk.9`) | `page.startWsCapture` / `page.readWsCapture`, hardened `page.setFileInput`, `Arg.repeatable` |
+| Browser Bridge / Extension | **`>=1.0.24`** | paired Extension **`1.0.30`** | CDP/WS capture + file-chooser behavior must match the CLI |
 
 Minimum ranges are the compatibility floor; the verified columns name the paired fork Release that has been published and checked. Package version (`1.8.7-fengwk.2`) and git tag (`fork-v1.8.7-fengwk.2`) are related but not the same string — do not treat the package version as a tag name.
 
