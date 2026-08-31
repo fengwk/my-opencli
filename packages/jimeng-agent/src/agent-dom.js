@@ -32,6 +32,7 @@ import {
   JIMENG_CONVERSATION_PATH,
   classifySubmitAck,
   isConversationUrl,
+  normalizeCaptureEntry,
   requestBodyMatchesAssetId,
 } from './submit-ack.js';
 
@@ -3128,7 +3129,10 @@ export async function submitPreparedGeneration(page, canonicalOrAssetId, options
   let drainedEntries;
   try {
     const raw = await page.readNetworkCapture();
-    drainedEntries = Array.isArray(raw) ? raw : [];
+    if (!Array.isArray(raw)) {
+      throw new Error('network capture drain returned a non-array payload');
+    }
+    drainedEntries = raw;
   } catch (drainErr) {
     const err = new Error(`Pre-click network capture drain failed: ${drainErr.message || drainErr}`);
     err.phase = 'submit-capture-unavailable';
@@ -3140,9 +3144,18 @@ export async function submitPreparedGeneration(page, canonicalOrAssetId, options
 
   // A delayed response from a prior proven-not-sent retry may arrive before
   // the next click. Never discard matching evidence and click again.
-  const priorMatchingEntries = drainedEntries.filter((entry) => (
-    isConversationUrl(entry?.url)
-    && requestBodyMatchesAssetId(entry, assetId)
+  const normalizedDrainedEntries = drainedEntries.map(normalizeCaptureEntry);
+  if (normalizedDrainedEntries.some((entry) => entry.captureMalformed)) {
+    const err = new Error('Pre-click network capture drain contained malformed entries without a usable URL');
+    err.phase = 'submit-capture-unavailable';
+    err.retryable = false;
+    err.nonRetryable = true;
+    err.hint = 'Network capture returned malformed data before clicking submit. Check browser driver compatibility.';
+    throw err;
+  }
+  const priorMatchingEntries = drainedEntries.filter((entry, index) => (
+    isConversationUrl(normalizedDrainedEntries[index].url)
+    && requestBodyMatchesAssetId(normalizedDrainedEntries[index], assetId)
   ));
   if (priorMatchingEntries.length > 0) {
     const priorAck = classifySubmitAck({
@@ -3247,7 +3260,10 @@ export async function submitPreparedGeneration(page, canonicalOrAssetId, options
   let capturedEntries;
   try {
     const raw = await page.readNetworkCapture();
-    capturedEntries = Array.isArray(raw) ? raw : [];
+    if (!Array.isArray(raw)) {
+      throw new Error('network capture read returned a non-array payload');
+    }
+    capturedEntries = raw;
   } catch (readErr) {
     const err = new Error(`Network capture read failed after submit click: ${readErr.message || readErr}`);
     err.phase = 'submit-unconfirmed';

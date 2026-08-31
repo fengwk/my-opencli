@@ -76,6 +76,7 @@ describe('jimeng-agent/submit-ack — SSE Parsing with Exact Canary Fixture', ()
       errorMsg: 'success',
     });
     expect(parsed.errorEvent).toBeNull();
+    expect(parsed.protocolIssues).toEqual([]);
     expect(parsed.isTruncated).toBe(false);
   });
 
@@ -84,6 +85,10 @@ describe('jimeng-agent/submit-ack — SSE Parsing with Exact Canary Fixture', ()
     expect(parsed.streamComplete?.success).toBe(false);
     expect(parsed.errorEvent).not.toBeNull();
     expect(parsed.errorEvent?.errorCode).toBe(1001);
+    // A success event plus a rejecting trailer is ambiguous, never a clean rejection/ACK.
+    expect(parsed.protocolIssues).toContain(
+      'A trailer error contradicted a successful stream completion',
+    );
   });
 
   it('handles numeric and string error codes and retry: lines in SSE', () => {
@@ -128,6 +133,42 @@ data:{"success":true}
       explicitFailure: false,
       protocolComplete: false,
     });
+  });
+
+  it('does not treat malformed error_code container types as integer zero', () => {
+    const parsed = parseConversationSse(`event:handshake
+data:{"thread_id":"327598892300","conversation_id":"${TEST_CONVERSATION_ID}"}
+
+event:stream_complete
+data:{"success":true,"error_code":[0]}
+
+`);
+    // JSON coercion would turn [0] into numeric zero; strict parsing must not.
+    expect(parsed.streamComplete).toMatchObject({
+      success: false,
+      explicitFailure: false,
+      protocolComplete: false,
+      errorCode: null,
+    });
+    expect(parsed.protocolIssues).toContain('stream_complete error_code is not an integer');
+  });
+
+  it('records conflicting handshake events instead of accepting the last one', () => {
+    const parsed = parseConversationSse(`event:handshake
+data:{"thread_id":"first-thread","conversation_id":"first-conversation"}
+
+event:handshake
+data:{"thread_id":"second-thread","conversation_id":"${TEST_CONVERSATION_ID}"}
+
+event:stream_complete
+data:{"success":true,"error_code":"0"}
+
+`);
+    expect(parsed.handshake).toMatchObject({
+      threadId: 'first-thread',
+      conversationId: 'first-conversation',
+    });
+    expect(parsed.protocolIssues).toContain('Conflicting handshake events were received');
   });
 
   it('does not promote unrelated success payloads into handshake or stream_complete events', () => {
@@ -214,6 +255,28 @@ describe('jimeng-agent/submit-ack — Capture Normalization & OpenCLI Fields', (
     });
     expect(classification.reason).toContain('truncated');
   });
+
+  it('normalizes nested request fields but marks entries without any URL as malformed', () => {
+    const nested = normalizeCaptureEntry({
+      request: {
+        url: 'https://jimeng.jianying.com/mweb/v1/creation_agent/v2/conversation',
+        method: 'POST',
+        postData: JSON.stringify({ prompt: `资产编号：${TEST_ASSET_ID}` }),
+      },
+      response: {
+        status: 200,
+        body: EXACT_CANARY_FIXTURE,
+      },
+    });
+    expect(nested).toMatchObject({
+      method: 'POST',
+      status: 200,
+      captureMalformed: false,
+    });
+    expect(nested.url).toContain(JIMENG_CONVERSATION_PATH);
+    expect(normalizeCaptureEntry(null).captureMalformed).toBe(true);
+    expect(normalizeCaptureEntry({ method: 'POST' }).captureMalformed).toBe(true);
+  });
 });
 
 describe('jimeng-agent/submit-ack — Endpoint Host Verification & Asset Correlation', () => {
@@ -228,10 +291,25 @@ describe('jimeng-agent/submit-ack — Endpoint Host Verification & Asset Correla
     expect(isConversationEndpoint('https://jimeng.jianying.com:444/mweb/v1/creation_agent/v2/conversation', 'POST')).toBe(false);
     expect(isConversationEndpoint('/mweb/v1/creation_agent/v2/conversation', 'POST')).toBe(false);
     expect(isConversationEndpoint('https://jimeng.jianying.com/mweb/v1/creation_agent/v2/conversation', '')).toBe(false);
+    expect(isConversationEndpoint('https://jimeng.jianying.com/mweb//v1/creation_agent/v2/conversation', 'POST')).toBe(false);
     // Reject other paths on jimeng
     expect(isConversationEndpoint('https://jimeng.jianying.com/mweb/search/v1/search', 'POST')).toBe(false);
     // Reject telemetry
     expect(isConversationEndpoint('https://mcs.zijieapi.com/webid/click_agent_generate', 'POST')).toBe(false);
+  });
+
+  it('correlates only the canonical labeled asset id, not an arbitrary substring', () => {
+    expect(requestBodyMatchesAssetId({
+      requestBodyPreview: JSON.stringify({ prompt: `unlabeled ${TEST_ASSET_ID}` }),
+    }, TEST_ASSET_ID)).toBe(false);
+    expect(requestBodyMatchesAssetId({
+      requestBodyPreview: JSON.stringify({ prompt: `资产编号：${TEST_ASSET_ID}` }),
+    }, TEST_ASSET_ID)).toBe(true);
+    expect(requestBodyMatchesAssetId({
+      requestBodyPreview: {
+        messages: [{ content: `资产编号：${TEST_ASSET_ID}` }],
+      },
+    }, TEST_ASSET_ID)).toBe(true);
   });
 
   it('returns unconfirmed when an endpoint request exists but cannot be correlated, never not_sent', () => {
@@ -315,6 +393,29 @@ describe('jimeng-agent/submit-ack — Endpoint Host Verification & Asset Correla
     });
   });
 
+  it('never downgrades malformed capture output to a retryable not-sent state', () => {
+    const pageState = { assetIdInComposer: true, assetIdOutsideComposer: false };
+    expect(classifySubmitAck({
+      entries: [null],
+      assetId: TEST_ASSET_ID,
+      timedOut: true,
+      pageState,
+    })).toMatchObject({
+      kind: 'unconfirmed',
+      malformedCaptureEntryCount: 1,
+      nonRetryable: true,
+    });
+    expect(classifySubmitAck({
+      entries: {},
+      assetId: TEST_ASSET_ID,
+      timedOut: true,
+      pageState,
+    })).toMatchObject({
+      kind: 'unconfirmed',
+      nonRetryable: true,
+    });
+  });
+
   it('requires request and handshake conversation IDs to be present and equal', () => {
     const baseEntry = {
       url: 'https://jimeng.jianying.com/mweb/v1/creation_agent/v2/conversation',
@@ -344,6 +445,30 @@ describe('jimeng-agent/submit-ack — Endpoint Host Verification & Asset Correla
       nonRetryable: true,
     });
     expect(mismatchedConversation.reason).toContain('mismatch');
+  });
+
+  it('rejects non-string/non-safe-integer handshake identifiers as unconfirmed', () => {
+    const classification = classifyConversationEntry({
+      url: 'https://jimeng.jianying.com/mweb/v1/creation_agent/v2/conversation',
+      method: 'POST',
+      responseStatus: 200,
+      requestBodyPreview: JSON.stringify({
+        conversation_id: { malformed: true },
+        prompt: `资产编号：${TEST_ASSET_ID}`,
+      }),
+      responsePreview: `event:handshake
+data:{"thread_id":{"malformed":true},"conversation_id":{"malformed":true}}
+
+event:stream_complete
+data:{"success":true,"error_code":"0"}
+
+`,
+    }, TEST_ASSET_ID);
+    expect(classification).toMatchObject({
+      kind: 'unconfirmed',
+      nonRetryable: true,
+    });
+    expect(classification.reason).toContain('invalid type');
   });
 
   it('treats a truncated request body as unconfirmed even when its preview contains the assetId', () => {
@@ -414,6 +539,24 @@ data:{"success":true,"error_code":"0","error_message":"success"}
     });
   });
 
+  it('classifies a success event followed by a rejecting trailer as unconfirmed', () => {
+    const classification = classifyConversationEntry({
+      url: 'https://jimeng.jianying.com/mweb/v1/creation_agent/v2/conversation',
+      method: 'POST',
+      responseStatus: 200,
+      requestBodyPreview: JSON.stringify({
+        conversation_id: TEST_CONVERSATION_ID,
+        prompt: `资产编号：${TEST_ASSET_ID}`,
+      }),
+      responsePreview: CANARY_CONTRADICTORY_TRAILER_SSE,
+    }, TEST_ASSET_ID);
+    expect(classification).toMatchObject({
+      kind: 'unconfirmed',
+      nonRetryable: true,
+    });
+    expect(classification.reason).toContain('protocol conflict');
+  });
+
   it('fails closed when a confirmed response coexists with another endpoint request', () => {
     const confirmedEntry = {
       url: 'https://jimeng.jianying.com/mweb/v1/creation_agent/v2/conversation',
@@ -438,6 +581,37 @@ data:{"success":true,"error_code":"0","error_message":"success"}
 
     expect(classifySubmitAck({
       entries: [confirmedEntry, unrelatedEndpointEntry],
+      assetId: TEST_ASSET_ID,
+      timedOut: true,
+    })).toMatchObject({
+      kind: 'unconfirmed',
+      matchingRequestCount: 1,
+      endpointRequestCount: 2,
+      nonRetryable: true,
+    });
+  });
+
+  it('fails closed when a rejection coexists with an uncorrelated endpoint request', () => {
+    const rejectedEntry = {
+      url: 'https://jimeng.jianying.com/mweb/v1/creation_agent/v2/conversation',
+      method: 'POST',
+      responseStatus: 403,
+      requestBodyPreview: JSON.stringify({
+        conversation_id: TEST_CONVERSATION_ID,
+        prompt: `资产编号：${TEST_ASSET_ID}`,
+      }),
+      responsePreview: JSON.stringify({ error_msg: 'Forbidden' }),
+    };
+    const uncorrelatedEntry = {
+      url: 'https://jimeng.jianying.com/mweb/v1/creation_agent/v2/conversation',
+      method: 'POST',
+      responseStatus: 200,
+      requestBodyPreview: JSON.stringify({ prompt: 'different request' }),
+      responsePreview: '',
+    };
+
+    expect(classifySubmitAck({
+      entries: [rejectedEntry, uncorrelatedEntry],
       assetId: TEST_ASSET_ID,
       timedOut: true,
     })).toMatchObject({

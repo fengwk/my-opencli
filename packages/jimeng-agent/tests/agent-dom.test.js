@@ -776,6 +776,34 @@ describe('jimeng-agent/agent-dom — submit ACK runtime & safety', () => {
     expect(page.click).toHaveBeenCalledTimes(1);
   });
 
+  it('treats a non-array post-click capture result as unconfirmed', async () => {
+    const page = createSubmitPageMock({
+      capturedEntries: { malformed: true },
+    });
+    await expect(submitPreparedGeneration(page, ASSET_ID, {
+      timeoutMs: 100,
+      pollIntervalMs: 50,
+    })).rejects.toMatchObject({
+      phase: 'submit-unconfirmed',
+      retryable: false,
+    });
+    expect(page.click).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats malformed post-click capture entries as unconfirmed', async () => {
+    const page = createSubmitPageMock({
+      capturedEntries: [null],
+    });
+    await expect(submitPreparedGeneration(page, ASSET_ID, {
+      timeoutMs: 100,
+      pollIntervalMs: 50,
+    })).rejects.toMatchObject({
+      phase: 'submit-unconfirmed',
+      retryable: false,
+    });
+    expect(page.click).toHaveBeenCalledTimes(1);
+  });
+
   it('stops without retrying when the post-click ACK wait itself fails', async () => {
     const page = createSubmitPageMock({
       sleepErrorAfterClick: new Error('browser bridge disconnected'),
@@ -802,6 +830,28 @@ describe('jimeng-agent/agent-dom — submit ACK runtime & safety', () => {
     expect(page.click).not.toHaveBeenCalled();
   });
 
+  it('fails before clicking when the pre-click drain payload is not an array', async () => {
+    const page = createSubmitPageMock({
+      drainEntries: { malformed: true },
+    });
+    await expect(submitPreparedGeneration(page, ASSET_ID, { timeoutMs: 500 })).rejects.toMatchObject({
+      phase: 'submit-capture-unavailable',
+      retryable: false,
+    });
+    expect(page.click).not.toHaveBeenCalled();
+  });
+
+  it('fails before clicking when the pre-click drain contains an entry without a URL', async () => {
+    const page = createSubmitPageMock({
+      drainEntries: [null],
+    });
+    await expect(submitPreparedGeneration(page, ASSET_ID, { timeoutMs: 500 })).rejects.toMatchObject({
+      phase: 'submit-capture-unavailable',
+      retryable: false,
+    });
+    expect(page.click).not.toHaveBeenCalled();
+  });
+
   it('accepts a delayed prior matching ACK before clicking again', async () => {
     const page = createSubmitPageMock({
       drainEntries: [SUCCESS_ENTRY],
@@ -819,6 +869,32 @@ describe('jimeng-agent/agent-dom — submit ACK runtime & safety', () => {
     });
     expect(page.click).not.toHaveBeenCalled();
     expect(page.readNetworkCapture).toHaveBeenCalledTimes(1);
+  });
+
+  it('accepts a delayed prior ACK when capture fields are nested', async () => {
+    const page = createSubmitPageMock({
+      drainEntries: [{
+        request: {
+          url: SUCCESS_ENTRY.url,
+          method: 'POST',
+          postData: SUCCESS_ENTRY.requestBody,
+        },
+        response: {
+          status: 200,
+          body: SUCCESS_ENTRY.responseBody,
+        },
+      }],
+    });
+    const result = await submitPreparedGeneration(page, ASSET_ID, {
+      timeoutMs: 100,
+      pollIntervalMs: 50,
+    });
+    expect(result).toMatchObject({
+      accepted: true,
+      confirmation: 'ack_confirmed',
+      submitRequestCount: 1,
+    });
+    expect(page.click).not.toHaveBeenCalled();
   });
 
   it('stops before clicking when a prior matching request appears without a complete ACK', async () => {
@@ -1299,7 +1375,6 @@ describe('jimeng-agent/agent-dom — prepareJimengAgentAsk submit orchestration'
   });
 
   it('retries safely when submit was proven not-sent and succeeds on second attempt', async () => {
-    let submitCallCount = 0;
     const page = createOrchestrationPageMock({
       networkEntries: () => {
         if (page.submitAttempts <= 1) {

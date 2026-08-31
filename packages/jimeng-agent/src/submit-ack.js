@@ -15,6 +15,69 @@ export const JIMENG_CONVERSATION_PATH = '/mweb/v1/creation_agent/v2/conversation
 export const JIMENG_CONVERSATION_HOST = 'jimeng.jianying.com';
 export const TELEMETRY_URL_PATTERN = /mcs\.zijieapi\.com|click_agent_generate|agent_message_action/i;
 
+function parseIntegerField(value) {
+  if (value === undefined || value === null) {
+    return { present: false, valid: false, value: null };
+  }
+  if (typeof value === 'number') {
+    return {
+      present: true,
+      valid: Number.isSafeInteger(value),
+      value: Number.isSafeInteger(value) ? value : null,
+    };
+  }
+  if (typeof value !== 'string') {
+    return { present: true, valid: false, value: null };
+  }
+  const text = value.trim();
+  if (!text) return { present: false, valid: false, value: null };
+  if (!/^-?\d+$/.test(text)) {
+    return { present: true, valid: false, value: null };
+  }
+  const parsed = Number(text);
+  return {
+    present: true,
+    valid: Number.isSafeInteger(parsed),
+    value: Number.isSafeInteger(parsed) ? parsed : null,
+  };
+}
+
+function normalizeProtocolIdentifier(value) {
+  if (typeof value === 'string') return value.trim();
+  if (typeof value === 'number' && Number.isSafeInteger(value)) {
+    return String(value);
+  }
+  return '';
+}
+
+function isMalformedProtocolIdentifier(value) {
+  if (value === undefined || value === null || value === '') return false;
+  if (typeof value === 'string') return false;
+  return !(typeof value === 'number' && Number.isSafeInteger(value));
+}
+
+function parsedValueContainsMarker(root, marker) {
+  const stack = [root];
+  const seen = new Set();
+  let visited = 0;
+  while (stack.length > 0 && visited < 100_000) {
+    const value = stack.pop();
+    visited += 1;
+    if (typeof value === 'string') {
+      if (value.includes(marker)) return true;
+      continue;
+    }
+    if (!value || typeof value !== 'object' || seen.has(value)) continue;
+    seen.add(value);
+    if (Array.isArray(value)) {
+      stack.push(...value);
+    } else {
+      stack.push(...Object.values(value));
+    }
+  }
+  return false;
+}
+
 /**
  * Normalize OpenCLI captured network entry fields into a canonical shape.
  * Handles:
@@ -32,48 +95,55 @@ export const TELEMETRY_URL_PATTERN = /mcs\.zijieapi\.com|click_agent_generate|ag
  *   responseBody: any,
  *   responseBodyTruncated: boolean,
  *   requestBodyTruncated: boolean,
+ *   captureMalformed: boolean,
  *   raw: object
  * }}
  */
 export function normalizeCaptureEntry(entry) {
-  if (!entry || typeof entry !== 'object') {
-    return {
-      url: '',
-      method: '',
-      status: null,
-      requestBody: null,
-      responseBody: null,
-      responseBodyTruncated: false,
-      requestBodyTruncated: false,
-      raw: entry,
-    };
-  }
+  const structurallyValid = Boolean(entry && typeof entry === 'object' && !Array.isArray(entry));
+  const source = structurallyValid ? entry : {};
+  const url = String(source.url ?? source.request?.url ?? '').trim();
+  const method = String(source.method ?? source.requestMethod ?? source.request?.method ?? '')
+    .trim()
+    .toUpperCase();
 
-  const url = String(entry.url || '').trim();
-  const method = String(entry.method || '').toUpperCase();
-
-  const rawStatus = entry.responseStatus ?? entry.status ?? entry.statusCode ?? entry.httpStatus;
+  const rawStatus = (
+    source.responseStatus
+    ?? source.status
+    ?? source.statusCode
+    ?? source.httpStatus
+    ?? source.response?.status
+  );
   let status = null;
-  if (rawStatus !== undefined && rawStatus !== null && rawStatus !== '') {
-    const num = Number(rawStatus);
-    if (Number.isFinite(num) && Number.isInteger(num) && num > 0) status = num;
-  }
+  const parsedStatus = parseIntegerField(rawStatus);
+  if (parsedStatus.valid && parsedStatus.value > 0) status = parsedStatus.value;
 
   const requestBody = (
-    entry.requestBodyPreview
-    ?? entry.requestBody
-    ?? entry.postData
+    source.requestBodyPreview
+    ?? source.requestBody
+    ?? source.postData
+    ?? source.request?.postData
+    ?? source.request?.body
     ?? null
   );
 
   const responseBody = (
-    entry.responsePreview
-    ?? entry.responseBody
+    source.responsePreview
+    ?? source.responseBody
+    ?? source.response?.body
     ?? null
   );
 
-  const responseBodyTruncated = Boolean(entry.responseBodyTruncated || entry.truncated);
-  const requestBodyTruncated = Boolean(entry.requestBodyTruncated);
+  const responseBodyTruncated = Boolean(
+    source.responseBodyTruncated
+    || source.truncated
+    || source.response?.bodyTruncated,
+  );
+  const requestBodyTruncated = Boolean(
+    source.requestBodyTruncated
+    || source.postDataTruncated
+    || source.request?.bodyTruncated,
+  );
 
   return {
     url,
@@ -83,6 +153,7 @@ export function normalizeCaptureEntry(entry) {
     responseBody,
     responseBodyTruncated,
     requestBodyTruncated,
+    captureMalformed: !structurallyValid || !url,
     raw: entry,
   };
 }
@@ -201,6 +272,7 @@ export function parseSseEvents(raw) {
  *   } | null,
  *   errorEvent: { errorCode: number, errorMsg: string, raw: object } | null,
  *   trailerError: { errorCode: number, errorMsg: string, raw: object } | null,
+ *   protocolIssues: string[],
  *   events: Array<object>,
  *   isTruncated: boolean
  * }}
@@ -211,18 +283,20 @@ export function parseConversationSse(rawBody) {
   let streamComplete = null;
   let errorEvent = null;
   let trailerError = null;
+  const protocolIssues = [];
 
   const isZeroCode = (code) => {
-    if (code === undefined || code === null) return false;
-    if (typeof code === 'number') return code === 0;
-    const str = String(code).trim();
-    return str === '0';
+    const parsed = parseIntegerField(code);
+    return parsed.valid && parsed.value === 0;
   };
 
   const extractCode = (code) => {
-    if (code === undefined || code === null) return 0;
-    const num = Number(code);
-    return Number.isNaN(num) ? -1 : num;
+    const parsed = parseIntegerField(code);
+    return parsed.valid ? parsed.value : -1;
+  };
+
+  const recordProtocolIssue = (message) => {
+    if (!protocolIssues.includes(message)) protocolIssues.push(message);
   };
 
   for (const item of events) {
@@ -237,17 +311,35 @@ export function parseConversationSse(rawBody) {
       || data.event_type === 'handshake'
     );
     if (isHandshake) {
-      const rawThreadId = data.thread_id ?? data.threadId ?? data?.data?.thread_id ?? data?.data?.threadId ?? '';
-      const threadId = String(rawThreadId).trim();
-      const rawConvId = data.conversation_id ?? data.conversationId ?? data?.data?.conversation_id ?? data?.data?.conversationId ?? '';
-      const conversationId = String(rawConvId).trim();
+      const rawThreadId = data.thread_id ?? data.threadId ?? data?.data?.thread_id ?? data?.data?.threadId;
+      const threadId = normalizeProtocolIdentifier(rawThreadId);
+      const rawConvId = data.conversation_id ?? data.conversationId ?? data?.data?.conversation_id ?? data?.data?.conversationId;
+      const conversationId = normalizeProtocolIdentifier(rawConvId);
+
+      if (isMalformedProtocolIdentifier(rawThreadId)) {
+        recordProtocolIssue('Handshake thread_id has an invalid type');
+      }
+      if (isMalformedProtocolIdentifier(rawConvId)) {
+        recordProtocolIssue('Handshake conversation_id has an invalid type');
+      }
 
       if (threadId) {
-        handshake = {
+        const candidate = {
           threadId,
           conversationId,
           raw: data,
         };
+        if (
+          handshake
+          && (
+            handshake.threadId !== candidate.threadId
+            || handshake.conversationId !== candidate.conversationId
+          )
+        ) {
+          recordProtocolIssue('Conflicting handshake events were received');
+        } else if (!handshake) {
+          handshake = candidate;
+        }
       }
     }
 
@@ -255,9 +347,17 @@ export function parseConversationSse(rawBody) {
     if (eventName === 'json_envelope' || eventName === 'message') {
       const rawRet = data.ret ?? data.code;
       const rawErrCode = data.error_code ?? data.errorCode;
+      const retField = parseIntegerField(rawRet);
+      const errorCodeField = parseIntegerField(rawErrCode);
+      if (retField.present && !retField.valid) {
+        recordProtocolIssue('Trailer ret field is not an integer');
+      }
+      if (errorCodeField.present && !errorCodeField.valid) {
+        recordProtocolIssue('Trailer error_code field is not an integer');
+      }
       if (
-        (rawRet !== undefined && !isZeroCode(rawRet))
-        || (rawErrCode !== undefined && !isZeroCode(rawErrCode))
+        (retField.valid && retField.value !== 0)
+        || (errorCodeField.valid && errorCodeField.value !== 0)
         || data.success === false
       ) {
         trailerError = {
@@ -270,13 +370,17 @@ export function parseConversationSse(rawBody) {
 
     // Check error event
     const rawErrorCode = data.error_code ?? data.errorCode ?? data.code ?? data.ret;
+    const parsedErrorCode = parseIntegerField(rawErrorCode);
     const isExplicitError = (
       eventName === 'error'
       || data.event === 'error'
       || data.type === 'error'
-      || (rawErrorCode !== undefined && !isZeroCode(rawErrorCode) && extractCode(rawErrorCode) !== 200)
+      || (parsedErrorCode.valid && parsedErrorCode.value !== 0 && parsedErrorCode.value !== 200)
       || (data.success === false && !streamComplete)
     );
+    if (data.success === false && streamComplete?.success === true) {
+      recordProtocolIssue('A failure payload followed a successful stream completion');
+    }
     if (isExplicitError && !errorEvent) {
       const errorCode = extractCode(rawErrorCode ?? -1);
       const errorMsg = String(
@@ -306,10 +410,12 @@ export function parseConversationSse(rawBody) {
     );
     if (isStreamComplete) {
       const rawCode = data.error_code ?? data.errorCode ?? data.code ?? data.ret;
+      const parsedCode = parseIntegerField(rawCode);
       const hasExplicitSuccess = data.success === true || data.success === false;
-      const hasExplicitCode = rawCode !== undefined
-        && rawCode !== null
-        && String(rawCode).trim() !== '';
+      const hasExplicitCode = parsedCode.valid;
+      if (parsedCode.present && !parsedCode.valid) {
+        recordProtocolIssue('stream_complete error_code is not an integer');
+      }
       const errorCode = hasExplicitCode ? extractCode(rawCode) : null;
       const explicitFailure = data.success === false || (hasExplicitCode && !isZeroCode(rawCode));
       const protocolComplete = hasExplicitSuccess && hasExplicitCode;
@@ -324,7 +430,7 @@ export function parseConversationSse(rawBody) {
         || '',
       );
 
-      streamComplete = {
+      const candidate = {
         success,
         explicitFailure,
         protocolComplete,
@@ -332,11 +438,27 @@ export function parseConversationSse(rawBody) {
         errorMsg,
         raw: data,
       };
+      if (
+        streamComplete
+        && (
+          streamComplete.success !== candidate.success
+          || streamComplete.explicitFailure !== candidate.explicitFailure
+          || streamComplete.protocolComplete !== candidate.protocolComplete
+          || streamComplete.errorCode !== candidate.errorCode
+        )
+      ) {
+        recordProtocolIssue('Conflicting stream_complete events were received');
+      } else if (!streamComplete) {
+        streamComplete = candidate;
+      }
     }
   }
 
   // Contradictory trailer error overrides success
   if (trailerError) {
+    if (streamComplete?.success === true) {
+      recordProtocolIssue('A trailer error contradicted a successful stream completion');
+    }
     if (!errorEvent) errorEvent = trailerError;
     if (streamComplete) {
       streamComplete.success = false;
@@ -354,6 +476,7 @@ export function parseConversationSse(rawBody) {
     streamComplete,
     errorEvent,
     trailerError,
+    protocolIssues,
     events,
     isTruncated,
   };
@@ -380,8 +503,7 @@ export function isConversationUrl(url) {
     if (parsed.protocol !== 'https:' || (parsed.port && parsed.port !== '443')) return false;
     const host = parsed.hostname.toLowerCase();
     if (host !== JIMENG_CONVERSATION_HOST) return false;
-    const pathname = parsed.pathname.replace(/\/+/g, '/');
-    return pathname === JIMENG_CONVERSATION_PATH;
+    return parsed.pathname === JIMENG_CONVERSATION_PATH;
   } catch {
     return false;
   }
@@ -396,17 +518,34 @@ export function isConversationUrl(url) {
  */
 export function requestBodyMatchesAssetId(rawEntry, assetId) {
   if (!assetId || !rawEntry) return false;
+  const normalizedAssetId = String(assetId).trim();
+  if (!normalizedAssetId) return false;
   const entry = normalizeCaptureEntry(rawEntry);
   const payload = entry.requestBody;
   if (!payload) return false;
+  const marker = `资产编号：${normalizedAssetId}`;
   if (typeof payload === 'string') {
-    return payload.includes(assetId);
+    if (payload.includes(marker)) return true;
+    try {
+      return parsedValueContainsMarker(JSON.parse(payload), marker);
+    } catch {
+      return false;
+    }
   }
-  try {
-    return JSON.stringify(payload).includes(assetId);
-  } catch {
-    return false;
+  return parsedValueContainsMarker(payload, marker);
+}
+
+function extractRequestConversationId(payload) {
+  let parsed = payload;
+  if (typeof payload === 'string') {
+    try {
+      parsed = JSON.parse(payload);
+    } catch {
+      return '';
+    }
   }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return '';
+  return normalizeProtocolIdentifier(parsed.conversation_id ?? parsed.conversationId);
 }
 
 /**
@@ -520,6 +659,18 @@ export function classifyConversationEntry(rawEntry, assetId) {
 
   const parsedSse = parseConversationSse(entry.responseBody);
 
+  if (parsedSse.protocolIssues.length > 0) {
+    return {
+      matches: true,
+      isEndpoint: true,
+      kind: 'unconfirmed',
+      status: 'unconfirmed',
+      httpStatus: entry.status,
+      nonRetryable: true,
+      reason: `Conversation stream protocol conflict: ${parsedSse.protocolIssues.join('; ')}`,
+    };
+  }
+
   if (parsedSse.errorEvent && parsedSse.streamComplete?.success === true) {
     return {
       matches: true,
@@ -554,18 +705,7 @@ export function classifyConversationEntry(rawEntry, assetId) {
 
   // Confirmed success: requires HTTP 2xx, handshake with non-empty threadId, stream_complete success=true & errorCode=0
   if (parsedSse.handshake?.threadId && parsedSse.streamComplete?.success === true && parsedSse.streamComplete?.errorCode === 0) {
-    const reqPayload = entry.requestBody;
-    let reqConvId = '';
-    if (reqPayload && typeof reqPayload === 'object') {
-      reqConvId = String(reqPayload.conversation_id || reqPayload.conversationId || '').trim();
-    } else if (typeof reqPayload === 'string') {
-      try {
-        const parsedReq = JSON.parse(reqPayload);
-        reqConvId = String(parsedReq.conversation_id || parsedReq.conversationId || '').trim();
-      } catch {
-        // ignore
-      }
-    }
+    const reqConvId = extractRequestConversationId(entry.requestBody);
 
     if (!reqConvId || !parsedSse.handshake.conversationId) {
       return {
@@ -657,11 +797,36 @@ export function classifySubmitAck({
     };
   }
 
-  const normalized = (entries || []).map(normalizeCaptureEntry);
+  if (!Array.isArray(entries)) {
+    return {
+      kind: 'unconfirmed',
+      status: 'unconfirmed',
+      matchingRequestCount: 0,
+      endpointRequestCount: 0,
+      malformedCaptureEntryCount: 0,
+      nonRetryable: true,
+      reason: 'Network capture result was not an array',
+    };
+  }
+
+  const normalized = entries.map(normalizeCaptureEntry);
+  const malformedCaptureEntries = normalized.filter((entry) => entry.captureMalformed);
   const endpointEntries = normalized.filter((entry) => isConversationUrl(entry.url));
   const classifiedList = endpointEntries.map((entry) => classifyConversationEntry(entry, assetId));
 
   const matchingList = classifiedList.filter((c) => c.matches);
+
+  if (malformedCaptureEntries.length > 0) {
+    return {
+      kind: 'unconfirmed',
+      status: 'unconfirmed',
+      matchingRequestCount: matchingList.length,
+      endpointRequestCount: endpointEntries.length,
+      malformedCaptureEntryCount: malformedCaptureEntries.length,
+      nonRetryable: true,
+      reason: 'Network capture contained malformed entries without a usable URL',
+    };
+  }
 
   if (matchingList.length > 0) {
     const confirmed = matchingList.filter((c) => c.kind === 'confirmed');
@@ -702,7 +867,12 @@ export function classifySubmitAck({
     }
 
     if (rejected.length > 0) {
-      if (rejected.length > 1 || unconfirmed.length > 0 || pending.length > 0) {
+      if (
+        rejected.length > 1
+        || unconfirmed.length > 0
+        || pending.length > 0
+        || endpointEntries.length !== matchingList.length
+      ) {
         return {
           kind: 'unconfirmed',
           status: 'unconfirmed',
@@ -739,6 +909,16 @@ export function classifySubmitAck({
     }
 
     if (pending.length > 0) {
+      if (endpointEntries.length !== matchingList.length) {
+        return {
+          kind: 'unconfirmed',
+          status: 'unconfirmed',
+          matchingRequestCount: matchingList.length,
+          endpointRequestCount: endpointEntries.length,
+          nonRetryable: true,
+          reason: 'Pending conversation request coexisted with an uncorrelated endpoint request',
+        };
+      }
       if (!timedOut) {
         return {
           kind: 'pending',
