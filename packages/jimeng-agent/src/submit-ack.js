@@ -1,0 +1,811 @@
+/**
+ * Jimeng Agent submit ACK validation and SSE protocol parser.
+ *
+ * Pure classification and parsing module for conversation submit requests.
+ *
+ * Responsibilities:
+ * - Match POST https://jimeng.jianying.com/mweb/v1/creation_agent/v2/conversation requests
+ * - Normalize OpenCLI capture entries (responseStatus, requestBodyPreview, responsePreview, responseBodyTruncated)
+ * - Correlate requests with the unique canonical assetId
+ * - Parse and validate SSE stream (id:, retry:, handshake + stream_complete, trailer envelopes)
+ * - Classify submit outcomes: confirmed, rejected, unconfirmed, not_sent, pending
+ */
+
+export const JIMENG_CONVERSATION_PATH = '/mweb/v1/creation_agent/v2/conversation';
+export const JIMENG_CONVERSATION_HOST = 'jimeng.jianying.com';
+export const TELEMETRY_URL_PATTERN = /mcs\.zijieapi\.com|click_agent_generate|agent_message_action/i;
+
+/**
+ * Normalize OpenCLI captured network entry fields into a canonical shape.
+ * Handles:
+ * - request body: requestBodyPreview, requestBody, postData
+ * - response body: responsePreview, responseBody
+ * - status: responseStatus, status, statusCode, httpStatus (null if missing!)
+ * - truncation: responseBodyTruncated, truncated, requestBodyTruncated
+ *
+ * @param {object} entry
+ * @returns {{
+ *   url: string,
+ *   method: string,
+ *   status: number | null,
+ *   requestBody: any,
+ *   responseBody: any,
+ *   responseBodyTruncated: boolean,
+ *   requestBodyTruncated: boolean,
+ *   raw: object
+ * }}
+ */
+export function normalizeCaptureEntry(entry) {
+  if (!entry || typeof entry !== 'object') {
+    return {
+      url: '',
+      method: '',
+      status: null,
+      requestBody: null,
+      responseBody: null,
+      responseBodyTruncated: false,
+      requestBodyTruncated: false,
+      raw: entry,
+    };
+  }
+
+  const url = String(entry.url || '').trim();
+  const method = String(entry.method || '').toUpperCase();
+
+  const rawStatus = entry.responseStatus ?? entry.status ?? entry.statusCode ?? entry.httpStatus;
+  let status = null;
+  if (rawStatus !== undefined && rawStatus !== null && rawStatus !== '') {
+    const num = Number(rawStatus);
+    if (Number.isFinite(num) && Number.isInteger(num) && num > 0) status = num;
+  }
+
+  const requestBody = (
+    entry.requestBodyPreview
+    ?? entry.requestBody
+    ?? entry.postData
+    ?? null
+  );
+
+  const responseBody = (
+    entry.responsePreview
+    ?? entry.responseBody
+    ?? null
+  );
+
+  const responseBodyTruncated = Boolean(entry.responseBodyTruncated || entry.truncated);
+  const requestBodyTruncated = Boolean(entry.requestBodyTruncated);
+
+  return {
+    url,
+    method,
+    status,
+    requestBody,
+    responseBody,
+    responseBodyTruncated,
+    requestBodyTruncated,
+    raw: entry,
+  };
+}
+
+/**
+ * Parse raw SSE or JSON text into structured event objects.
+ * Handles id:, retry:, event:, data:, and standalone JSON envelopes / trailers.
+ *
+ * @param {string|object} raw
+ * @returns {Array<{ event: string, id: string, data: any, rawData: string }>}
+ */
+export function parseSseEvents(raw) {
+  if (raw === null || raw === undefined) return [];
+  if (typeof raw === 'object') {
+    return [{
+      event: raw.event || raw.type || raw.event_type || 'message',
+      id: '',
+      data: raw,
+      rawData: JSON.stringify(raw),
+    }];
+  }
+
+  const text = String(raw).trim();
+  if (!text) return [];
+
+  const events = [];
+  const lines = text.split(/\r\n|\r|\n/);
+  let currentEvent = '';
+  let currentId = '';
+  let dataLines = [];
+
+  const flushEvent = () => {
+    if (currentEvent || dataLines.length > 0 || currentId) {
+      const rawData = dataLines.join('\n');
+      let data = rawData;
+      if (rawData) {
+        try {
+          data = JSON.parse(rawData);
+        } catch {
+          data = rawData;
+        }
+      }
+      events.push({
+        event: currentEvent || 'message',
+        id: currentId,
+        data,
+        rawData,
+      });
+      currentEvent = '';
+      currentId = '';
+      dataLines = [];
+    }
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed === '') {
+      flushEvent();
+      continue;
+    }
+    if (trimmed.startsWith(':')) {
+      // SSE comment line
+      continue;
+    }
+    if (line.startsWith('id:')) {
+      currentId = line.slice('id:'.length).trim();
+      continue;
+    }
+    if (line.startsWith('retry:')) {
+      // SSE retry directive
+      continue;
+    }
+    if (line.startsWith('event:')) {
+      currentEvent = line.slice('event:'.length).trim();
+      continue;
+    }
+    if (line.startsWith('data:')) {
+      dataLines.push(line.slice('data:'.length).trim());
+      continue;
+    }
+    // Standalone JSON line / envelope / trailer (e.g. {"ret":"0","errmsg":"success"})
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        flushEvent();
+        events.push({
+          event: parsed.event || parsed.type || parsed.event_type || 'json_envelope',
+          id: '',
+          data: parsed,
+          rawData: trimmed,
+        });
+        continue;
+      } catch {
+        // Not JSON; treat as data line
+      }
+    }
+    dataLines.push(trimmed);
+  }
+  flushEvent();
+  return events;
+}
+
+/**
+ * Extract handshake, stream_complete, and error events from SSE response.
+ *
+ * @param {string|object} rawBody
+ * @returns {{
+ *   handshake: { threadId: string, conversationId: string, raw: object } | null,
+ *   streamComplete: {
+ *     success: boolean,
+ *     explicitFailure: boolean,
+ *     protocolComplete: boolean,
+ *     errorCode: number | null,
+ *     errorMsg: string,
+ *     raw: object
+ *   } | null,
+ *   errorEvent: { errorCode: number, errorMsg: string, raw: object } | null,
+ *   trailerError: { errorCode: number, errorMsg: string, raw: object } | null,
+ *   events: Array<object>,
+ *   isTruncated: boolean
+ * }}
+ */
+export function parseConversationSse(rawBody) {
+  const events = parseSseEvents(rawBody);
+  let handshake = null;
+  let streamComplete = null;
+  let errorEvent = null;
+  let trailerError = null;
+
+  const isZeroCode = (code) => {
+    if (code === undefined || code === null) return false;
+    if (typeof code === 'number') return code === 0;
+    const str = String(code).trim();
+    return str === '0';
+  };
+
+  const extractCode = (code) => {
+    if (code === undefined || code === null) return 0;
+    const num = Number(code);
+    return Number.isNaN(num) ? -1 : num;
+  };
+
+  for (const item of events) {
+    const eventName = String(item.event || '').toLowerCase();
+    const data = (item.data && typeof item.data === 'object') ? item.data : {};
+
+    // Check handshake
+    const isHandshake = (
+      eventName === 'handshake'
+      || data.event === 'handshake'
+      || data.type === 'handshake'
+      || data.event_type === 'handshake'
+    );
+    if (isHandshake) {
+      const rawThreadId = data.thread_id ?? data.threadId ?? data?.data?.thread_id ?? data?.data?.threadId ?? '';
+      const threadId = String(rawThreadId).trim();
+      const rawConvId = data.conversation_id ?? data.conversationId ?? data?.data?.conversation_id ?? data?.data?.conversationId ?? '';
+      const conversationId = String(rawConvId).trim();
+
+      if (threadId) {
+        handshake = {
+          threadId,
+          conversationId,
+          raw: data,
+        };
+      }
+    }
+
+    // Check trailer / envelope errors (e.g. {"ret":"1001","errmsg":"fail"})
+    if (eventName === 'json_envelope' || eventName === 'message') {
+      const rawRet = data.ret ?? data.code;
+      const rawErrCode = data.error_code ?? data.errorCode;
+      if (
+        (rawRet !== undefined && !isZeroCode(rawRet))
+        || (rawErrCode !== undefined && !isZeroCode(rawErrCode))
+        || data.success === false
+      ) {
+        trailerError = {
+          errorCode: extractCode(rawErrCode ?? rawRet ?? -1),
+          errorMsg: String(data.errmsg || data.error_message || data.error_msg || data.message || data.msg || 'Trailer error'),
+          raw: data,
+        };
+      }
+    }
+
+    // Check error event
+    const rawErrorCode = data.error_code ?? data.errorCode ?? data.code ?? data.ret;
+    const isExplicitError = (
+      eventName === 'error'
+      || data.event === 'error'
+      || data.type === 'error'
+      || (rawErrorCode !== undefined && !isZeroCode(rawErrorCode) && extractCode(rawErrorCode) !== 200)
+      || (data.success === false && !streamComplete)
+    );
+    if (isExplicitError && !errorEvent) {
+      const errorCode = extractCode(rawErrorCode ?? -1);
+      const errorMsg = String(
+        data.error_message
+        || data.error_msg
+        || data.errorMsg
+        || data.message
+        || data.msg
+        || data.errmsg
+        || data.error
+        || 'Conversation stream error',
+      );
+      errorEvent = {
+        errorCode,
+        errorMsg,
+        raw: data,
+      };
+    }
+
+    // Check stream_complete
+    const isStreamComplete = (
+      eventName === 'stream_complete'
+      || eventName === 'message_stream_complete'
+      || data.event === 'stream_complete'
+      || data.type === 'stream_complete'
+      || data.event_type === 'stream_complete'
+    );
+    if (isStreamComplete) {
+      const rawCode = data.error_code ?? data.errorCode ?? data.code ?? data.ret;
+      const hasExplicitSuccess = data.success === true || data.success === false;
+      const hasExplicitCode = rawCode !== undefined
+        && rawCode !== null
+        && String(rawCode).trim() !== '';
+      const errorCode = hasExplicitCode ? extractCode(rawCode) : null;
+      const explicitFailure = data.success === false || (hasExplicitCode && !isZeroCode(rawCode));
+      const protocolComplete = hasExplicitSuccess && hasExplicitCode;
+      const success = data.success === true && hasExplicitCode && isZeroCode(rawCode);
+      const errorMsg = String(
+        data.error_message
+        || data.error_msg
+        || data.errorMsg
+        || data.message
+        || data.msg
+        || data.errmsg
+        || '',
+      );
+
+      streamComplete = {
+        success,
+        explicitFailure,
+        protocolComplete,
+        errorCode,
+        errorMsg,
+        raw: data,
+      };
+    }
+  }
+
+  // Contradictory trailer error overrides success
+  if (trailerError) {
+    if (!errorEvent) errorEvent = trailerError;
+    if (streamComplete) {
+      streamComplete.success = false;
+      streamComplete.explicitFailure = true;
+      streamComplete.protocolComplete = true;
+      streamComplete.errorCode = trailerError.errorCode;
+      streamComplete.errorMsg = trailerError.errorMsg;
+    }
+  }
+
+  const isTruncated = Boolean(handshake && !streamComplete && !errorEvent);
+
+  return {
+    handshake,
+    streamComplete,
+    errorEvent,
+    trailerError,
+    events,
+    isTruncated,
+  };
+}
+
+/**
+ * Check if the URL and method target the creation agent conversation endpoint
+ * on the exact jimeng.jianying.com host.
+ *
+ * @param {string} url
+ * @param {string} [method='POST']
+ * @returns {boolean}
+ */
+export function isConversationEndpoint(url, method = 'POST') {
+  return String(method || '').toUpperCase() === 'POST' && isConversationUrl(url);
+}
+
+export function isConversationUrl(url) {
+  if (!url) return false;
+  const urlStr = String(url).trim();
+  if (TELEMETRY_URL_PATTERN.test(urlStr)) return false;
+  try {
+    const parsed = new URL(urlStr);
+    if (parsed.protocol !== 'https:' || (parsed.port && parsed.port !== '443')) return false;
+    const host = parsed.hostname.toLowerCase();
+    if (host !== JIMENG_CONVERSATION_HOST) return false;
+    const pathname = parsed.pathname.replace(/\/+/g, '/');
+    return pathname === JIMENG_CONVERSATION_PATH;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Check if the request body contains the given assetId.
+ *
+ * @param {object} rawEntry
+ * @param {string} assetId
+ * @returns {boolean}
+ */
+export function requestBodyMatchesAssetId(rawEntry, assetId) {
+  if (!assetId || !rawEntry) return false;
+  const entry = normalizeCaptureEntry(rawEntry);
+  const payload = entry.requestBody;
+  if (!payload) return false;
+  if (typeof payload === 'string') {
+    return payload.includes(assetId);
+  }
+  try {
+    return JSON.stringify(payload).includes(assetId);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Classify a single captured network entry against the expected assetId.
+ *
+ * @param {object} rawEntry
+ * @param {string} assetId
+ * @returns {object}
+ */
+export function classifyConversationEntry(rawEntry, assetId) {
+  const entry = normalizeCaptureEntry(rawEntry);
+  if (!entry.url) return { matches: false, isEndpoint: false };
+
+  if (!isConversationUrl(entry.url)) return { matches: false, isEndpoint: false };
+  if (entry.method !== 'POST') {
+    return {
+      matches: false,
+      isEndpoint: true,
+      uncorrelated: true,
+      reason: `Conversation endpoint method was ${entry.method || 'unavailable'} instead of POST`,
+    };
+  }
+
+  const hasAssetId = requestBodyMatchesAssetId(entry, assetId);
+  const bodyUnavailableOrTruncated = !entry.requestBody || entry.requestBodyTruncated;
+
+  if (!hasAssetId) {
+    return {
+      matches: false,
+      isEndpoint: true,
+      uncorrelated: true,
+      bodyUnavailableOrTruncated,
+      reason: bodyUnavailableOrTruncated
+        ? 'Endpoint request body was unavailable or truncated'
+        : 'Endpoint request body did not contain assetId',
+    };
+  }
+
+  if (entry.requestBodyTruncated) {
+    return {
+      matches: true,
+      isEndpoint: true,
+      kind: 'unconfirmed',
+      status: 'unconfirmed',
+      nonRetryable: true,
+      httpStatus: entry.status,
+      reason: 'Captured request body was truncated',
+    };
+  }
+
+  // Response body truncation by CDP/network layer is unconfirmed
+  if (entry.responseBodyTruncated) {
+    return {
+      matches: true,
+      isEndpoint: true,
+      kind: 'unconfirmed',
+      status: 'unconfirmed',
+      nonRetryable: true,
+      httpStatus: entry.status,
+      reason: 'Captured response body was truncated',
+    };
+  }
+
+  // Missing HTTP status is unconfirmed
+  if (entry.status === null || entry.status === undefined) {
+    return {
+      matches: true,
+      isEndpoint: true,
+      kind: 'unconfirmed',
+      status: 'unconfirmed',
+      nonRetryable: true,
+      httpStatus: null,
+      reason: 'HTTP response status is missing',
+    };
+  }
+
+  // HTTP non-2xx rejection
+  if (entry.status < 200 || entry.status >= 300) {
+    let errorMsg = `HTTP ${entry.status}`;
+    if (entry.responseBody) {
+      try {
+        const parsed = typeof entry.responseBody === 'object' ? entry.responseBody : JSON.parse(entry.responseBody);
+        errorMsg = parsed.error_message || parsed.error_msg || parsed.errorMsg || parsed.message || parsed.msg || parsed.errmsg || errorMsg;
+      } catch {
+        // ignore
+      }
+    }
+    return {
+      matches: true,
+      isEndpoint: true,
+      kind: 'rejected',
+      status: 'rejected',
+      httpStatus: entry.status,
+      errorCode: entry.status,
+      errorMsg,
+      nonRetryable: true,
+      reason: `HTTP ${entry.status} error returned by conversation endpoint`,
+    };
+  }
+
+  if (entry.responseBody === undefined || entry.responseBody === null || entry.responseBody === '') {
+    return {
+      matches: true,
+      isEndpoint: true,
+      kind: 'pending',
+      status: 'pending',
+      httpStatus: entry.status,
+      reason: 'Request captured but response body is not yet available',
+    };
+  }
+
+  const parsedSse = parseConversationSse(entry.responseBody);
+
+  if (parsedSse.errorEvent && parsedSse.streamComplete?.success === true) {
+    return {
+      matches: true,
+      isEndpoint: true,
+      kind: 'unconfirmed',
+      status: 'unconfirmed',
+      httpStatus: entry.status,
+      nonRetryable: true,
+      reason: 'Conversation stream contained both an explicit error and a success completion',
+    };
+  }
+
+  // Business rejection / error event / trailer error
+  if (parsedSse.errorEvent || parsedSse.streamComplete?.explicitFailure) {
+    const failure = parsedSse.streamComplete?.explicitFailure
+      ? parsedSse.streamComplete
+      : parsedSse.errorEvent;
+    const errorCode = failure?.errorCode ?? -1;
+    const errorMsg = failure?.errorMsg || 'Server rejected conversation request';
+    return {
+      matches: true,
+      isEndpoint: true,
+      kind: 'rejected',
+      status: 'rejected',
+      httpStatus: entry.status,
+      errorCode,
+      errorMsg,
+      nonRetryable: true,
+      reason: `Business rejection: ${errorMsg} (code: ${errorCode})`,
+    };
+  }
+
+  // Confirmed success: requires HTTP 2xx, handshake with non-empty threadId, stream_complete success=true & errorCode=0
+  if (parsedSse.handshake?.threadId && parsedSse.streamComplete?.success === true && parsedSse.streamComplete?.errorCode === 0) {
+    const reqPayload = entry.requestBody;
+    let reqConvId = '';
+    if (reqPayload && typeof reqPayload === 'object') {
+      reqConvId = String(reqPayload.conversation_id || reqPayload.conversationId || '').trim();
+    } else if (typeof reqPayload === 'string') {
+      try {
+        const parsedReq = JSON.parse(reqPayload);
+        reqConvId = String(parsedReq.conversation_id || parsedReq.conversationId || '').trim();
+      } catch {
+        // ignore
+      }
+    }
+
+    if (!reqConvId || !parsedSse.handshake.conversationId) {
+      return {
+        matches: true,
+        isEndpoint: true,
+        kind: 'unconfirmed',
+        status: 'unconfirmed',
+        httpStatus: entry.status,
+        nonRetryable: true,
+        reason: 'Conversation ID is missing from request body or handshake',
+      };
+    }
+
+    if (reqConvId !== parsedSse.handshake.conversationId) {
+      return {
+        matches: true,
+        isEndpoint: true,
+        kind: 'unconfirmed',
+        status: 'unconfirmed',
+        httpStatus: entry.status,
+        nonRetryable: true,
+        reason: `Conversation ID mismatch: request=${reqConvId}, handshake=${parsedSse.handshake.conversationId}`,
+      };
+    }
+
+    return {
+      matches: true,
+      isEndpoint: true,
+      kind: 'confirmed',
+      status: 'confirmed',
+      httpStatus: entry.status,
+      threadId: parsedSse.handshake.threadId,
+      conversationId: parsedSse.handshake.conversationId || '',
+      raw: parsedSse,
+    };
+  }
+
+  // Handshake received but stream_complete pending
+  if (parsedSse.handshake?.threadId && !parsedSse.streamComplete) {
+    return {
+      matches: true,
+      isEndpoint: true,
+      kind: 'pending',
+      status: 'in_progress',
+      httpStatus: entry.status,
+      threadId: parsedSse.handshake.threadId,
+      conversationId: parsedSse.handshake.conversationId || '',
+      reason: 'Handshake received, waiting for stream_complete',
+    };
+  }
+
+  return {
+    matches: true,
+    isEndpoint: true,
+    kind: 'unconfirmed',
+    status: 'unconfirmed',
+    httpStatus: entry.status,
+    nonRetryable: true,
+    reason: 'Unparseable or unexpected conversation stream structure',
+  };
+}
+
+/**
+ * Classify the overall submit ACK status from captured network entries.
+ *
+ * @param {object} options
+ * @param {Array<object>} [options.entries=[]]
+ * @param {string} options.assetId
+ * @param {boolean} [options.timedOut=false]
+ * @param {Error|null} [options.captureError=null]
+ * @param {object|null} [options.pageState=null]
+ * @returns {object}
+ */
+export function classifySubmitAck({
+  entries = [],
+  assetId,
+  timedOut = false,
+  captureError = null,
+  pageState = null,
+}) {
+  if (captureError) {
+    return {
+      kind: 'unconfirmed',
+      status: 'unconfirmed',
+      matchingRequestCount: 0,
+      endpointRequestCount: 0,
+      nonRetryable: true,
+      reason: `Capture error: ${captureError.message || captureError}`,
+    };
+  }
+
+  const normalized = (entries || []).map(normalizeCaptureEntry);
+  const endpointEntries = normalized.filter((entry) => isConversationUrl(entry.url));
+  const classifiedList = endpointEntries.map((entry) => classifyConversationEntry(entry, assetId));
+
+  const matchingList = classifiedList.filter((c) => c.matches);
+
+  if (matchingList.length > 0) {
+    const confirmed = matchingList.filter((c) => c.kind === 'confirmed');
+    const rejected = matchingList.filter((c) => c.kind === 'rejected');
+    const unconfirmed = matchingList.filter((c) => c.kind === 'unconfirmed');
+    const pending = matchingList.filter((c) => c.kind === 'pending');
+
+    if (
+      confirmed.length > 1
+      || (confirmed.length > 0 && (
+        rejected.length > 0
+        || unconfirmed.length > 0
+        || pending.length > 0
+        || endpointEntries.length !== matchingList.length
+      ))
+    ) {
+      return {
+        kind: 'unconfirmed',
+        status: 'unconfirmed',
+        matchingRequestCount: matchingList.length,
+        endpointRequestCount: endpointEntries.length,
+        nonRetryable: true,
+        reason: 'Multiple or conflicting conversation requests/responses were captured',
+      };
+    }
+
+    if (confirmed.length > 0) {
+      const primary = confirmed[0];
+      return {
+        kind: 'confirmed',
+        status: 'confirmed',
+        matchingRequestCount: matchingList.length,
+        endpointRequestCount: endpointEntries.length,
+        threadId: primary.threadId,
+        conversationId: primary.conversationId,
+        httpStatus: primary.httpStatus,
+      };
+    }
+
+    if (rejected.length > 0) {
+      if (rejected.length > 1 || unconfirmed.length > 0 || pending.length > 0) {
+        return {
+          kind: 'unconfirmed',
+          status: 'unconfirmed',
+          matchingRequestCount: matchingList.length,
+          endpointRequestCount: endpointEntries.length,
+          nonRetryable: true,
+          reason: 'Multiple or conflicting conversation rejections/responses were captured',
+        };
+      }
+      const primary = rejected[0];
+      return {
+        kind: 'rejected',
+        status: 'rejected',
+        matchingRequestCount: matchingList.length,
+        endpointRequestCount: endpointEntries.length,
+        errorCode: primary.errorCode,
+        errorMsg: primary.errorMsg,
+        httpStatus: primary.httpStatus,
+        nonRetryable: true,
+        reason: primary.reason,
+      };
+    }
+
+    if (unconfirmed.length > 0) {
+      const primary = unconfirmed[0];
+      return {
+        kind: 'unconfirmed',
+        status: 'unconfirmed',
+        matchingRequestCount: matchingList.length,
+        endpointRequestCount: endpointEntries.length,
+        nonRetryable: true,
+        reason: primary.reason,
+      };
+    }
+
+    if (pending.length > 0) {
+      if (!timedOut) {
+        return {
+          kind: 'pending',
+          status: 'in_progress',
+          matchingRequestCount: matchingList.length,
+          endpointRequestCount: endpointEntries.length,
+        };
+      }
+      return {
+        kind: 'unconfirmed',
+        status: 'unconfirmed',
+        matchingRequestCount: matchingList.length,
+        endpointRequestCount: endpointEntries.length,
+        nonRetryable: true,
+        reason: 'Conversation request was sent but response was truncated or timed out',
+      };
+    }
+  }
+
+  // 0 matching requests found:
+  // If ANY endpoint request was captured but could not be correlated, outcome is UNCONFIRMED!
+  if (endpointEntries.length > 0) {
+    return {
+      kind: 'unconfirmed',
+      status: 'unconfirmed',
+      matchingRequestCount: 0,
+      endpointRequestCount: endpointEntries.length,
+      nonRetryable: true,
+      reason: 'Conversation endpoint request was observed but could not be correlated safely with assetId',
+    };
+  }
+
+  // 0 endpoint requests at all:
+  if (!timedOut) {
+    return {
+      kind: 'none',
+      status: 'waiting',
+      matchingRequestCount: 0,
+      endpointRequestCount: 0,
+    };
+  }
+
+  if (pageState) {
+    if (pageState.assetIdInComposer === true && pageState.assetIdOutsideComposer === false) {
+      return {
+        kind: 'not_sent',
+        status: 'not_sent',
+        matchingRequestCount: 0,
+        endpointRequestCount: 0,
+        retryable: true,
+        reason: 'No conversation endpoint request captured and assetId remains safely in composer',
+      };
+    }
+    return {
+      kind: 'unconfirmed',
+      status: 'unconfirmed',
+      matchingRequestCount: 0,
+      endpointRequestCount: 0,
+      nonRetryable: true,
+      reason: 'No conversation request captured but page composer state is inconsistent',
+    };
+  }
+
+  return {
+    kind: 'no_request_timed_out',
+    status: 'no_request',
+    matchingRequestCount: 0,
+    endpointRequestCount: 0,
+  };
+}

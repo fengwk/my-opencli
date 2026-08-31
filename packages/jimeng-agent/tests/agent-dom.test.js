@@ -1,22 +1,30 @@
 import { readFileSync } from 'node:fs';
 
-import { describe, expect, it } from 'vitest';
-import { ArgumentError } from '@jackwener/opencli/errors';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ArgumentError, CommandExecutionError } from '@jackwener/opencli/errors';
 
 import {
   JIMENG_GENERATE_URL,
+  assertSubmitCapabilities,
   buildEnterKeyEvents,
   buildMentionCandidateExpression,
   buildMentionSegments,
   buildWorkspaceUrl,
   chooseRetryPlan,
   findSpacedNeedleRange,
+  inspectComposerAssetIdState,
   isMentionChipAppended,
   isStrictMentionCommit,
   mentionTextMatchesVariant,
   normalizePromptValidationLines,
+  prepareJimengAgentAsk,
   resolveMentionDebugOptions,
+  submitPreparedGeneration,
 } from '../src/agent-dom.js';
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 const agentDomSource = readFileSync(new URL('../src/agent-dom.js', import.meta.url), 'utf8');
 
@@ -565,6 +573,50 @@ describe('jimeng-agent/agent-dom — retry policy', () => {
       errorPhase: 'clear-initial',
     })).toEqual({ kind: 'fresh', startAssetIndex: 0 });
   });
+
+  it('stops immediately for unconfirmed or rejected submit failures even with retry budget > 0', () => {
+    const base = {
+      retriesUsed: 0,
+      retryBudget: 3,
+      priorInPlaceRetry: false,
+      failedAssetIndex: 0,
+      surface: { ready: true, fileInputCount: 1 },
+    };
+    expect(chooseRetryPlan({ ...base, errorPhase: 'submit-unconfirmed' })).toEqual({ kind: 'stop' });
+    expect(chooseRetryPlan({ ...base, errorPhase: 'submit-rejected' })).toEqual({ kind: 'stop' });
+    expect(chooseRetryPlan({ ...base, errorPhase: 'submit-capture-unavailable' })).toEqual({ kind: 'stop' });
+    expect(chooseRetryPlan({ ...base, errorPhase: 'submit' })).toEqual({ kind: 'stop' });
+    expect(chooseRetryPlan({ ...base, retryable: false })).toEqual({ kind: 'stop' });
+  });
+
+  it('allows safe fresh retry for submit-button-missing and proven submit-not-sent when retry budget remains', () => {
+    expect(chooseRetryPlan({
+      retriesUsed: 0,
+      retryBudget: 2,
+      priorInPlaceRetry: false,
+      errorPhase: 'submit-button-missing',
+      failedAssetIndex: 0,
+      surface: { ready: true, fileInputCount: 1 },
+    })).toEqual({ kind: 'fresh', startAssetIndex: 0 });
+
+    expect(chooseRetryPlan({
+      retriesUsed: 0,
+      retryBudget: 2,
+      priorInPlaceRetry: false,
+      errorPhase: 'submit-not-sent',
+      failedAssetIndex: 0,
+      surface: { ready: true, fileInputCount: 1 },
+    })).toEqual({ kind: 'fresh', startAssetIndex: 0 });
+
+    expect(chooseRetryPlan({
+      retriesUsed: 2,
+      retryBudget: 2,
+      priorInPlaceRetry: false,
+      errorPhase: 'submit-not-sent',
+      failedAssetIndex: 0,
+      surface: { ready: true, fileInputCount: 1 },
+    })).toEqual({ kind: 'stop' });
+  });
 });
 
 describe('jimeng-agent/agent-dom — mention debug options', () => {
@@ -604,5 +656,676 @@ describe('jimeng-agent/agent-dom — mention debug options', () => {
       enabled: true,
       stopPhase: 'before-click',
     });
+  });
+});
+
+describe('jimeng-agent/agent-dom — submit ACK runtime & safety', () => {
+  function createSubmitPageMock({
+    startNetworkCaptureOk = true,
+    capturedEntries = [],
+    drainEntries = [],
+    readError = null,
+    drainError = null,
+    sleepErrorAfterClick = null,
+    buttonCount = 1,
+    pageState = { assetIdInComposer: true, assetIdOutsideComposer: false },
+  } = {}) {
+    const keyPresses = [];
+    const clicks = [];
+    let startCaptureCalledWith = null;
+    let readCount = 0;
+    let simulatedTime = 1_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => simulatedTime);
+
+    const page = {
+      startNetworkCapture: vi.fn(async (pattern) => {
+        startCaptureCalledWith = pattern;
+        if (startNetworkCaptureOk instanceof Error) throw startNetworkCaptureOk;
+        return Boolean(startNetworkCaptureOk);
+      }),
+      readNetworkCapture: vi.fn(async () => {
+        readCount += 1;
+        if (readCount === 1) {
+          if (drainError) throw drainError;
+          return drainEntries;
+        }
+        if (readError) throw readError;
+        return typeof capturedEntries === 'function' ? capturedEntries(readCount - 1) : capturedEntries;
+      }),
+      evaluate: vi.fn(async (expr) => {
+        if (expr.includes('submit-button')) {
+          if (buttonCount === 0) return { ok: false, count: 0 };
+          return { ok: true, count: buttonCount };
+        }
+        if (expr.includes('assetIdInComposer')) {
+          return pageState;
+        }
+        return { ok: true };
+      }),
+      click: vi.fn(async (sel) => {
+        clicks.push(sel);
+        return { ok: true };
+      }),
+      sleep: vi.fn(async (seconds) => {
+        if (sleepErrorAfterClick && clicks.length > 0) throw sleepErrorAfterClick;
+        simulatedTime += Math.max(10, Math.round((seconds || 0.5) * 1000));
+      }),
+      nativeKeyPress: vi.fn(async (key) => {
+        keyPresses.push(key);
+      }),
+      get keyPresses() { return keyPresses; },
+      get clicks() { return clicks; },
+      get startCaptureCalledWith() { return startCaptureCalledWith; },
+      get readCount() { return readCount; },
+    };
+    return page;
+  }
+
+  const ASSET_ID = 'b7e4f19a2c0d5e68';
+  const SUCCESS_ENTRY = {
+    url: 'https://jimeng.jianying.com/mweb/v1/creation_agent/v2/conversation',
+    method: 'POST',
+    status: 200,
+    requestBody: JSON.stringify({
+      conversation_id: '7488349283742819840',
+      prompt: `资产编号：${ASSET_ID}`,
+    }),
+    responseBody: `event: handshake\ndata: {"thread_id":"7488349283742819842","conversation_id":"7488349283742819840"}\n\nevent: stream_complete\ndata: {"success":true,"error_code":0}\n\n`,
+  };
+
+  it('validates submit capabilities before attempting network capture', () => {
+    expect(() => assertSubmitCapabilities({ startNetworkCapture: vi.fn(), readNetworkCapture: vi.fn() })).not.toThrow();
+    expect(() => assertSubmitCapabilities({})).toThrow(/Missing page capability for submit/);
+  });
+
+  it('confirms submission on valid SSE ACK without pressing Escape', async () => {
+    const page = createSubmitPageMock({
+      capturedEntries: [SUCCESS_ENTRY],
+    });
+
+    const result = await submitPreparedGeneration(page, ASSET_ID, { timeoutMs: 1000, pollIntervalMs: 50 });
+    expect(result).toMatchObject({
+      accepted: true,
+      confirmation: 'ack_confirmed',
+      threadId: '7488349283742819842',
+      conversationId: '7488349283742819840',
+      submitRequestCount: 1,
+    });
+    expect(page.startNetworkCapture).toHaveBeenCalledWith(expect.stringContaining('conversation'));
+    expect(page.click).toHaveBeenCalledTimes(1);
+    expect(page.keyPresses).not.toContain('Escape');
+  });
+
+  it('fails before clicking when startNetworkCapture fails or is unavailable', async () => {
+    const page = createSubmitPageMock({ startNetworkCaptureOk: false });
+    await expect(submitPreparedGeneration(page, ASSET_ID, { timeoutMs: 500 })).rejects.toMatchObject({
+      phase: 'submit-capture-unavailable',
+      retryable: false,
+    });
+    expect(page.click).not.toHaveBeenCalled();
+  });
+
+  it('stops immediately when capture read fails during ACK polling', async () => {
+    const page = createSubmitPageMock({
+      readError: new Error('CDP session detached after submit click'),
+    });
+    await expect(submitPreparedGeneration(page, ASSET_ID, { timeoutMs: 500, pollIntervalMs: 50 })).rejects.toMatchObject({
+      phase: 'submit-unconfirmed',
+      retryable: false,
+    });
+    expect(page.click).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops without retrying when the post-click ACK wait itself fails', async () => {
+    const page = createSubmitPageMock({
+      sleepErrorAfterClick: new Error('browser bridge disconnected'),
+    });
+    await expect(submitPreparedGeneration(page, ASSET_ID, {
+      timeoutMs: 500,
+      pollIntervalMs: 50,
+    })).rejects.toMatchObject({
+      phase: 'submit-unconfirmed',
+      retryable: false,
+    });
+    expect(page.click).toHaveBeenCalledTimes(1);
+    expect(page.readNetworkCapture).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails before clicking when pre-click network capture drain fails', async () => {
+    const page = createSubmitPageMock({
+      drainError: new Error('CDP Network domain disabled during drain'),
+    });
+    await expect(submitPreparedGeneration(page, ASSET_ID, { timeoutMs: 500 })).rejects.toMatchObject({
+      phase: 'submit-capture-unavailable',
+      retryable: false,
+    });
+    expect(page.click).not.toHaveBeenCalled();
+  });
+
+  it('accepts a delayed prior matching ACK before clicking again', async () => {
+    const page = createSubmitPageMock({
+      drainEntries: [SUCCESS_ENTRY],
+      capturedEntries: [],
+    });
+    const result = await submitPreparedGeneration(page, ASSET_ID, {
+      timeoutMs: 100,
+      pollIntervalMs: 50,
+    });
+    expect(result).toMatchObject({
+      accepted: true,
+      confirmation: 'ack_confirmed',
+      threadId: '7488349283742819842',
+      conversationId: '7488349283742819840',
+    });
+    expect(page.click).not.toHaveBeenCalled();
+    expect(page.readNetworkCapture).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops before clicking when a prior matching request appears without a complete ACK', async () => {
+    const page = createSubmitPageMock({
+      drainEntries: [{
+        ...SUCCESS_ENTRY,
+        responseBody: null,
+      }],
+      capturedEntries: [],
+    });
+    await expect(submitPreparedGeneration(page, ASSET_ID, {
+      timeoutMs: 100,
+      pollIntervalMs: 50,
+    })).rejects.toMatchObject({
+      phase: 'submit-unconfirmed',
+      retryable: false,
+    });
+    expect(page.click).not.toHaveBeenCalled();
+    expect(page.readNetworkCapture).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops before clicking when a prior matching endpoint capture omits its method', async () => {
+    const page = createSubmitPageMock({
+      drainEntries: [{
+        ...SUCCESS_ENTRY,
+        method: undefined,
+      }],
+      capturedEntries: [],
+    });
+    await expect(submitPreparedGeneration(page, ASSET_ID, {
+      timeoutMs: 100,
+      pollIntervalMs: 50,
+    })).rejects.toMatchObject({
+      phase: 'submit-unconfirmed',
+      retryable: false,
+    });
+    expect(page.click).not.toHaveBeenCalled();
+  });
+
+  it('confirms submission when page.click throws but valid ACK is captured (ACK wins)', async () => {
+    const page = createSubmitPageMock({
+      capturedEntries: [SUCCESS_ENTRY],
+    });
+    page.click = vi.fn(async () => {
+      throw new Error('CDP click failed / node detached');
+    });
+
+    const result = await submitPreparedGeneration(page, ASSET_ID, { timeoutMs: 1000, pollIntervalMs: 50 });
+    expect(result).toMatchObject({
+      accepted: true,
+      confirmation: 'ack_confirmed',
+      threadId: '7488349283742819842',
+      conversationId: '7488349283742819840',
+      submitRequestCount: 1,
+    });
+  });
+
+  it('returns safe not-sent when page.click throws and 0 requests were captured with prompt in composer', async () => {
+    const page = createSubmitPageMock({
+      capturedEntries: [],
+      pageState: { assetIdInComposer: true, assetIdOutsideComposer: false },
+    });
+    page.click = vi.fn(async () => {
+      throw new Error('CDP click target unreachable');
+    });
+
+    await expect(submitPreparedGeneration(page, ASSET_ID, { timeoutMs: 100, pollIntervalMs: 50 })).rejects.toMatchObject({
+      phase: 'submit-not-sent',
+      retryable: true,
+    });
+  });
+
+  it('classifies uncorrelatable endpoint request as unconfirmed', async () => {
+    const page = createSubmitPageMock({
+      capturedEntries: [{
+        url: 'https://jimeng.jianying.com/mweb/v1/creation_agent/v2/conversation',
+        method: 'POST',
+        responseStatus: 200,
+        requestBodyPreview: null,
+        responsePreview: SUCCESS_ENTRY.responseBody,
+      }],
+    });
+    await expect(submitPreparedGeneration(page, ASSET_ID, { timeoutMs: 100, pollIntervalMs: 50 })).rejects.toMatchObject({
+      phase: 'submit-unconfirmed',
+      retryable: false,
+    });
+  });
+
+  it('classifies missing HTTP status in captured entry as unconfirmed', async () => {
+    const page = createSubmitPageMock({
+      capturedEntries: [{
+        url: 'https://jimeng.jianying.com/mweb/v1/creation_agent/v2/conversation',
+        method: 'POST',
+        requestBodyPreview: JSON.stringify({ prompt: `资产编号：${ASSET_ID}` }),
+        responsePreview: SUCCESS_ENTRY.responseBody,
+      }],
+    });
+    await expect(submitPreparedGeneration(page, ASSET_ID, { timeoutMs: 100, pollIntervalMs: 50 })).rejects.toMatchObject({
+      phase: 'submit-unconfirmed',
+      retryable: false,
+    });
+  });
+
+  it('classifies responseBodyTruncated=true as unconfirmed even if partial payload looks complete', async () => {
+    const page = createSubmitPageMock({
+      capturedEntries: [{
+        url: 'https://jimeng.jianying.com/mweb/v1/creation_agent/v2/conversation',
+        method: 'POST',
+        responseStatus: 200,
+        requestBodyPreview: JSON.stringify({ prompt: `资产编号：${ASSET_ID}` }),
+        responsePreview: SUCCESS_ENTRY.responseBody,
+        responseBodyTruncated: true,
+      }],
+    });
+    await expect(submitPreparedGeneration(page, ASSET_ID, { timeoutMs: 100, pollIntervalMs: 50 })).rejects.toMatchObject({
+      phase: 'submit-unconfirmed',
+      retryable: false,
+    });
+  });
+
+  it('confirms exact OpenCLI-shaped canary entry with responseStatus and responsePreview', async () => {
+    const page = createSubmitPageMock({
+      capturedEntries: [{
+        url: 'https://jimeng.jianying.com/mweb/v1/creation_agent/v2/conversation',
+        method: 'POST',
+        responseStatus: 200,
+        requestBodyPreview: JSON.stringify({
+          conversation_id: 'ab792c30',
+          prompt: `资产编号：${ASSET_ID}`,
+        }),
+        responsePreview: `id:canary-1\nevent:handshake\ndata:{"thread_id":327598892300,"conversation_id":"ab792c30"}\n\nevent:stream_complete\ndata:{"success":true,"error_code":"0","error_message":"success"}\n\n{"ret":"0","errmsg":"success"}`,
+        responseBodyTruncated: false,
+      }],
+    });
+
+    const result = await submitPreparedGeneration(page, ASSET_ID, { timeoutMs: 1000, pollIntervalMs: 50 });
+    expect(result).toMatchObject({
+      accepted: true,
+      confirmation: 'ack_confirmed',
+      threadId: '327598892300',
+      conversationId: 'ab792c30',
+      submitRequestCount: 1,
+    });
+  });
+
+  it('stops immediately on HTTP rejection without retrying', async () => {
+    const page = createSubmitPageMock({
+      capturedEntries: [{
+        url: 'https://jimeng.jianying.com/mweb/v1/creation_agent/v2/conversation',
+        method: 'POST',
+        status: 403,
+        requestBody: JSON.stringify({ prompt: `资产编号：${ASSET_ID}` }),
+        responseBody: JSON.stringify({ error_msg: 'Forbidden' }),
+      }],
+    });
+    await expect(submitPreparedGeneration(page, ASSET_ID, { timeoutMs: 500, pollIntervalMs: 50 })).rejects.toMatchObject({
+      phase: 'submit-rejected',
+      retryable: false,
+    });
+  });
+
+  it('stops immediately on business rejection without retrying', async () => {
+    const page = createSubmitPageMock({
+      capturedEntries: [{
+        url: 'https://jimeng.jianying.com/mweb/v1/creation_agent/v2/conversation',
+        method: 'POST',
+        status: 200,
+        requestBody: JSON.stringify({ prompt: `资产编号：${ASSET_ID}` }),
+        responseBody: `event: stream_complete\ndata: {"success":false,"error_code":10403,"error_msg":"Account quota limit"}\n\n`,
+      }],
+    });
+    await expect(submitPreparedGeneration(page, ASSET_ID, { timeoutMs: 500, pollIntervalMs: 50 })).rejects.toMatchObject({
+      phase: 'submit-rejected',
+      retryable: false,
+    });
+  });
+
+  it('classifies timeout as unconfirmed when request was sent but no response completed', async () => {
+    const page = createSubmitPageMock({
+      capturedEntries: [{
+        url: 'https://jimeng.jianying.com/mweb/v1/creation_agent/v2/conversation',
+        method: 'POST',
+        status: 200,
+        requestBody: JSON.stringify({ prompt: `资产编号：${ASSET_ID}` }),
+        responseBody: null,
+      }],
+    });
+    await expect(submitPreparedGeneration(page, ASSET_ID, { timeoutMs: 100, pollIntervalMs: 50 })).rejects.toMatchObject({
+      phase: 'submit-unconfirmed',
+      retryable: false,
+    });
+  });
+
+  it('reads the destructive post-click capture buffer once and never downgrades a seen request', async () => {
+    const pendingEntry = {
+      url: 'https://jimeng.jianying.com/mweb/v1/creation_agent/v2/conversation',
+      method: 'POST',
+      status: 200,
+      requestBody: JSON.stringify({
+        conversation_id: '7488349283742819840',
+        prompt: `资产编号：${ASSET_ID}`,
+      }),
+      responseBody: null,
+    };
+    const page = createSubmitPageMock({
+      capturedEntries: (postClickReadCount) => (
+        postClickReadCount === 1 ? [pendingEntry] : []
+      ),
+    });
+
+    await expect(submitPreparedGeneration(page, ASSET_ID, {
+      timeoutMs: 100,
+      pollIntervalMs: 50,
+    })).rejects.toMatchObject({
+      phase: 'submit-unconfirmed',
+      retryable: false,
+    });
+    expect(page.readNetworkCapture).toHaveBeenCalledTimes(2);
+    expect(page.readCount).toBe(2);
+  });
+
+  it('classifies timeout as unconfirmed when stream is truncated before completion', async () => {
+    const page = createSubmitPageMock({
+      capturedEntries: [{
+        url: 'https://jimeng.jianying.com/mweb/v1/creation_agent/v2/conversation',
+        method: 'POST',
+        status: 200,
+        requestBody: JSON.stringify({ prompt: `资产编号：${ASSET_ID}` }),
+        responseBody: `event: handshake\ndata: {"thread_id":"7488349283742819842"}\n\n`,
+      }],
+    });
+    await expect(submitPreparedGeneration(page, ASSET_ID, { timeoutMs: 100, pollIntervalMs: 50 })).rejects.toMatchObject({
+      phase: 'submit-unconfirmed',
+      retryable: false,
+    });
+  });
+
+  it('identifies safe not-sent state when 0 requests captured and prompt remains in composer', async () => {
+    const page = createSubmitPageMock({
+      capturedEntries: [],
+      pageState: { assetIdInComposer: true, assetIdOutsideComposer: false },
+    });
+    await expect(submitPreparedGeneration(page, ASSET_ID, { timeoutMs: 100, pollIntervalMs: 50 })).rejects.toMatchObject({
+      phase: 'submit-not-sent',
+      retryable: true,
+    });
+  });
+
+  it('identifies unconfirmed state when 0 requests captured but prompt appeared outside composer', async () => {
+    const page = createSubmitPageMock({
+      capturedEntries: [],
+      pageState: { assetIdInComposer: false, assetIdOutsideComposer: true },
+    });
+    await expect(submitPreparedGeneration(page, ASSET_ID, { timeoutMs: 100, pollIntervalMs: 50 })).rejects.toMatchObject({
+      phase: 'submit-unconfirmed',
+      retryable: false,
+    });
+  });
+});
+
+describe('jimeng-agent/agent-dom — prepareJimengAgentAsk submit orchestration', () => {
+  const ASSET_ID = 'b7e4f19a2c0d5e68';
+
+  function createOrchestrationPageMock({
+    networkEntries = [],
+  } = {}) {
+    let submitAttempts = 0;
+    let captureReadCount = 0;
+    const clicks = [];
+    const openWorkspaceCalls = [];
+    let simulatedTime = 1_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => simulatedTime);
+
+    const page = {
+      goto: vi.fn(async (url) => {
+        openWorkspaceCalls.push(url);
+      }),
+      sleep: vi.fn(async (seconds) => {
+        simulatedTime += Math.max(10, Math.round((seconds || 0.5) * 1000));
+      }),
+      click: vi.fn(async (sel) => {
+        clicks.push(sel);
+        return { ok: true };
+      }),
+      nativeClick: vi.fn(async () => ({})),
+      nativeKeyPress: vi.fn(async () => ({})),
+      nativeType: vi.fn(async () => ({})),
+      insertText: vi.fn(async () => ({})),
+      setFileInput: vi.fn(async () => ({})),
+      cdp: vi.fn(async () => ({})),
+      startNetworkCapture: vi.fn(async () => {
+        captureReadCount = 0;
+        return true;
+      }),
+      readNetworkCapture: vi.fn(async () => {
+        captureReadCount += 1;
+        if (captureReadCount === 1) return [];
+        if (typeof networkEntries === 'function') {
+          return networkEntries(submitAttempts);
+        }
+        return networkEntries;
+      }),
+      evaluate: vi.fn(async (expr) => {
+        // Surface probe
+        if (expr.includes('FILE_INPUT_SELECTOR') || expr.includes('dockScope') || (expr.includes('editors') && expr.includes('fileInputs'))) {
+          return {
+            modeText: 'Agent 模式',
+            dockText: 'Agent 模式 自动',
+            agentSelected: true,
+            autoEnabled: true,
+            videoSelected: true,
+            autoFromDock: true,
+            autoPopupOpen: false,
+            editorCount: 1,
+            editorReady: true,
+            fileInputCount: 1,
+            ready: true,
+            referenceCount: 0,
+          };
+        }
+        // Draft clear
+        if (expr.includes('data-opencli-jimeng-upload-slot')) {
+          return { cleared: true, slotCount: 0 };
+        }
+        // Checkpoint snapshot
+        if (expr.includes('observedMentionLabels') || expr.includes('submitCandidates')) {
+          return {
+            surfaceReady: true,
+            referenceCount: 0,
+            mentionCount: 0,
+            observedMentionLabels: [],
+            rawAt: false,
+            menuVisible: false,
+            editorLines: ['prompttext资产编号：' + ASSET_ID],
+            editorTextNormalized: 'prompttext资产编号：' + ASSET_ID,
+            submitEnabled: true,
+          };
+        }
+        // Composer clear
+        if (expr.includes('data-rich-placeholder') || expr.includes('ProseMirror-separator') || expr.includes("nativeKeyPress('a'") || expr.includes('composerClearState')) {
+          return { empty: true, textLength: 0, mentionCount: 0 };
+        }
+        // Dock reference snapshot
+        if (expr.includes('stripCandidates') || expr.includes('reference-group')) {
+          return { ok: true, strips: [], alerts: [] };
+        }
+        // Submit button marking
+        if (expr.includes('submit-button')) {
+          submitAttempts += 1;
+          return { ok: true, count: 1 };
+        }
+        // AssetId in composer check
+        if (expr.includes('assetIdInComposer')) {
+          return { assetIdInComposer: true, assetIdOutsideComposer: false };
+        }
+        return { ok: true };
+      }),
+      get clicks() { return clicks; },
+      get openWorkspaceCalls() { return openWorkspaceCalls; },
+      get submitAttempts() { return submitAttempts; },
+    };
+    return page;
+  }
+
+  const SUCCESS_ENTRY = {
+    url: 'https://jimeng.jianying.com/mweb/v1/creation_agent/v2/conversation',
+    method: 'POST',
+    status: 200,
+    requestBody: JSON.stringify({
+      conversation_id: '7488349283742819840',
+      prompt: `资产编号：${ASSET_ID}`,
+    }),
+    responseBody: `event: handshake\ndata: {"thread_id":"7488349283742819842","conversation_id":"7488349283742819840"}\n\nevent: stream_complete\ndata: {"success":true,"error_code":0}\n\n`,
+  };
+
+  it('runs --submit 0 without starting network capture or clicking generate', async () => {
+    const page = createOrchestrationPageMock();
+    delete page.startNetworkCapture;
+    delete page.readNetworkCapture;
+
+    const result = await prepareJimengAgentAsk(page, {
+      workspace: '11718040705548',
+      assetId: ASSET_ID,
+      agentPrompt: `prompt text 资产编号：${ASSET_ID}`,
+      submit: false,
+      retry: 0,
+    }, []);
+
+    expect(result).toMatchObject({
+      status: 'prepared',
+      submitted: false,
+      checkpointOk: true,
+      confirmation: 'none',
+      threadId: '',
+      conversationId: '',
+      submitRequestCount: 0,
+    });
+    expect(page.clicks.some((c) => c.includes('submit'))).toBe(false);
+  });
+
+  it('runs --submit 1 with valid ACK and returns confirmed diagnostics', async () => {
+    const page = createOrchestrationPageMock({
+      networkEntries: [SUCCESS_ENTRY],
+    });
+
+    const result = await prepareJimengAgentAsk(page, {
+      workspace: '11718040705548',
+      assetId: ASSET_ID,
+      agentPrompt: `prompt text 资产编号：${ASSET_ID}`,
+      submit: true,
+      retry: 0,
+    }, []);
+
+    expect(result).toMatchObject({
+      status: 'submitted',
+      submitted: true,
+      checkpointOk: true,
+      confirmation: 'ack_confirmed',
+      threadId: '7488349283742819842',
+      conversationId: '7488349283742819840',
+      submitRequestCount: 1,
+    });
+  });
+
+  it('stops immediately when submit is unconfirmed even if retry budget > 0, warning against duplicate submission', async () => {
+    const page = createOrchestrationPageMock({
+      networkEntries: [{
+        url: 'https://jimeng.jianying.com/mweb/v1/creation_agent/v2/conversation',
+        method: 'POST',
+        status: 200,
+        requestBody: JSON.stringify({ prompt: `资产编号：${ASSET_ID}` }),
+        responseBody: null, // response never arrives
+      }],
+    });
+
+    try {
+      await prepareJimengAgentAsk(page, {
+        workspace: '11718040705548',
+        assetId: ASSET_ID,
+        agentPrompt: `prompt text 资产编号：${ASSET_ID}`,
+        submit: true,
+        retry: 3,
+      }, []);
+      expect.unreachable('Should have thrown CommandExecutionError');
+    } catch (err) {
+      expect(err).toBeInstanceOf(CommandExecutionError);
+      expect(err.message).toContain('JIMENG_SUBMIT_UNCONFIRMED');
+      expect(err.hint).toContain('可能已受理时不要重试');
+      expect(page.submitAttempts).toBe(1);
+    }
+  });
+
+  it('stops immediately when server explicitly rejects without retrying', async () => {
+    const page = createOrchestrationPageMock({
+      networkEntries: [{
+        url: 'https://jimeng.jianying.com/mweb/v1/creation_agent/v2/conversation',
+        method: 'POST',
+        status: 200,
+        requestBody: JSON.stringify({ prompt: `资产编号：${ASSET_ID}` }),
+        responseBody: `event: stream_complete\ndata: {"success":false,"error_code":10403,"error_msg":"Account quota limit"}\n\n`,
+      }],
+    });
+
+    try {
+      await prepareJimengAgentAsk(page, {
+        workspace: '11718040705548',
+        assetId: ASSET_ID,
+        agentPrompt: `prompt text 资产编号：${ASSET_ID}`,
+        submit: true,
+        retry: 2,
+      }, []);
+      expect.unreachable('Should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(CommandExecutionError);
+      expect(err.message).toContain('JIMENG_SUBMIT_REJECTED');
+      expect(err.hint).toContain('服务端已明确拒绝');
+    }
+  });
+
+  it('retries safely when submit was proven not-sent and succeeds on second attempt', async () => {
+    let submitCallCount = 0;
+    const page = createOrchestrationPageMock({
+      networkEntries: () => {
+        if (page.submitAttempts <= 1) {
+          // First prepare/submit attempt: no network request sent
+          return [];
+        }
+        // Second prepare/submit attempt: succeeds with ACK
+        return [SUCCESS_ENTRY];
+      },
+    });
+
+    const result = await prepareJimengAgentAsk(page, {
+      workspace: '11718040705548',
+      assetId: ASSET_ID,
+      agentPrompt: `prompt text 资产编号：${ASSET_ID}`,
+      submit: true,
+      retry: 2,
+    }, []);
+
+    expect(result).toMatchObject({
+      status: 'submitted',
+      submitted: true,
+      checkpointOk: true,
+      confirmation: 'ack_confirmed',
+      retryUsed: 1,
+    });
+    expect(page.openWorkspaceCalls.length).toBeGreaterThan(1);
   });
 });

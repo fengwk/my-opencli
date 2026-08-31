@@ -81,14 +81,33 @@ truth once configured.
 
 Failure phase: `checkpoint`. This gate does **not** reopen or re-check the Auto panel.
 
-## Safety boundary
+## Safety boundary & Submit ACK
 
 - Mention selection revalidates and clicks the unique marked resource candidate
   in one browser-side operation; it does not dispatch bare Enter.
 - Default `--submit 0` never starts generation.
 - `--submit 1` is the only path that clicks the generate control, and only after
   a green checkpoint.
-- Successful prepare results include `checkpointOk: true` and `submitted: false`.
+- Formal submit requires active network capture of `POST /mweb/v1/creation_agent/v2/conversation`.
+  If network capture is unavailable, submit fails before clicking generate.
+- Successful submission requires explicit server ACK:
+  - HTTP 2xx status matching canonical `assetId`
+  - Valid SSE `handshake` with non-empty `thread_id` and conversation consistency
+  - Valid SSE `stream_complete` with `success=true` and `error_code=0`
+- The post-click capture buffer is preserved for the full ACK window and read
+  once, so an observed request cannot disappear and be downgraded to `not-sent`.
+- A fresh retry is allowed only when no conversation request was captured and
+  the `assetId` still exists solely in the composer. Before that retry clicks,
+  any delayed matching request/ACK from the prior attempt is consumed and
+  causes confirmation or a fail-closed stop instead of a second paid click.
+- If a submit request is seen but the response is missing, truncated, or unconfirmed,
+  or if the server explicitly rejects the request, the command stops immediately and
+  prohibits automatic retries to prevent duplicate charges or infinite loops.
+- Output columns include `status`, `workspace`, `workspaceUrl`, `uploaded`, `mentions`,
+  `assetId`, `retryUsed`, `submitted`, `checkpointOk`, `confirmation`, `threadId`,
+  `conversationId`, and `submitRequestCount`.
+- Successful prepare results include `checkpointOk: true`, `submitted: false`, and `confirmation: 'none'`.
+- Confirmed submit results include `checkpointOk: true`, `submitted: true`, `confirmation: 'ack_confirmed'`, `threadId`, and `conversationId`.
 
 ## Status / download
 

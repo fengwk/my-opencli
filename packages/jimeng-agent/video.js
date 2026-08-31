@@ -98,6 +98,10 @@ export const videoCommand = cli({
     'retryUsed',
     'submitted',
     'checkpointOk',
+    'confirmation',
+    'threadId',
+    'conversationId',
+    'submitRequestCount',
   ],
   validateArgs: (kwargs) => {
     normalizeAskArgs(kwargs);

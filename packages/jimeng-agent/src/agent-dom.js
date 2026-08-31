@@ -29,6 +29,13 @@ import {
 } from './checkpoint.js';
 
 import {
+  JIMENG_CONVERSATION_PATH,
+  classifySubmitAck,
+  isConversationUrl,
+  requestBodyMatchesAssetId,
+} from './submit-ack.js';
+
+import {
   cardIdentity,
   countVisibleMediaReferences,
   hasUploadBusyText,
@@ -187,8 +194,23 @@ export function chooseRetryPlan({
   errorPhase,
   failedAssetIndex,
   surface,
+  retryable,
 }) {
   if (retriesUsed >= retryBudget) return { kind: 'stop' };
+  if (retryable === false) return { kind: 'stop' };
+
+  if (
+    errorPhase === 'submit'
+    || errorPhase === 'submit-unconfirmed'
+    || errorPhase === 'submit-rejected'
+    || errorPhase === 'submit-capture-unavailable'
+  ) {
+    return { kind: 'stop' };
+  }
+
+  if (errorPhase === 'submit-not-sent' || errorPhase === 'submit-button-missing') {
+    return { kind: 'fresh', startAssetIndex: 0 };
+  }
 
   const forceFreshPhases = new Set([
     'clear-initial',
@@ -219,7 +241,7 @@ export function chooseRetryPlan({
  * Navigate, configure Agent + Auto/video preference, upload all references,
  * and populate the prompt with rich mention nodes. No submission is performed.
  */
-export async function prepareJimengAgentAsk(page, canonical, preparedAssets) {
+export async function prepareJimengAgentAsk(page, canonical, preparedAssets, options = {}) {
   assertPageCapabilities(page);
   if (!canonical || typeof canonical !== 'object') {
     throw new ArgumentError('canonical ask payload is required', 'Use normalizeAskArgs before browser preparation.');
@@ -275,9 +297,18 @@ export async function prepareJimengAgentAsk(page, canonical, preparedAssets) {
         { requireSubmitArmed: !!canonical.submit },
       );
       let submitted = false;
+      let submitResult = null;
       if (canonical.submit) {
-        await submitPreparedGeneration(page);
-        submitted = true;
+        submitResult = await submitPreparedGeneration(page, canonical, options);
+        submitted = submitResult?.confirmation === 'ack_confirmed';
+        if (!submitted) {
+          const err = new Error('Submit helper returned without an explicit confirmed ACK');
+          err.phase = 'submit-unconfirmed';
+          err.retryable = false;
+          err.nonRetryable = true;
+          err.hint = 'Generation state is uncertain. Do not automatically retry.';
+          throw err;
+        }
       }
 
       return {
@@ -290,6 +321,10 @@ export async function prepareJimengAgentAsk(page, canonical, preparedAssets) {
         retryUsed: retriesUsed,
         submitted,
         checkpointOk: true,
+        confirmation: submitResult?.confirmation ?? (submitted ? 'ack_confirmed' : 'none'),
+        threadId: submitResult?.threadId ?? '',
+        conversationId: submitResult?.conversationId ?? '',
+        submitRequestCount: submitResult?.submitRequestCount ?? (submitted ? 1 : 0),
       };
     } catch (err) {
       const failure = normalizePreparationError(err, uploads.length);
@@ -320,12 +355,33 @@ export async function prepareJimengAgentAsk(page, canonical, preparedAssets) {
         errorPhase: failure.phase,
         failedAssetIndex: failure.failedAssetIndex,
         surface,
+        retryable: failure.retryable,
       });
 
       if (plan.kind === 'stop') {
+        const isUnconfirmed = failure.phase === 'submit-unconfirmed';
+        const isRejected = failure.phase === 'submit-rejected';
+        const isSubmitFailure = typeof failure.phase === 'string' && failure.phase.startsWith('submit');
+
+        let errPrefix = 'JIMENG_PREPARE_FAILED';
+        let hint = '';
+
+        if (isUnconfirmed) {
+          errPrefix = 'JIMENG_SUBMIT_UNCONFIRMED';
+          hint = `${failure.hint} 可能已受理时不要重试，请手动检查 Jimeng 任务列表。`;
+        } else if (isRejected) {
+          errPrefix = 'JIMENG_SUBMIT_REJECTED';
+          hint = `${failure.hint} 服务端已明确拒绝，请勿盲目重试。`;
+        } else if (isSubmitFailure) {
+          errPrefix = 'JIMENG_SUBMIT_FAILED';
+          hint = `No generation was submitted. ${failure.hint} Inspect the visible Jimeng workspace and retry.`;
+        } else {
+          hint = `No generation was submitted. ${failure.hint} Retry with --retry ${Number(canonical.retry ?? 0) + 1} after checking the visible Jimeng workspace.`;
+        }
+
         throw new CommandExecutionError(
-          `JIMENG_PREPARE_FAILED: ${failure.message}`,
-          `No generation was submitted. ${failure.hint} Retry with --retry ${Number(canonical.retry ?? 0) + 1} after checking the visible Jimeng workspace.`,
+          `${errPrefix}: ${failure.message}`,
+          hint,
         );
       }
 
@@ -2980,11 +3036,139 @@ async function collectContentCheckpointSnapshot(page) {
   })()`);
 }
 
+export function assertSubmitCapabilities(page) {
+  const missing = [];
+  if (typeof page?.startNetworkCapture !== 'function') missing.push('startNetworkCapture');
+  if (typeof page?.readNetworkCapture !== 'function') missing.push('readNetworkCapture');
+  if (missing.length > 0) {
+    const err = new Error(`Missing page capability for submit: ${missing.join(', ')}`);
+    err.phase = 'submit-capture-unavailable';
+    err.retryable = false;
+    err.nonRetryable = true;
+    err.hint = 'Formal submit requires network capture support in the browser driver.';
+    throw err;
+  }
+}
+
+export async function inspectComposerAssetIdState(page, assetId) {
+  if (typeof page?.evaluate !== 'function') {
+    return { assetIdInComposer: false, assetIdOutsideComposer: false, error: 'page.evaluate unavailable' };
+  }
+  return await page.evaluate(`(() => {
+    ${buildPromptEditorLocatorScript()}
+    const assetId = ${JSON.stringify(String(assetId || ''))};
+    if (!assetId) return { assetIdInComposer: false, assetIdOutsideComposer: false };
+
+    const editor = findPromptEditor();
+    if (!editor) {
+      return {
+        assetIdInComposer: false,
+        assetIdOutsideComposer: false,
+        error: 'prompt editor not found',
+      };
+    }
+    const editorText = editor ? (editor.innerText || editor.textContent || '') : '';
+    const assetIdInComposer = editorText.includes(assetId);
+
+    let assetIdOutsideComposer = false;
+    const candidates = [...document.querySelectorAll('div, p, span, li')];
+    for (const el of candidates) {
+      if (editor && editor.contains(el)) continue;
+      if (el.tagName === 'SCRIPT' || el.tagName === 'STYLE') continue;
+      const text = el.innerText || el.textContent || '';
+      if (text.includes(assetId)) {
+        if (!el.contains(editor)) {
+          assetIdOutsideComposer = true;
+          break;
+        }
+      }
+    }
+
+    return {
+      assetIdInComposer,
+      assetIdOutsideComposer,
+    };
+  })()`).catch(() => ({ assetIdInComposer: false, assetIdOutsideComposer: false, error: 'evaluate failed' }));
+}
+
 /**
- * Click the visible generate control only after a green checkpoint.
- * This is the sole path that may start a paid generation.
+ * Click the visible generate control only after a green checkpoint and verify
+ * server reception via SSE ACK matching canonical assetId.
  */
-export async function submitPreparedGeneration(page) {
+export async function submitPreparedGeneration(page, canonicalOrAssetId, options = {}) {
+  const assetId = (
+    typeof canonicalOrAssetId === 'string'
+      ? canonicalOrAssetId
+      : (canonicalOrAssetId?.assetId || options?.assetId || '')
+  );
+  if (!assetId) {
+    const err = new Error('assetId is required for submit ACK validation');
+    err.phase = 'submit';
+    err.retryable = false;
+    err.nonRetryable = true;
+    err.hint = 'Ensure canonical assetId is passed to submitPreparedGeneration.';
+    throw err;
+  }
+
+  // 1. Page capabilities check for submit
+  assertSubmitCapabilities(page);
+
+  // 2. Start network capture for conversation endpoint
+  const captureStarted = await page.startNetworkCapture(JIMENG_CONVERSATION_PATH).catch(() => false);
+  if (!captureStarted) {
+    const err = new Error('Network capture could not be started for conversation submit ACK');
+    err.phase = 'submit-capture-unavailable';
+    err.retryable = false;
+    err.nonRetryable = true;
+    err.hint = 'Network capture is required before clicking submit to verify server receipt.';
+    throw err;
+  }
+
+  // 3. Clear/drain pre-click network capture entries
+  let drainedEntries;
+  try {
+    const raw = await page.readNetworkCapture();
+    drainedEntries = Array.isArray(raw) ? raw : [];
+  } catch (drainErr) {
+    const err = new Error(`Pre-click network capture drain failed: ${drainErr.message || drainErr}`);
+    err.phase = 'submit-capture-unavailable';
+    err.retryable = false;
+    err.nonRetryable = true;
+    err.hint = 'Network capture could not be drained before clicking submit. Check browser driver capabilities.';
+    throw err;
+  }
+
+  // A delayed response from a prior proven-not-sent retry may arrive before
+  // the next click. Never discard matching evidence and click again.
+  const priorMatchingEntries = drainedEntries.filter((entry) => (
+    isConversationUrl(entry?.url)
+    && requestBodyMatchesAssetId(entry, assetId)
+  ));
+  if (priorMatchingEntries.length > 0) {
+    const priorAck = classifySubmitAck({
+      entries: priorMatchingEntries,
+      assetId,
+      timedOut: true,
+    });
+    if (priorAck.kind === 'confirmed') {
+      return {
+        accepted: true,
+        confirmation: 'ack_confirmed',
+        threadId: priorAck.threadId || '',
+        conversationId: priorAck.conversationId || '',
+        submitRequestCount: priorAck.matchingRequestCount || 1,
+      };
+    }
+
+    const err = new Error(`JIMENG_SUBMIT_UNCONFIRMED: A prior matching conversation request appeared before the next submit click (${priorAck.reason || priorAck.kind})`);
+    err.phase = 'submit-unconfirmed';
+    err.retryable = false;
+    err.nonRetryable = true;
+    err.hint = 'A previous submit attempt may have reached the server. Do not click again or automatically retry.';
+    throw err;
+  }
+
+  // 4. Locate and mark submit button
   const marker = nextMarker('submit');
   const marked = await page.evaluate(`(() => {
     const visible = (el) => {
@@ -2997,7 +3181,7 @@ export async function submitPreparedGeneration(page) {
         && rect.height > 0;
     };
     const candidates = [...document.querySelectorAll(
-      'button[class*="submit-button"], button[class*="submit"], button.lv-btn-primary.lv-btn-shape-circle',
+      'button[class*="submit-button"], button[class*="submit"], button.lv-btn-primary.lv-btn-shape-circle'
     )].filter((el) => (
       visible(el)
       && !el.disabled
@@ -3013,41 +3197,126 @@ export async function submitPreparedGeneration(page) {
     candidates[0].setAttribute(${JSON.stringify(TARGET_ATTR)}, ${JSON.stringify(marker)});
     return { ok: true, count: candidates.length };
   })()`);
+
   if (!marked?.ok) {
-    throw phaseError(
-      'submit',
-      'Could not locate an enabled Jimeng generate/submit control after checkpoint',
-      'Checkpoint passed but formal submission is blocked until the generate button is visible and enabled.',
-    );
+    const err = new Error('Could not locate an enabled Jimeng generate/submit control after checkpoint');
+    err.phase = 'submit-button-missing';
+    err.retryable = true;
+    err.nonRetryable = false;
+    err.hint = 'Checkpoint passed but formal submission is blocked until the generate button is visible and enabled.';
+    throw err;
   }
 
-  await page.click(`[${TARGET_ATTR}="${marker}"]`);
-  await page.sleep(2);
-  await page.nativeKeyPress('Escape').catch(() => null);
-  await page.sleep(0.5);
+  // 5. Click the submit button (unconditional Escape removed; capture click error)
+  let clickError = null;
+  try {
+    await page.click(`[${TARGET_ATTR}="${marker}"]`);
+  } catch (clickErr) {
+    clickError = clickErr;
+  }
 
-  const stillReady = await page.evaluate(`(() => {
-    const visible = (el) => {
-      if (!(el instanceof HTMLElement)) return false;
-      const style = window.getComputedStyle(el);
-      const rect = el.getBoundingClientRect();
-      return style.display !== 'none'
-        && style.visibility !== 'hidden'
-        && rect.width > 0
-        && rect.height > 0;
+  // 6. Keep the destructive capture buffer intact for the full ACK window.
+  // DOM polling only preserves the latest fallback state; it cannot prove the
+  // SSE stream has completed, so it must not shorten the network wait.
+  const requestedTimeoutMs = Number(options.timeoutMs ?? 15_000);
+  const requestedPollIntervalMs = Number(options.pollIntervalMs ?? 500);
+  const timeoutMs = Number.isFinite(requestedTimeoutMs)
+    ? Math.max(0, requestedTimeoutMs)
+    : 15_000;
+  const pollIntervalMs = Number.isFinite(requestedPollIntervalMs)
+    ? Math.max(50, requestedPollIntervalMs)
+    : 500;
+  const deadline = Date.now() + timeoutMs;
+  let pageState = null;
+
+  while (Date.now() < deadline) {
+    const remainingMs = deadline - Date.now();
+    try {
+      await page.sleep(Math.min(pollIntervalMs, remainingMs) / 1000);
+    } catch (sleepErr) {
+      const err = new Error(`Submit ACK wait failed after the generate click: ${sleepErr.message || sleepErr}`);
+      err.phase = 'submit-unconfirmed';
+      err.retryable = false;
+      err.nonRetryable = true;
+      err.hint = 'The paid submit state is unknown after the click. Do not automatically retry.';
+      throw err;
+    }
+    pageState = await inspectComposerAssetIdState(page, assetId);
+  }
+
+  let capturedEntries;
+  try {
+    const raw = await page.readNetworkCapture();
+    capturedEntries = Array.isArray(raw) ? raw : [];
+  } catch (readErr) {
+    const err = new Error(`Network capture read failed after submit click: ${readErr.message || readErr}`);
+    err.phase = 'submit-unconfirmed';
+    err.retryable = false;
+    err.nonRetryable = true;
+    err.hint = 'Request may have been sent, but network capture could not be read. Do not automatically retry.';
+    throw err;
+  }
+
+  // 7. Classify the one-shot capture. A pending or malformed response is
+  // unconfirmed at this point and must never enter the automatic retry path.
+  if (!pageState) {
+    pageState = await inspectComposerAssetIdState(page, assetId);
+  }
+  let finalAck;
+  try {
+    finalAck = classifySubmitAck({
+      entries: capturedEntries,
+      assetId,
+      timedOut: true,
+      pageState,
+    });
+  } catch (classifyErr) {
+    const err = new Error(`Submit ACK classification failed after the generate click: ${classifyErr.message || classifyErr}`);
+    err.phase = 'submit-unconfirmed';
+    err.retryable = false;
+    err.nonRetryable = true;
+    err.hint = 'The paid submit state is unknown after the click. Do not automatically retry.';
+    throw err;
+  }
+
+  if (finalAck.kind === 'confirmed') {
+    return {
+      accepted: true,
+      confirmation: 'ack_confirmed',
+      threadId: finalAck.threadId || '',
+      conversationId: finalAck.conversationId || '',
+      submitRequestCount: finalAck.matchingRequestCount || 1,
     };
-    return [...document.querySelectorAll(
-      'button[class*="submit-button"], button[class*="submit"], button.lv-btn-primary.lv-btn-shape-circle',
-    )].some((el) => (
-      visible(el)
-      && !el.disabled
-      && el.getAttribute('aria-disabled') !== 'true'
-      && !String(el.className || '').includes('disabled')
-    ));
-  })()`);
+  }
 
-  if (!stillReady) return { accepted: true, buttonStillEnabled: false };
-  return { accepted: true, buttonStillEnabled: true };
+  if (finalAck.kind === 'rejected') {
+    const err = new Error(`JIMENG_SUBMIT_REJECTED: Server rejected conversation request (code: ${finalAck.errorCode}, msg: ${finalAck.errorMsg || 'none'}, http: ${finalAck.httpStatus ?? 'unknown'})`);
+    err.phase = 'submit-rejected';
+    err.retryable = false;
+    err.nonRetryable = true;
+    err.errorCode = finalAck.errorCode;
+    err.errorMsg = finalAck.errorMsg;
+    err.hint = `Server rejected the generation request: ${finalAck.errorMsg || 'rejected'}. Do not automatically retry.`;
+    throw err;
+  }
+
+  if (finalAck.kind === 'not_sent') {
+    const err = clickError
+      ? new Error(`JIMENG_SUBMIT_NOT_SENT: Submit click threw error (${clickError.message || clickError}), no conversation request was sent, and prompt remains in composer`)
+      : new Error('JIMENG_SUBMIT_NOT_SENT: Submit click did not trigger a conversation request and prompt remains in composer');
+    err.phase = 'submit-not-sent';
+    err.retryable = true;
+    err.nonRetryable = false;
+    err.hint = 'Submit click did not produce a network request. Safe to retry with a fresh workspace.';
+    throw err;
+  }
+
+  const err = new Error(`JIMENG_SUBMIT_UNCONFIRMED: ${finalAck.reason || 'Conversation request or page state could not be confirmed safely'}`);
+  err.phase = 'submit-unconfirmed';
+  err.retryable = false;
+  err.nonRetryable = true;
+  err.hint = 'Generation state is uncertain. Do not automatically retry to avoid duplicate charges; check workspace status manually.';
+  throw err;
 }
 
 export function normalizePromptValidationLines(value) {
@@ -3091,6 +3360,7 @@ function normalizePreparationError(err, fallbackFailedAssetIndex) {
       failedAssetIndex: Number.isInteger(err.failedAssetIndex)
         ? err.failedAssetIndex
         : fallbackFailedAssetIndex,
+      retryable: err.retryable !== false && !err.nonRetryable,
     };
   }
   return {
@@ -3098,6 +3368,7 @@ function normalizePreparationError(err, fallbackFailedAssetIndex) {
     hint: 'Inspect the visible Jimeng workspace and retry.',
     phase: 'surface',
     failedAssetIndex: fallbackFailedAssetIndex,
+    retryable: true,
   };
 }
 

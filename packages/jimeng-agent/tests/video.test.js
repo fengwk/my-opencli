@@ -43,6 +43,10 @@ describe('jimeng-agent/video command registration', () => {
   it('declares checkpoint and submit outcome columns with prepare-first semantics', () => {
     expect(videoCommand.columns).toContain('submitted');
     expect(videoCommand.columns).toContain('checkpointOk');
+    expect(videoCommand.columns).toContain('confirmation');
+    expect(videoCommand.columns).toContain('threadId');
+    expect(videoCommand.columns).toContain('conversationId');
+    expect(videoCommand.columns).toContain('submitRequestCount');
     expect(videoCommand.description).toMatch(/checkpoint/i);
     const byName = new Map(videoCommand.args.map((arg) => [arg.name, arg]));
     expect(byName.get('submit')).toMatchObject({ type: 'int', default: 0 });
