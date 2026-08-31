@@ -1,6 +1,6 @@
 {
   "name": "opencli-plugin-chatgpt-agent",
-  "version": "0.1.35",
+  "version": "0.1.36",
   "private": true,
   "type": "module",
   "description": "Protocol-stream ChatGPT agent for OpenCLI (WS text/files/images + human-like upload/download)",
