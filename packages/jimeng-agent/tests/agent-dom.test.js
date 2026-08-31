@@ -916,6 +916,49 @@ describe('jimeng-agent/agent-dom — submit ACK runtime & safety', () => {
     expect(page.readNetworkCapture).toHaveBeenCalledTimes(1);
   });
 
+  it('stops before clicking when a prior endpoint request has no correlatable body', async () => {
+    const page = createSubmitPageMock({
+      drainEntries: [{
+        url: SUCCESS_ENTRY.url,
+        method: 'POST',
+        status: 200,
+        requestBody: null,
+        responseBody: SUCCESS_ENTRY.responseBody,
+      }],
+    });
+    await expect(submitPreparedGeneration(page, ASSET_ID, {
+      timeoutMs: 100,
+      pollIntervalMs: 50,
+    })).rejects.toMatchObject({
+      phase: 'submit-unconfirmed',
+      retryable: false,
+    });
+    expect(page.click).not.toHaveBeenCalled();
+  });
+
+  it('stops before clicking when a prior confirmed ACK coexists with another endpoint request', async () => {
+    const page = createSubmitPageMock({
+      drainEntries: [
+        SUCCESS_ENTRY,
+        {
+          ...SUCCESS_ENTRY,
+          requestBody: JSON.stringify({
+            conversation_id: 'different-conversation',
+            prompt: 'different asset request',
+          }),
+        },
+      ],
+    });
+    await expect(submitPreparedGeneration(page, ASSET_ID, {
+      timeoutMs: 100,
+      pollIntervalMs: 50,
+    })).rejects.toMatchObject({
+      phase: 'submit-unconfirmed',
+      retryable: false,
+    });
+    expect(page.click).not.toHaveBeenCalled();
+  });
+
   it('stops before clicking when a prior matching endpoint capture omits its method', async () => {
     const page = createSubmitPageMock({
       drainEntries: [{

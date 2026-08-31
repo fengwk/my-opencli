@@ -153,6 +153,24 @@ data:{"success":true,"error_code":[0]}
     expect(parsed.protocolIssues).toContain('stream_complete error_code is not an integer');
   });
 
+  it('accepts only numeric 0 or string "0" as the explicit success code', () => {
+    const parsed = parseConversationSse(`event:handshake
+data:{"thread_id":"327598892300","conversation_id":"${TEST_CONVERSATION_ID}"}
+
+event:stream_complete
+data:{"success":true,"error_code":"00"}
+
+`);
+    expect(parsed.streamComplete).toMatchObject({
+      success: false,
+      explicitFailure: true,
+      errorCode: 0,
+    });
+    expect(parsed.protocolIssues).toContain(
+      'stream_complete error_code used a non-canonical zero value',
+    );
+  });
+
   it('records conflicting handshake events instead of accepting the last one', () => {
     const parsed = parseConversationSse(`event:handshake
 data:{"thread_id":"first-thread","conversation_id":"first-conversation"}

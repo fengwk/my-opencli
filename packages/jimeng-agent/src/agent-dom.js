@@ -33,7 +33,6 @@ import {
   classifySubmitAck,
   isConversationUrl,
   normalizeCaptureEntry,
-  requestBodyMatchesAssetId,
 } from './submit-ack.js';
 
 import {
@@ -3153,13 +3152,12 @@ export async function submitPreparedGeneration(page, canonicalOrAssetId, options
     err.hint = 'Network capture returned malformed data before clicking submit. Check browser driver compatibility.';
     throw err;
   }
-  const priorMatchingEntries = drainedEntries.filter((entry, index) => (
-    isConversationUrl(normalizedDrainedEntries[index].url)
-    && requestBodyMatchesAssetId(normalizedDrainedEntries[index], assetId)
+  const priorEndpointEntries = normalizedDrainedEntries.filter((entry) => (
+    isConversationUrl(entry.url)
   ));
-  if (priorMatchingEntries.length > 0) {
+  if (priorEndpointEntries.length > 0) {
     const priorAck = classifySubmitAck({
-      entries: priorMatchingEntries,
+      entries: priorEndpointEntries,
       assetId,
       timedOut: true,
     });
@@ -3173,7 +3171,7 @@ export async function submitPreparedGeneration(page, canonicalOrAssetId, options
       };
     }
 
-    const err = new Error(`JIMENG_SUBMIT_UNCONFIRMED: A prior matching conversation request appeared before the next submit click (${priorAck.reason || priorAck.kind})`);
+    const err = new Error(`JIMENG_SUBMIT_UNCONFIRMED: Conversation endpoint evidence appeared before the next submit click (${priorAck.reason || priorAck.kind})`);
     err.phase = 'submit-unconfirmed';
     err.retryable = false;
     err.nonRetryable = true;

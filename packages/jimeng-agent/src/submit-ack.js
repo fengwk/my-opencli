@@ -286,8 +286,8 @@ export function parseConversationSse(rawBody) {
   const protocolIssues = [];
 
   const isZeroCode = (code) => {
-    const parsed = parseIntegerField(code);
-    return parsed.valid && parsed.value === 0;
+    if (typeof code === 'number') return code === 0 && !Object.is(code, -0);
+    return typeof code === 'string' && code.trim() === '0';
   };
 
   const extractCode = (code) => {
@@ -351,9 +351,17 @@ export function parseConversationSse(rawBody) {
       const errorCodeField = parseIntegerField(rawErrCode);
       if (retField.present && !retField.valid) {
         recordProtocolIssue('Trailer ret field is not an integer');
+      } else if (retField.valid && retField.value === 0 && !isZeroCode(rawRet)) {
+        recordProtocolIssue('Trailer ret field used a non-canonical zero value');
       }
       if (errorCodeField.present && !errorCodeField.valid) {
         recordProtocolIssue('Trailer error_code field is not an integer');
+      } else if (
+        errorCodeField.valid
+        && errorCodeField.value === 0
+        && !isZeroCode(rawErrCode)
+      ) {
+        recordProtocolIssue('Trailer error_code field used a non-canonical zero value');
       }
       if (
         (retField.valid && retField.value !== 0)
@@ -415,6 +423,8 @@ export function parseConversationSse(rawBody) {
       const hasExplicitCode = parsedCode.valid;
       if (parsedCode.present && !parsedCode.valid) {
         recordProtocolIssue('stream_complete error_code is not an integer');
+      } else if (parsedCode.valid && parsedCode.value === 0 && !isZeroCode(rawCode)) {
+        recordProtocolIssue('stream_complete error_code used a non-canonical zero value');
       }
       const errorCode = hasExplicitCode ? extractCode(rawCode) : null;
       const explicitFailure = data.success === false || (hasExplicitCode && !isZeroCode(rawCode));
