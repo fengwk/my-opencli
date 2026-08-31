@@ -5,7 +5,7 @@
  * Modes:
  *   (default)        validate manifest + packages + JS syntax
  *   --manifest-only  skip syntax checks
- *   --syntax-only    only JS syntax on tracked plugin files
+ *   --syntax-only    only JS syntax on tracked/untracked plugin files
  *
  * Dependency-light: Node built-ins only.
  */
@@ -344,7 +344,8 @@ function listTrackedPluginJs(enabled) {
   }
   if (dirs.length === 0) return [];
 
-  // Prefer git-tracked files when available; fall back to walk for non-git checkouts.
+  // Prefer git-index discovery when available, including untracked non-ignored
+  // files so newly added plugins are checked before their first commit.
   const git = spawnSync(
     'git',
     ['-C', ROOT, 'ls-files', '-z', '--', ...dirs.map((d) => `${d}/**/*.js`), ...dirs.map((d) => `${d}/*.js`)],
@@ -353,7 +354,7 @@ function listTrackedPluginJs(enabled) {
 
   if (git.status === 0) {
     const out = git.stdout.toString('utf8');
-    return out
+    const tracked = out
       .split('\0')
       .filter(Boolean)
       .filter((f) => f.endsWith('.js'))
@@ -366,6 +367,39 @@ function listTrackedPluginJs(enabled) {
         );
       })
       .sort();
+    const untracked = spawnSync(
+      'git',
+      [
+        '-C',
+        ROOT,
+        'ls-files',
+        '-z',
+        '--others',
+        '--exclude-standard',
+        '--',
+        ...dirs.map((d) => `${d}/**/*.js`),
+        ...dirs.map((d) => `${d}/*.js`),
+      ],
+      { encoding: 'buffer' },
+    );
+    if (untracked.status !== 0) {
+      fail(`Cannot list untracked plugin files for syntax check: ${untracked.stderr.toString('utf8').trim()}`);
+      return tracked;
+    }
+    const untrackedJs = untracked.stdout
+      .toString('utf8')
+      .split('\0')
+      .filter(Boolean)
+      .filter((f) => f.endsWith('.js'))
+      .filter((f) => {
+        const fileResolved = resolvePluginPathInsideRoot(f);
+        if (!fileResolved) return false;
+        if (fileResolved.relPath.split('/').includes('node_modules')) return false;
+        return dirs.some(
+          (d) => fileResolved.relPath === d || fileResolved.relPath.startsWith(`${d}/`),
+        );
+      });
+    return [...new Set([...tracked, ...untrackedJs])].sort();
   }
 
   const files = [];
@@ -397,7 +431,7 @@ function walkJs(dir, acc) {
 function validateSyntax(enabled) {
   const files = listTrackedPluginJs(enabled);
   if (files.length === 0) {
-    fail('No tracked plugin .js files found for syntax check');
+    fail('No plugin .js files found for syntax check');
     return;
   }
 
@@ -418,7 +452,7 @@ function validateSyntax(enabled) {
       checked += 1;
     }
   }
-  ok(`JS syntax OK for ${checked} tracked plugin file(s)`);
+  ok(`JS syntax OK for ${checked} plugin file(s)`);
 }
 
 function main() {

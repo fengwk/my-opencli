@@ -6,19 +6,21 @@ Personal OpenCLI plugins, installed via the official plugin mechanism.
 
 | Name | Path | Description |
 |------|------|-------------|
+| `utils` | `packages/utils` | Host-Chrome utilities; `opencli utils scrape` fetches pages in the background by default with my-mcp HTML/markdown cleaning |
 | `chatgpt-agent` | `packages/chatgpt-agent` | Protocol-stream ChatGPT agent (WS text/files/images, sequential upload, DOM file download, official-style image export) |
 | `jimeng-agent` | `packages/jimeng-agent` | Jimeng Agent video drafts (rich `@` mentions, checkpointed prepare/`--submit`, status search, official download) |
 
 ## Requirements (fork)
 
-This plugin **requires an OpenCLI fork**, not stock upstream alone:
+These plugins **require an OpenCLI fork**, not stock upstream alone:
 
 | Component | Minimum | Current verified release | Why |
 |-----------|---------|--------------------------|-----|
-| CLI (`@jackwener/opencli`) | **`>=1.8.7`** | package `1.8.7-fengwk.9` (git tag `fork-v1.8.7-fengwk.9`) | `page.startWsCapture` / `page.readWsCapture`, hardened `page.setFileInput`, `Arg.repeatable` |
-| Browser Bridge / Extension | **`>=1.0.24`** | paired Extension **`1.0.30`** | CDP/WS capture + file-chooser behavior must match the CLI |
+| Node.js | **`>=20.18.1`** | `24.14.0` | Matches OpenCLI and Cheerio runtime engines |
+| CLI (`@jackwener/opencli`) | **`>=1.8.7`** | package `1.8.7-fengwk.9` (git tag `fork-v1.8.7-fengwk.9`) | Browser window/session controls, network/frame APIs, WS capture, hardened file input, `Arg.repeatable` |
+| Browser Bridge / Extension | **`>=1.0.24`** | paired Extension **`1.0.30`** | Browser/frame/CDP/WS capture and file-chooser behavior must match the CLI |
 
-Minimum ranges are the compatibility floor; the verified columns name the paired fork Release that has been published and checked. Package version (`1.8.7-fengwk.2`) and git tag (`fork-v1.8.7-fengwk.2`) are related but not the same string — do not treat the package version as a tag name.
+Minimum ranges are the compatibility floor; the verified columns name the paired fork Release that has been published and checked. Package version (`1.8.7-fengwk.9`) and git tag (`fork-v1.8.7-fengwk.9`) are related but not the same string — do not treat the package version as a tag name.
 
 Install and reload **both** the forked CLI and its matching Browser Bridge / Extension. Mismatched CLI/extension pairs will fail at runtime even if the plugin installs cleanly.
 
@@ -35,26 +37,38 @@ Exact local install from the subplugin package path:
 REPO="$(pwd)"
 
 opencli plugin uninstall chatgpt-agent 2>/dev/null || true
+opencli plugin uninstall jimeng-agent 2>/dev/null || true
+opencli plugin uninstall utils 2>/dev/null || true
 # Local installs use the standalone subplugin path (not the monorepo root).
 opencli plugin install "${REPO}/packages/chatgpt-agent"
+opencli plugin install "${REPO}/packages/jimeng-agent"
+opencli plugin install "${REPO}/packages/utils"
 
 # verify
 opencli plugin list
 opencli chatgpt-agent ask --help
+opencli jimeng-agent video --help
+opencli utils scrape --help
 ```
 
 Re-install after plugin code changes when not using a live local path (see `opencli plugin list`).
 
 ### Hub / remote (GitHub)
 
-Install the `chatgpt-agent` subplugin from this GitHub repo:
+Install individual subplugins from this GitHub repo:
 
 ```bash
 opencli plugin uninstall chatgpt-agent 2>/dev/null || true
 opencli plugin install github:fengwk/my-opencli/chatgpt-agent
+opencli plugin uninstall jimeng-agent 2>/dev/null || true
+opencli plugin install github:fengwk/my-opencli/jimeng-agent
+opencli plugin uninstall utils 2>/dev/null || true
+opencli plugin install github:fengwk/my-opencli/utils
 
 opencli plugin list
 opencli chatgpt-agent ask --help
+opencli jimeng-agent video --help
+opencli utils scrape --help
 ```
 
 Equivalent monorepo install (all enabled subplugins):
@@ -88,6 +102,9 @@ Notes:
 ## Usage
 
 ```bash
+# scrape a URL in the host Chrome without stealing the current tab
+opencli utils scrape https://example.com --only-main-content true --window background
+
 # text
 opencli chatgpt-agent ask '用一句话说明今天天气如何' --timeout 180
 
@@ -124,7 +141,7 @@ opencli jimeng-agent status --workspace <workspace-id> --search_key <assetId> --
 
 ## Develop / verify this repo
 
-Root is a **private** workspace package (not published to npm). Node `>=20`.
+Root is a **private** workspace package (not published to npm). Node `>=20.18.1`.
 
 ```bash
 npm ci
@@ -137,7 +154,7 @@ npm run validate:syntax
 
 Release process (maintainers):
 
-1. Keep the root package, lockfile, manifest, and both plugin package versions aligned.
+1. Keep the root package, lockfile, manifest, and all plugin package versions aligned.
 2. Push tag **`v<opencli-plugin.json version>`** exactly (e.g. `v0.1.19`). Do **not** move an existing published tag such as `v0.1.0`.
 3. GitHub Actions `release.yml` runs the same checks, verifies the tag string, then creates a **GitHub Release with generated notes**.
 4. No `npm publish` and no binary artifacts — consumers install from git/path only. Remote install still follows the default branch (see **Version pinning limitation** above); tags document known-good trees but are not install pins.

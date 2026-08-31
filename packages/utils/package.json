@@ -1,0 +1,23 @@
+{
+  "name": "opencli-plugin-utils",
+  "version": "0.1.35",
+  "private": true,
+  "type": "module",
+  "description": "Host-Chrome utility plugin with background/foreground scrape and my-mcp content cleaning",
+  "engines": {
+    "node": ">=20.18.1"
+  },
+  "dependencies": {
+    "cheerio": "1.2.0",
+    "turndown": "7.2.4",
+    "turndown-plugin-gfm": "1.0.2"
+  },
+  "peerDependencies": {
+    "@jackwener/opencli": ">=1.8.7"
+  },
+  "peerDependenciesMeta": {
+    "@jackwener/opencli": {
+      "optional": true
+    }
+  }
+}
