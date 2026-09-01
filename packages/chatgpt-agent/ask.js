@@ -267,10 +267,23 @@ export const askCommand = cli({
       const wsBudgetMs = Math.max(1000, timeoutMs - (Date.now() - t0));
       const wsNoProgressMs = Math.min(wsBudgetMs, Math.max(60_000, wsBudgetMs - 30_000));
       let waitResult;
+      let lastSurfaceProbeAt = 0;
       try {
         waitResult = await waitForProtocolStream(page, collector, {
           timeoutMs: wsBudgetMs,
           noProgressMs: wsNoProgressMs,
+          checkPage: async () => {
+            const now = Date.now();
+            if (now - lastSurfaceProbeAt < 1000) return;
+            lastSurfaceProbeAt = now;
+            const surface = await probeChatSurface(page);
+            if (!surface.generationFailed) return;
+            const err = new Error(
+              'GENERATION_FAILED: ChatGPT showed a generation error banner',
+            );
+            err.code = 'GENERATION_FAILED';
+            throw err;
+          },
         });
       } catch (err) {
         if (err && err.code === 'STUCK_NO_WS_PROGRESS') {
@@ -278,6 +291,12 @@ export const askCommand = cli({
             err.message,
             'WS capture armed before send but no frames arrived. Check Browser Bridge extension, '
             + 'login state, and that ChatGPT is actually streaming on this tab.',
+          );
+        }
+        if (err && err.code === 'GENERATION_FAILED') {
+          throw new CommandExecutionError(
+            err.message,
+            'ChatGPT failed while generating the response (often a transient gateway error). Retry the ask.',
           );
         }
         throw err;

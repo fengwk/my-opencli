@@ -284,4 +284,15 @@ describe('wait-timeout artifact decision', () => {
     ]);
     expect(resolved.map(hasReturnableArtifacts)).toEqual([true, true, true, false]);
   });
+
+  it('aborts immediately when checkPage reports a generation-failed banner', async () => {
+    const err = new Error('GENERATION_FAILED: ChatGPT showed a generation error banner');
+    err.code = 'GENERATION_FAILED';
+    const checkPage = async () => {
+      throw err;
+    };
+    await expect(
+      waitForProtocolStream(idlePage(), new StreamCollector(), immediateWaitOptions({ checkPage })),
+    ).rejects.toMatchObject({ code: 'GENERATION_FAILED' });
+  });
 });
