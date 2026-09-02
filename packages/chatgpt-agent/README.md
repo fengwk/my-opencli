@@ -9,12 +9,19 @@ Protocol-first ChatGPT web adapter:
 5. Uploads: sequential `setFileInput` (path) — native CDP path only, no DataTransfer / base64 fallback  
 6. Managed collect: Chrome downloads are remapped (`C:\...` → `/mnt/c/...` on WSL) and copied into `--op` (`path` / `collected` / `collectedFrom` / `bytes`)
 
+## Session & concurrency model
+
+- `chatgpt-agent ask` does not declare `persistent`, relying on OpenCLI's default ephemeral site session: overlapping runs get separate logical tab leases, while sequential runs may reuse an idle cleared physical placeholder tab.
+- Login state (profile / cookies) is shared across tabs from the same browser profile.
+- Conversation continuity is provided by `--session <conversationId>`, not by pinning a persistent tab. Serializing concurrent writes to the same conversation is the caller's responsibility.
+- Parallel file downloads require the paired extension's tab-scoped download wait (`>=1.0.31`).
+
 ## Requirements
 
 | Host | Minimum | Current verified release |
 |------|---------|--------------------------|
 | `@jackwener/opencli` (fork) | `>=1.8.7` | package `1.8.7-fengwk.9` (git tag `fork-v1.8.7-fengwk.9`) |
-| Browser Bridge / Extension | **`>=1.0.24`** | paired Extension **`1.0.30`** | CDP/WS capture + file-chooser behavior must match the CLI |
+| Browser Bridge / Extension | **`>=1.0.31`** | paired Extension **`1.0.31`** | CDP/WS capture + tab-scoped download behavior must match the CLI |
 
 Needs fork APIs: `page.startWsCapture` / `page.readWsCapture`, hardened `page.setFileInput`, and optional `Arg.repeatable` for multi `--file`.
 

@@ -83,7 +83,6 @@ export const askCommand = cli({
   domain: CHATGPT_DOMAIN,
   strategy: Strategy.COOKIE,
   browser: true,
-  siteSession: 'persistent',
   navigateBefore: false,
   args: [
     { name: 'prompt', positional: true, required: true, help: 'Prompt to send' },
@@ -233,8 +232,8 @@ export const askCommand = cli({
       );
     }
 
-    // Always disarm capture after the turn so persistent site sessions do not
-    // keep buffering WebSocket frames between commands (bounded ring, but still
+    // Always disarm capture after the turn so the tab lease does not keep
+    // buffering WebSocket frames between commands (bounded ring, but still
     // holds requestId maps and keeps hasActiveNetworkCapture true).
     // On failure, also stop generation and recover the shell so the next ask can submit.
     let turnSucceeded = false;
