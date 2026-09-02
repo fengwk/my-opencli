@@ -20,7 +20,7 @@ Protocol-first ChatGPT web adapter:
 
 | Host | Minimum | Current verified release |
 |------|---------|--------------------------|
-| `@jackwener/opencli` (fork) | `>=1.8.7` | package `1.8.7-fengwk.9` (git tag `fork-v1.8.7-fengwk.9`) |
+| `@jackwener/opencli` (fork) | `>=1.8.7` | package `1.8.7-fengwk.10` (git tag `fork-v1.8.7-fengwk.10`) |
 | Browser Bridge / Extension | **`>=1.0.31`** | paired Extension **`1.0.31`** | CDP/WS capture + tab-scoped download behavior must match the CLI |
 
 Needs fork APIs: `page.startWsCapture` / `page.readWsCapture`, hardened `page.setFileInput`, and optional `Arg.repeatable` for multi `--file`.
