@@ -25,7 +25,7 @@ export const STREAM_DEFAULTS = {
 /**
  * @param {object} page OpenCLI IPage
  * @param {import('./stream-collector.js').StreamCollector} collector
- * @param {{ timeoutMs: number, textSettleMs?: number, noProgressMs?: number, pollMs?: number, graceMs?: number, pendingImageMaxQuietMs?: number, imageSettleMs?: number }} opts
+ * @param {{ timeoutMs: number, textSettleMs?: number, noProgressMs?: number, pollMs?: number, graceMs?: number, pendingImageMaxQuietMs?: number, imageSettleMs?: number, abortPromise?: Promise<never> }} opts
  */
 export async function waitForProtocolStream(page, collector, opts) {
   const timeoutMs = opts.timeoutMs;
@@ -35,8 +35,13 @@ export async function waitForProtocolStream(page, collector, opts) {
   const pollMs = opts.pollMs ?? STREAM_DEFAULTS.POLL_MS;
   const graceMs = opts.graceMs ?? STREAM_DEFAULTS.GRACE_MS;
   const pendingImageMaxQuietMs = opts.pendingImageMaxQuietMs ?? STREAM_DEFAULTS.PENDING_IMAGE_MAX_QUIET_MS;
+  const abortPromise = opts.abortPromise;
   const start = Date.now();
   const verbose = !!process.env.OPENCLI_VERBOSE;
+
+  function waitAbortable(promise) {
+    return abortPromise ? Promise.race([promise, abortPromise]) : promise;
+  }
 
   function settleMsForCollector() {
     if (collector.imagePointers.length > 0 || collector.pendingImageGen) {
@@ -51,7 +56,7 @@ export async function waitForProtocolStream(page, collector, opts) {
 
   async function drainOnce() {
     const frames = typeof page.readWsCapture === 'function'
-      ? await page.readWsCapture()
+      ? await waitAbortable(page.readWsCapture())
       : [];
     for (const frame of frames || []) {
       if (!frame || frame.direction === 'sent') continue;
@@ -63,7 +68,7 @@ export async function waitForProtocolStream(page, collector, opts) {
   async function graceDrain() {
     const graceDeadline = Date.now() + graceMs;
     while (Date.now() < graceDeadline && Date.now() - start < timeoutMs) {
-      await page.sleep(pollMs / 1000);
+      await waitAbortable(page.sleep(pollMs / 1000));
       await drainOnce();
     }
   }
@@ -126,7 +131,7 @@ export async function waitForProtocolStream(page, collector, opts) {
     // Non-empty text may still be settling. A pending image tool remains open
     // because its visible asset is delivered by a later protocol update.
     if (collector.hasAnyStrongLifecycle() || collector.pendingImageGen) {
-      await page.sleep(pollMs / 1000);
+      await waitAbortable(page.sleep(pollMs / 1000));
       continue;
     }
 
@@ -138,7 +143,7 @@ export async function waitForProtocolStream(page, collector, opts) {
       throw err;
     }
 
-    await page.sleep(pollMs / 1000);
+    await waitAbortable(page.sleep(pollMs / 1000));
   }
 
   return {

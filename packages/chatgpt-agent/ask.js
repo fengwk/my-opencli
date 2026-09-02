@@ -55,15 +55,105 @@ const WS_PATTERN = '';
 async function waitForConversationId(page, timeoutSeconds = 45) {
   const start = Date.now();
   while (Date.now() - start < timeoutSeconds * 1000) {
-    const url = await currentChatGPTUrl(page);
     try {
+      const url = await currentChatGPTUrl(page);
       const id = parseChatGPTConversationId(url);
       return { conversationId: id, conversationUrl: url };
     } catch {
       await page.sleep(1);
     }
   }
-  return { conversationId: '', conversationUrl: await currentChatGPTUrl(page) };
+  let fallbackUrl = '';
+  try {
+    fallbackUrl = await currentChatGPTUrl(page);
+  } catch {}
+  return { conversationId: '', conversationUrl: fallbackUrl };
+}
+
+export async function resolvePreSendConversationId(page, session) {
+  const normalizedSession = session != null && String(session).trim() ? String(session).trim() : '';
+  if (!normalizedSession) {
+    return null;
+  }
+  try {
+    const currentUrl = await currentChatGPTUrl(page);
+    return parseChatGPTConversationId(currentUrl);
+  } catch {
+    try {
+      return parseChatGPTConversationId(normalizedSession);
+    } catch {
+      return normalizedSession.startsWith('http') ? null : normalizedSession;
+    }
+  }
+}
+
+export function wireCollectorUrlBinding(collector, urlInfoPromise) {
+  let urlBindingError = null;
+  let signalBindingError = null;
+  const bindingFailurePromise = new Promise((_, reject) => {
+    signalBindingError = reject;
+  });
+  bindingFailurePromise.catch(() => {});
+
+  const recordBindingError = (err) => {
+    if (!urlBindingError) urlBindingError = err;
+    if (signalBindingError) signalBindingError(err);
+  };
+
+  const bindingPromise = Promise.resolve(urlInfoPromise)
+    .then((urlInfo) => {
+      if (urlInfo && urlInfo.conversationId) {
+        try {
+          collector.bindConversationId(urlInfo.conversationId);
+        } catch (err) {
+          recordBindingError(err);
+        }
+      } else if (!collector.expectedConversationId) {
+        recordBindingError(new CommandExecutionError(
+          'CONVERSATION_BIND_FAILED: ChatGPT did not expose a conversation id after send',
+          'The automation tab never entered /c/<id>. Verify the prompt was submitted and retry.',
+        ));
+      }
+      return urlInfo;
+    })
+    .catch((err) => {
+      recordBindingError(err);
+      return { conversationId: '', conversationUrl: '' };
+    });
+
+  return {
+    bindingPromise,
+    bindingFailurePromise,
+    getBindingError: () => urlBindingError,
+  };
+}
+
+export function resolveResultConversation(urlInfo, collectorConversationId) {
+  const conversationId = (urlInfo && urlInfo.conversationId) || collectorConversationId || '';
+  let conversationUrl = (urlInfo && urlInfo.conversationUrl) || '';
+  if (conversationId && !/\/c\//.test(conversationUrl || '')) {
+    conversationUrl = `${CHATGPT_URL}/c/${conversationId}`;
+  }
+  return { conversationId, conversationUrl };
+}
+
+export function assertSuccessfulImageExports(artifacts, downloads) {
+  const expectedImageCount = (artifacts && Array.isArray(artifacts.images)) ? artifacts.images.length : 0;
+  if (expectedImageCount > 0) {
+    const imageExports = (downloads || []).filter((d) => d && d.kind === 'image-export');
+    const successfulImages = imageExports.filter((d) => d.downloaded === true);
+    if (successfulImages.length === 0) {
+      const errorCodes = imageExports
+        .map((d) => d.error)
+        .filter(Boolean);
+      const uniqueCodes = [...new Set(errorCodes)];
+      const codeDetails = uniqueCodes.length > 0 ? ` errors=[${uniqueCodes.join(', ')}].` : '';
+      throw new CommandExecutionError(
+        'IMAGE_EXPORT_FAILED: protocol reported generated image(s) but no image export succeeded',
+        `expected=${expectedImageCount}, successful=0.${codeDetails} Check if images were rendered on page or time was insufficient.`,
+      );
+    }
+  }
 }
 
 function serializeJson(value) {
@@ -241,7 +331,11 @@ export const askCommand = cli({
       // Brief settle so Network.enable is live before the page opens stream sockets.
       await page.sleep(0.3);
 
-      const collector = new StreamCollector();
+      const initialConversationId = await resolvePreSendConversationId(page, session);
+      const collector = new StreamCollector({
+        guarded: true,
+        conversationId: initialConversationId || null,
+      });
       const t0 = Date.now();
 
       // --- Send ---
@@ -256,6 +350,7 @@ export const askCommand = cli({
       // Conversation id may appear via URL and/or stream payloads.
       const urlWaitBudget = Math.min(45, timeoutSec);
       const urlInfoPromise = waitForConversationId(page, urlWaitBudget);
+      const { bindingPromise, bindingFailurePromise, getBindingError } = wireCollectorUrlBinding(collector, urlInfoPromise);
 
       // --- Listen protocol stream ---
       // Honor the user's --timeout for both the outer bound and the
@@ -270,6 +365,7 @@ export const askCommand = cli({
         waitResult = await waitForProtocolStream(page, collector, {
           timeoutMs: wsBudgetMs,
           noProgressMs: wsNoProgressMs,
+          abortPromise: bindingFailurePromise,
         });
       } catch (err) {
         if (err && err.code === 'STUCK_NO_WS_PROGRESS') {
@@ -282,12 +378,13 @@ export const askCommand = cli({
         throw err;
       }
 
-      const urlInfo = await urlInfoPromise;
-      const conversationId = collector.conversationId || urlInfo.conversationId || '';
-      let conversationUrl = urlInfo.conversationUrl || '';
-      if (conversationId && !/\/c\//.test(conversationUrl || '')) {
-        conversationUrl = `${CHATGPT_URL}/c/${conversationId}`;
+      const urlInfo = await bindingPromise;
+      const bindingErr = getBindingError();
+      if (bindingErr) {
+        throw bindingErr;
       }
+
+      const { conversationId, conversationUrl } = resolveResultConversation(urlInfo, collector.conversationId);
 
       // --- Package protocol artifacts only (no extra backend HTTP) ---
       let artifacts = await resolveArtifacts(collector, page, { conversationId });
@@ -371,6 +468,8 @@ export const askCommand = cli({
         });
         downloads = downloads.concat(imgDl);
       }
+
+      assertSuccessfulImageExports(artifacts, downloads);
 
       if (process.env.OPENCLI_VERBOSE && downloads.length) {
         console.error(

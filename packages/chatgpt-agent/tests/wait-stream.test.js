@@ -284,4 +284,96 @@ describe('wait-timeout artifact decision', () => {
     ]);
     expect(resolved.map(hasReturnableArtifacts)).toEqual([true, true, true, false]);
   });
+
+  // Verifies that waitForProtocolStream with a guarded collector ignores foreign frames and completes on matching conversation.
+  it('drains and ignores foreign stream frames in guarded mode until matching conversation completes', async () => {
+    const collector = new StreamCollector({ guarded: true, conversationId: 'cid-matching' });
+
+    const foreignBatch = [
+      {
+        direction: 'received',
+        payload: JSON.stringify([{
+          type: 'message',
+          topic_id: 'conversation-turn-turnForeign',
+          payload: {
+            type: 'conversation-turn-stream',
+            payload: {
+              turn_id: 'turnForeign',
+              encoded_item: `data: ${JSON.stringify({
+                conversation_id: 'cid-foreign',
+                p: '/message/content/parts/0',
+                o: 'append',
+                v: 'foreign text',
+              })}\n\ndata: ${JSON.stringify({ type: 'message_stream_complete' })}\n\n`,
+            },
+          },
+        }]),
+      },
+    ];
+
+    const matchingBatch = [
+      {
+        direction: 'received',
+        payload: JSON.stringify([{
+          type: 'message',
+          topic_id: 'conversation-turn-turnMatching',
+          payload: {
+            type: 'conversation-turn-stream',
+            payload: {
+              turn_id: 'turnMatching',
+              encoded_item: `data: ${JSON.stringify({
+                conversation_id: 'cid-matching',
+                p: '/message/content/parts/0',
+                o: 'append',
+                v: 'matching text',
+              })}\n\ndata: ${JSON.stringify({ type: 'message_stream_complete' })}\n\n`,
+            },
+          },
+        }]),
+      },
+    ];
+
+    const { page } = queuedPage([foreignBatch, matchingBatch]);
+    const result = await waitForProtocolStream(
+      page,
+      collector,
+      immediateWaitOptions({ textSettleMs: 0, pollMs: 1 }),
+    );
+
+    expect(result.reason).toBe('protocol-complete');
+    expect(collector.text).toBe('matching text');
+    expect(collector.conversationId).toBe('cid-matching');
+  });
+
+  // Binding failures must terminate the protocol loop itself rather than leave
+  // a background read/poll task alive until the outer command timeout.
+  it('aborts a pending protocol read when conversation binding fails', async () => {
+    let rejectBinding;
+    let markReadStarted;
+    const readStarted = new Promise((resolve) => {
+      markReadStarted = resolve;
+    });
+    const bindingFailure = new Promise((_, reject) => {
+      rejectBinding = reject;
+    });
+    bindingFailure.catch(() => {});
+
+    const page = {
+      readWsCapture: () => {
+        markReadStarted();
+        return new Promise(() => {});
+      },
+      sleep: async () => {},
+    };
+    const collector = new StreamCollector({ guarded: true, conversationId: 'cid-original' });
+    const waitPromise = waitForProtocolStream(page, collector, {
+      timeoutMs: 1_200_000,
+      abortPromise: bindingFailure,
+    });
+
+    await readStarted;
+    rejectBinding(new Error('Conflicting conversationId binding'));
+
+    await expect(waitPromise).rejects.toThrow(/Conflicting conversationId binding/);
+  });
 });
