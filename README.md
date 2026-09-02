@@ -17,10 +17,10 @@ These plugins **require an OpenCLI fork**, not stock upstream alone:
 | Component | Minimum | Current verified release | Why |
 |-----------|---------|--------------------------|-----|
 | Node.js | **`>=20.18.1`** | `24.14.0` | Matches OpenCLI and Cheerio runtime engines |
-| CLI (`@jackwener/opencli`) | **`>=1.8.7`** | package `1.8.7-fengwk.10` (git tag `fork-v1.8.7-fengwk.10`) | Browser window/session controls, network/frame APIs, WS capture, hardened file input, `Arg.repeatable` |
-| Browser Bridge / Extension | **`>=1.0.31`** | paired Extension **`1.0.31`** | Browser/frame/CDP/WS capture, file-chooser behavior, and tab-scoped downloads must match the CLI |
+| CLI (`@jackwener/opencli`) | **`>=1.8.7`** | package `1.8.7-fengwk.11` (git tag `fork-v1.8.7-fengwk.11`) | Browser window/session controls, network/frame APIs, WS capture, hardened file input, `Arg.repeatable` |
+| Browser Bridge / Extension | **`>=1.0.32`** | paired Extension **`1.0.32`** | Browser/frame/CDP/WS capture, tab-scoped downloads, and ephemeral warm-tab reuse must match the CLI |
 
-Minimum ranges are the compatibility floor; the verified columns name the paired fork Release that has been published and checked. Package version (`1.8.7-fengwk.10`) and git tag (`fork-v1.8.7-fengwk.10`) are related but not the same string — do not treat the package version as a tag name.
+Minimum ranges are the compatibility floor; the verified columns name the paired fork Release that has been published and checked. Package version (`1.8.7-fengwk.11`) and git tag (`fork-v1.8.7-fengwk.11`) are related but not the same string — do not treat the package version as a tag name.
 
 Install and reload **both** the forked CLI and its matching Browser Bridge / Extension. Mismatched CLI/extension pairs will fail at runtime even if the plugin installs cleanly.
 

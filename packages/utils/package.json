@@ -1,6 +1,6 @@
 {
   "name": "opencli-plugin-utils",
-  "version": "0.1.37",
+  "version": "0.1.38",
   "private": true,
   "type": "module",
   "description": "Host-Chrome utility plugin with background/foreground scrape and my-mcp content cleaning",

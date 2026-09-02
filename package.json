@@ -1,6 +1,6 @@
 {
   "name": "my-opencli",
-  "version": "0.1.37",
+  "version": "0.1.38",
   "private": true,
   "description": "Personal OpenCLI plugins monorepo (validation + tests only at root)",
   "engines": {
@@ -15,7 +15,7 @@
     "check": "npm run validate && npm test"
   },
   "devDependencies": {
-    "@jackwener/opencli": "https://github.com/fengwk/OpenCLI/releases/download/fork-v1.8.7-fengwk.10/jackwener-opencli-1.8.7-fengwk.10.tgz",
+    "@jackwener/opencli": "https://github.com/fengwk/OpenCLI/releases/download/fork-v1.8.7-fengwk.11/jackwener-opencli-1.8.7-fengwk.11.tgz",
     "cheerio": "1.2.0",
     "turndown": "7.2.4",
     "turndown-plugin-gfm": "1.0.2",
