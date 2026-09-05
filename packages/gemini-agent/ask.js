@@ -78,11 +78,11 @@ export const askCommand = cli({
   name: 'ask',
   access: 'write',
   description:
-    'Send a prompt to Gemini via StreamGenerate protocol; return text, files, and images for one turn',
+    'Send a prompt to Gemini via StreamGenerate protocol; return normalized text and image artifacts for one turn',
   domain: GEMINI_DOMAIN,
   strategy: Strategy.COOKIE,
   browser: true,
-  siteSession: 'ephemeral',
+  siteSession: 'persistent',
   defaultWindowMode: 'foreground',
   navigateBefore: false,
   args: [
@@ -214,7 +214,7 @@ export const askCommand = cli({
               ? 'SEND_FAILED: Gemini tab is not visible for trusted input'
               : 'SEND_FAILED: composer still holds the draft after Enter/submit',
           reason === 'hidden'
-            ? 'Run with --window foreground --site-session ephemeral so Gemini can receive trusted mouse/keyboard input.'
+            ? 'Use or focus the persistent Gemini tab in a foreground window so Gemini can receive trusted mouse/keyboard input.'
             : reason === 'control'
               ? 'Wait for attachment processing to finish, remove any failed preview, and retry.'
             : sent && sent.dump

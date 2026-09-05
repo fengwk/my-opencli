@@ -1,10 +1,25 @@
 import { describe, expect, it, vi } from 'vitest';
 import { askCommand, resolveConversationInfo } from '../ask.js';
+import { askCommand as chatgptAskCommand } from '../../chatgpt-agent/ask.js';
+
+function normalizeArg(arg) {
+  return {
+    name: arg.name,
+    positional: arg.positional,
+    required: arg.required,
+    type: arg.type,
+    default: arg.default,
+    repeatable: arg.repeatable,
+    valueRequired: arg.valueRequired,
+  };
+}
 
 describe('gemini-agent/ask command registration', () => {
-  it('uses a visible ephemeral browser tab for trusted Gemini input', () => {
-    expect(askCommand.siteSession).toBe('ephemeral');
+  // Guards siteSession persistence while keeping Gemini's site-specific foreground requirement.
+  it('uses a visible persistent foreground browser tab for trusted Gemini input', () => {
+    expect(askCommand.siteSession).toBe('persistent');
     expect(askCommand.defaultWindowMode).toBe('foreground');
+    expect(chatgptAskCommand.siteSession).toBe('persistent');
   });
 
   it('defaults the protocol turn timeout to 1200 seconds', () => {
@@ -26,6 +41,18 @@ describe('gemini-agent/ask command registration', () => {
       'source',
       'reason',
     ]);
+    expect(askCommand.columns).toEqual(chatgptAskCommand.columns);
+  });
+
+  // Public structure is shared; site-specific help and runtime behavior remain independent.
+  it('matches chatgpt-agent normalized public argument contract and output columns', () => {
+    expect(askCommand.args.map(normalizeArg)).toEqual(
+      chatgptAskCommand.args.map(normalizeArg),
+    );
+    expect(askCommand.columns).toEqual(chatgptAskCommand.columns);
+    expect(askCommand.siteSession).toBe('persistent');
+    expect(chatgptAskCommand.siteSession).toBe('persistent');
+    expect(askCommand.defaultWindowMode).toBe('foreground');
   });
 
   it('accepts repeatable --file attachments', () => {
