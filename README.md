@@ -121,9 +121,9 @@ opencli chatgpt-agent ask '继续' --session <conversationId>
 
 # Gemini text / image (protocol StreamGenerate)
 opencli gemini-agent ask '用一句话说明 Docker 是做什么的' --timeout 180
-opencli gemini-agent ask '画一只坐在窗台上的橘猫' --op ~/Pictures/gemini-agent
-opencli gemini-agent ask '概括附件' --file ./notes.txt
-opencli gemini-agent ask '继续补充两点' --session <conversationId>
+opencli gemini-agent ask '画一只坐在窗台上的橘猫' --op "/absolute/path/to/gemini-output"
+opencli gemini-agent ask '概括附件' --file "/absolute/path/to/notes.txt"
+opencli gemini-agent ask '继续补充两点' --session "<conversationId>"
 
 # multi file (repeatable flags)
 opencli chatgpt-agent ask '读这两个附件并概括' \

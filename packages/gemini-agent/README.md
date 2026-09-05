@@ -32,7 +32,7 @@ The public arguments and output columns intentionally match `chatgpt-agent`, but
 ## Install
 
 ```bash
-opencli plugin install /path/to/my-opencli/packages/gemini-agent
+opencli plugin install /absolute/path/to/my-opencli/packages/gemini-agent
 ```
 
 Hub / remote:
@@ -45,9 +45,9 @@ opencli plugin install github:fengwk/my-opencli/gemini-agent
 
 ```bash
 opencli gemini-agent ask '用一句话说明 Docker 是做什么的' --timeout 180
-opencli gemini-agent ask '继续' --session <conversationId>
-opencli gemini-agent ask '读这两个附件并概括' --file ./a.txt --file ./b.png
-opencli gemini-agent ask '画一只坐在窗台上的橘猫，暖色侧光' --op ~/Pictures/gemini-agent
+opencli gemini-agent ask '继续' --session "<conversationId>"
+opencli gemini-agent ask '读这两个附件并概括' --file "/absolute/path/to/a.txt" --file "/absolute/path/to/b.png"
+opencli gemini-agent ask '画一只坐在窗台上的橘猫，暖色侧光' --op "/absolute/path/to/output"
 ```
 
 `--session` accepts a bare id, `/app/<id>`, a full conversation URL, or protocol `c_<id>`.

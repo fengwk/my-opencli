@@ -102,7 +102,8 @@ export const askCommand = cli({
       name: 'file',
       valueRequired: true,
       repeatable: true,
-      help: 'Local file to attach (repeatable: --file a.png --file b.png); comma-separated also ok',
+      help:
+        'Local file to attach (repeatable: --file /absolute/path/to/a.png --file /absolute/path/to/b.png); comma-separated also ok',
     },
     {
       name: 'op',

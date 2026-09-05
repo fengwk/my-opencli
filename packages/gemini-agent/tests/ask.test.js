@@ -60,6 +60,13 @@ describe('gemini-agent/ask command registration', () => {
     expect(file).toMatchObject({ repeatable: true, valueRequired: true });
   });
 
+  // Public path examples must not depend on the caller's current working directory.
+  it('uses generic absolute paths in attachment help', () => {
+    const file = askCommand.args.find((arg) => arg.name === 'file');
+    expect(file.help).toContain('--file /absolute/path/to/a.png');
+    expect(file.help).toContain('--file /absolute/path/to/b.png');
+  });
+
   it('rejects malformed session values before browser navigation', async () => {
     await expect(askCommand.func({}, {
       prompt: 'must not send',
