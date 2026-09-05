@@ -662,7 +662,7 @@ describe('jimeng-agent/contract — agentPrompt assembly', () => {
     }));
     expect(out.assetId).toMatch(/^[0-9a-f]{16}$/);
     expect(out.agentPrompt).toBe(
-      '(使用 Seedance2.0，**禁止使用 VIP**），你必须严格按照下面的提示词内容生成1个16:9的5s视频\n'
+      '(必须使用 Seedance2.0 模型，**禁止使用 VIP 模型**，**禁止使用 Fast 模型**），你必须严格按照下面的提示词内容生成1个16:9的5s视频\n'
       + `资产编号：${out.assetId}`,
     );
   });
@@ -671,9 +671,11 @@ describe('jimeng-agent/contract — agentPrompt assembly', () => {
     const out = normalizeAskArgs(baseArgs({
       model_version: 'seedance2.0fast',
     }));
-    expect(out.agentPrompt.startsWith('(使用 Seedance2.0 Fast，**禁止使用 VIP**）')).toBe(true);
+    expect(out.agentPrompt.startsWith(
+      '(必须使用 Seedance2.0 Fast 模型，**禁止使用 VIP 模型**）',
+    )).toBe(true);
     expect(out.agentPrompt).toBe(
-      '(使用 Seedance2.0 Fast，**禁止使用 VIP**），你必须严格按照下面的提示词内容生成1个16:9的5s视频\n'
+      '(必须使用 Seedance2.0 Fast 模型，**禁止使用 VIP 模型**），你必须严格按照下面的提示词内容生成1个16:9的5s视频\n'
       + `资产编号：${out.assetId}`,
     );
   });
@@ -683,7 +685,7 @@ describe('jimeng-agent/contract — agentPrompt assembly', () => {
       model_version: 'seedance2.0_vip',
     }));
     expect(out.agentPrompt).toBe(
-      '(使用 Seedance2.0 VIP），你必须严格按照下面的提示词内容生成1个16:9的5s视频\n'
+      '(必须使用 Seedance2.0 VIP 模型），你必须严格按照下面的提示词内容生成1个16:9的5s视频\n'
       + `资产编号：${out.assetId}`,
     );
   });
@@ -693,7 +695,7 @@ describe('jimeng-agent/contract — agentPrompt assembly', () => {
       model_version: 'seedance2.0fast_vip',
     }));
     expect(out.agentPrompt).toBe(
-      '(使用 Seedance2.0 Fast VIP），你必须严格按照下面的提示词内容生成1个16:9的5s视频\n'
+      '(必须使用 Seedance2.0 Fast VIP 模型），你必须严格按照下面的提示词内容生成1个16:9的5s视频\n'
       + `资产编号：${out.assetId}`,
     );
   });
@@ -703,7 +705,7 @@ describe('jimeng-agent/contract — agentPrompt assembly', () => {
       model_version: 'seedance2.0mini',
     }));
     expect(out.agentPrompt).toBe(
-      '(使用 Seedance2.0 Mini），你必须严格按照下面的提示词内容生成1个16:9的5s视频\n'
+      '(必须使用 Seedance2.0 Mini 模型），你必须严格按照下面的提示词内容生成1个16:9的5s视频\n'
       + `资产编号：${out.assetId}`,
     );
   });
@@ -715,7 +717,7 @@ describe('jimeng-agent/contract — agentPrompt assembly', () => {
       duration: 12,
     }));
     expect(out.agentPrompt).toBe(
-      '(使用 Seedance2.0 Mini），你必须严格按照下面的提示词内容生成1个9:16的12s视频\n'
+      '(必须使用 Seedance2.0 Mini 模型），你必须严格按照下面的提示词内容生成1个9:16的12s视频\n'
       + `资产编号：${out.assetId}`,
     );
   });
@@ -725,7 +727,7 @@ describe('jimeng-agent/contract — agentPrompt assembly', () => {
       prompt: 'show a cat playing piano',
     }));
     expect(out.agentPrompt).toBe(
-      '(使用 Seedance2.0，**禁止使用 VIP**），你必须严格按照下面的提示词内容生成1个16:9的5s视频\n'
+      '(必须使用 Seedance2.0 模型，**禁止使用 VIP 模型**，**禁止使用 Fast 模型**），你必须严格按照下面的提示词内容生成1个16:9的5s视频\n'
       + `资产编号：${out.assetId}\n\n`
       + '---\n\n'
       + 'show a cat playing piano',
@@ -736,7 +738,7 @@ describe('jimeng-agent/contract — agentPrompt assembly', () => {
   it('always keeps the asset-id line even when the prompt is empty', () => {
     const out = normalizeAskArgs(baseArgs({ prompt: '' }));
     expect(out.agentPrompt).toBe(
-      '(使用 Seedance2.0，**禁止使用 VIP**），你必须严格按照下面的提示词内容生成1个16:9的5s视频\n'
+      '(必须使用 Seedance2.0 模型，**禁止使用 VIP 模型**，**禁止使用 Fast 模型**），你必须严格按照下面的提示词内容生成1个16:9的5s视频\n'
       + `资产编号：${out.assetId}`,
     );
     expect(out.agentPrompt.includes('---')).toBe(false);

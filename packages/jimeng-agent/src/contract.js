@@ -96,11 +96,11 @@ const MAX_DURATION = MAX_REFERENCE_DURATION_SECONDS;
  * closing paren. Touching these requires a product decision, not a refactor.
  */
 const MODEL_PREFIXES = Object.freeze({
-  'seedance2.0': '(使用 Seedance2.0，**禁止使用 VIP**）',
-  'seedance2.0fast': '(使用 Seedance2.0 Fast，**禁止使用 VIP**）',
-  'seedance2.0_vip': '(使用 Seedance2.0 VIP）',
-  'seedance2.0fast_vip': '(使用 Seedance2.0 Fast VIP）',
-  'seedance2.0mini': '(使用 Seedance2.0 Mini）',
+  'seedance2.0': '(必须使用 Seedance2.0 模型，**禁止使用 VIP 模型**，**禁止使用 Fast 模型**）',
+  'seedance2.0fast': '(必须使用 Seedance2.0 Fast 模型，**禁止使用 VIP 模型**）',
+  'seedance2.0_vip': '(必须使用 Seedance2.0 VIP 模型）',
+  'seedance2.0fast_vip': '(必须使用 Seedance2.0 Fast VIP 模型）',
+  'seedance2.0mini': '(必须使用 Seedance2.0 Mini 模型）',
 });
 
 const AGENT_SUFFIX_TEMPLATE = '，你必须严格按照下面的提示词内容生成1个{ratio}的{duration}s视频';
