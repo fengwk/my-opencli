@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { askCommand } from '../ask.js';
+import { describe, expect, it, vi } from 'vitest';
+import { askCommand, resolveConversationInfo } from '../ask.js';
 
 describe('gemini-agent/ask command registration', () => {
   it('uses a visible ephemeral browser tab for trusted Gemini input', () => {
@@ -39,5 +39,19 @@ describe('gemini-agent/ask command registration', () => {
       session: 'not a valid session',
       timeout: 30,
     })).rejects.toThrow(/--session is not a valid Gemini conversation/);
+  });
+
+  it('returns protocol conversation metadata without polling the page URL', async () => {
+    // StreamGenerate already carries c_<id>; waiting for Gemini to rewrite /app
+    // previously added a fixed 45-second tail after the answer was complete.
+    const page = {
+      getCurrentUrl: vi.fn(async () => 'https://gemini.google.com/app'),
+    };
+
+    await expect(resolveConversationInfo(page, 'dfb9fb176eef48bc', '')).resolves.toEqual({
+      sessionId: 'dfb9fb176eef48bc',
+      conversationUrl: 'https://gemini.google.com/app/dfb9fb176eef48bc',
+    });
+    expect(page.getCurrentUrl).not.toHaveBeenCalled();
   });
 });

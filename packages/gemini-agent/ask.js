@@ -55,17 +55,22 @@ function serializeJson(value) {
   }
 }
 
-async function waitForSessionId(page, timeoutSeconds = 45) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutSeconds * 1000) {
-    const url = await currentGeminiUrl(page);
-    const id = parseGeminiUrlSessionId(url);
-    if (id) return { sessionId: id, conversationUrl: url };
-    if (typeof page.sleep === 'function') await page.sleep(1);
-    else break;
+export async function resolveConversationInfo(page, protocolSessionId = '', requestedSessionId = '') {
+  const knownSessionId = protocolSessionId || requestedSessionId;
+  if (knownSessionId) {
+    return {
+      sessionId: knownSessionId,
+      conversationUrl: geminiConversationUrl(knownSessionId),
+    };
   }
-  const url = await currentGeminiUrl(page);
-  return { sessionId: parseGeminiUrlSessionId(url), conversationUrl: url || GEMINI_APP_URL };
+  const currentUrl = await currentGeminiUrl(page);
+  const urlSessionId = parseGeminiUrlSessionId(currentUrl);
+  return {
+    sessionId: urlSessionId,
+    conversationUrl: urlSessionId
+      ? geminiConversationUrl(urlSessionId)
+      : currentUrl || GEMINI_APP_URL,
+  };
 }
 
 export const askCommand = cli({
@@ -218,9 +223,6 @@ export const askCommand = cli({
         );
       }
 
-      const urlWaitBudget = Math.min(45, timeoutSec);
-      const urlInfoPromise = waitForSessionId(page, urlWaitBudget);
-
       const captureBudgetMs = Math.max(1000, timeoutMs - (Date.now() - t0));
       const noProgressMs = Math.min(captureBudgetMs, Math.max(60_000, captureBudgetMs - 30_000));
       let waitResult;
@@ -241,12 +243,11 @@ export const askCommand = cli({
         throw err;
       }
 
-      const urlInfo = await urlInfoPromise;
-      const sessionId = collector.sessionId || urlInfo.sessionId || requestedSessionId;
-      let conversationUrl = urlInfo.conversationUrl || '';
-      if (sessionId && !/\/app\/[A-Za-z0-9_-]+/.test(conversationUrl || '')) {
-        conversationUrl = geminiConversationUrl(sessionId);
-      }
+      const { sessionId, conversationUrl } = await resolveConversationInfo(
+        page,
+        collector.sessionId,
+        requestedSessionId,
+      );
 
       let artifacts = resolveArtifacts(collector, { sessionId });
       if (waitResult.reason === 'wait-timeout' && !hasReturnableArtifacts(artifacts)) {
