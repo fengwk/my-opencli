@@ -15,11 +15,11 @@ function normalizeArg(arg) {
 }
 
 describe('gemini-agent/ask command registration', () => {
-  // Guards siteSession persistence while keeping Gemini's site-specific foreground requirement.
+  // Gemini needs a fixed visible tab for trusted input; ChatGPT uses independent ephemeral leases.
   it('uses a visible persistent foreground browser tab for trusted Gemini input', () => {
     expect(askCommand.siteSession).toBe('persistent');
     expect(askCommand.defaultWindowMode).toBe('foreground');
-    expect(chatgptAskCommand.siteSession).toBe('persistent');
+    expect(chatgptAskCommand.siteSession).toBeUndefined();
   });
 
   it('defaults the protocol turn timeout to 1200 seconds', () => {
@@ -44,14 +44,14 @@ describe('gemini-agent/ask command registration', () => {
     expect(askCommand.columns).toEqual(chatgptAskCommand.columns);
   });
 
-  // Public structure is shared; site-specific help and runtime behavior remain independent.
-  it('matches chatgpt-agent normalized public argument contract and output columns', () => {
+  // Public structure is shared; site-specific tab lifecycle and runtime behavior remain independent.
+  it('matches chatgpt-agent public schema while preserving independent tab lifecycles', () => {
     expect(askCommand.args.map(normalizeArg)).toEqual(
       chatgptAskCommand.args.map(normalizeArg),
     );
     expect(askCommand.columns).toEqual(chatgptAskCommand.columns);
     expect(askCommand.siteSession).toBe('persistent');
-    expect(chatgptAskCommand.siteSession).toBe('persistent');
+    expect(chatgptAskCommand.siteSession).toBeUndefined();
     expect(askCommand.defaultWindowMode).toBe('foreground');
   });
 
