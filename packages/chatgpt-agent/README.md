@@ -9,6 +9,16 @@ Protocol-first ChatGPT web adapter:
 5. Uploads: sequential `setFileInput` (path) — native CDP path only, no DataTransfer / base64 fallback  
 6. Managed collect: Chrome downloads are remapped (`C:\...` → `/mnt/c/...` on WSL) and copied into `--op` (`path` / `collected` / `collectedFrom` / `bytes`)
 
+## Attachment limits & capabilities
+
+- **Attachment count**: at most 20 attachments per turn (validated and rejected before staging/upload).
+- **Per-file size limits**:
+  - Image files (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`): max 20 MiB per file.
+  - CSV / spreadsheet files (`.csv`, `.tsv`, `.xls`, `.xlsx`): max 50 MiB per file.
+  - All other files: max 512 MiB per file.
+- **Document token limit**: ChatGPT service-side rule (up to ~2M tokens per document); documents are not read or tokenized locally.
+- **Paths**: Quoted/generic absolute paths are recommended for agent invocations; relative paths remain accepted internally via `path.resolve` for backward compatibility.
+
 ## Session & concurrency model
 
 - `chatgpt-agent ask` does not declare `persistent`, relying on OpenCLI's default ephemeral site session: overlapping runs get separate logical tab leases, while sequential runs may reuse an idle cleared physical placeholder tab.

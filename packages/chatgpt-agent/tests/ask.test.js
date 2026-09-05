@@ -21,6 +21,34 @@ describe('chatgpt-agent/ask command registration', () => {
     // Without an explicit siteSession declaration, OpenCLI defaults to ephemeral tab leases.
     expect(askCommand.siteSession).toBeUndefined();
   });
+
+  // Verifies that the public command description is agent-facing and avoids protocol-internal jargon.
+  it('uses agent-facing command description rather than protocol-internal details', () => {
+    expect(askCommand.description).toContain('ChatGPT Agent');
+    expect(askCommand.description).not.toContain('protocol stream');
+    expect(askCommand.description).not.toContain('WS');
+  });
+
+  // Verifies that timeout help is framed as waiting for the agent turn rather than a protocol stream.
+  it('uses agent-facing timeout help rather than protocol-internal wording', () => {
+    const timeout = askCommand.args.find((arg) => arg.name === 'timeout');
+    expect(timeout.help).toContain('agent turn');
+    expect(timeout.help).not.toContain('protocol turn');
+  });
+
+  // Verifies that file help mentions up to 20 files and illustrates quoted generic absolute paths.
+  it('documents up to 20 files with quoted generic absolute path examples in file help', () => {
+    const file = askCommand.args.find((arg) => arg.name === 'file');
+    expect(file.help).toMatch(/up to 20 files/i);
+    expect(file.help).toContain('"/absolute/path/to/file1"');
+    expect(file.help).toContain('"/absolute/path/to/file2"');
+  });
+
+  // Verifies that op help mentions both images and files.
+  it('documents op arg help covering both images and files', () => {
+    const op = askCommand.args.find((arg) => arg.name === 'op');
+    expect(op.help).toContain('images and files');
+  });
 });
 
 describe('resolvePreSendConversationId', () => {

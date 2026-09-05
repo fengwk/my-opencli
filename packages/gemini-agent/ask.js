@@ -78,7 +78,7 @@ export const askCommand = cli({
   name: 'ask',
   access: 'write',
   description:
-    'Send a prompt to Gemini via StreamGenerate protocol; return normalized text and image artifacts for one turn',
+    'Send a prompt to Gemini; return text and image artifacts for one turn',
   domain: GEMINI_DOMAIN,
   strategy: Strategy.COOKIE,
   browser: true,
@@ -96,14 +96,14 @@ export const askCommand = cli({
       name: 'timeout',
       type: 'int',
       default: DEFAULT_TIMEOUT_SEC,
-      help: `Max seconds to wait for the protocol turn (default ${DEFAULT_TIMEOUT_SEC})`,
+      help: `Max seconds to wait for turn completion (default ${DEFAULT_TIMEOUT_SEC})`,
     },
     {
       name: 'file',
       valueRequired: true,
       repeatable: true,
       help:
-        'Local file to attach (repeatable: --file /absolute/path/to/a.png --file /absolute/path/to/b.png); comma-separated also ok',
+        'Local file to attach (repeatable up to 10 files: --file "/absolute/path/to/a.png" --file "/absolute/path/to/b.png"; comma-separated also ok)',
     },
     {
       name: 'op',

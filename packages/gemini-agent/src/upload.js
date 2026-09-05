@@ -113,6 +113,25 @@ export function stageForBrowserUpload(nodePath) {
   };
 }
 
+const MAX_ATTACHMENTS = 10;
+const MAX_ORDINARY_FILE_SIZE = 100 * 1024 * 1024; // 100 MiB
+const MAX_VIDEO_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2 GiB
+
+const VIDEO_EXTENSIONS = new Set([
+  '.3gp',
+  '.avi',
+  '.flv',
+  '.m4v',
+  '.mkv',
+  '.mov',
+  '.mp4',
+  '.mpeg',
+  '.mpg',
+  '.ts',
+  '.webm',
+  '.wmv',
+]);
+
 export function prepareLocalFiles(fileArg) {
   if (fileArg == null || fileArg === '') return { ok: true, files: [] };
   const raw = [];
@@ -129,14 +148,27 @@ export function prepareLocalFiles(fileArg) {
   };
   push(fileArg);
 
+  if (raw.length > MAX_ATTACHMENTS) {
+    return {
+      ok: false,
+      reason: `Too many attachments (${raw.length} files provided; max ${MAX_ATTACHMENTS} allowed)`,
+    };
+  }
+
   const files = [];
   for (const item of raw) {
     const nodePath = path.resolve(item);
     if (!fs.existsSync(nodePath)) return { ok: false, reason: `File not found: ${nodePath}` };
     const st = fs.statSync(nodePath);
     if (!st.isFile()) return { ok: false, reason: `Not a file: ${nodePath}` };
-    if (st.size > 100 * 1024 * 1024) {
-      return { ok: false, reason: `File too large (${(st.size / 1024 / 1024).toFixed(1)} MB)` };
+    const ext = path.extname(nodePath).toLowerCase();
+    const isVideo = VIDEO_EXTENSIONS.has(ext);
+    const maxSize = isVideo ? MAX_VIDEO_FILE_SIZE : MAX_ORDINARY_FILE_SIZE;
+    if (st.size > maxSize) {
+      return {
+        ok: false,
+        reason: `File too large (${(st.size / 1024 / 1024).toFixed(1)} MB; max ${isVideo ? '2 GB' : '100 MB'})`,
+      };
     }
     const staged = stageForBrowserUpload(nodePath);
     files.push({

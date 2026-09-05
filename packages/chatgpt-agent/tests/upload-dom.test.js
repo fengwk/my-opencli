@@ -20,14 +20,25 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 const {
+  DEFAULT_MAX_SIZE_BYTES,
+  IMAGE_MAX_SIZE_BYTES,
+  MAX_ATTACHMENT_COUNT,
+  SPREADSHEET_MAX_SIZE_BYTES,
+  getMaxFileSize,
   prepareLocalFiles,
   uploadComposerFiles,
 } = await import('../src/upload-dom.js');
 
 const temps = [];
 let originalVerbose;
+let originalUploadStage;
 
 afterEach(() => {
+  if (originalUploadStage !== undefined) {
+    process.env.OPENCLI_UPLOAD_STAGE = originalUploadStage;
+  } else {
+    delete process.env.OPENCLI_UPLOAD_STAGE;
+  }
   for (const dir of temps.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -36,6 +47,9 @@ afterEach(() => {
 beforeEach(() => {
   originalVerbose = process.env.OPENCLI_VERBOSE;
   delete process.env.OPENCLI_VERBOSE;
+  originalUploadStage = process.env.OPENCLI_UPLOAD_STAGE;
+  // Force no Windows staging so tests creating large sparse files never copy fixtures.
+  process.env.OPENCLI_UPLOAD_STAGE = '0';
 });
 
 /**
@@ -75,6 +89,16 @@ function tmpFileWithContent(name, content = 'x') {
   temps.push(dir);
   const filePath = path.join(dir, name);
   fs.writeFileSync(filePath, content, 'utf8');
+  return filePath;
+}
+
+function tmpSparseFile(name, sizeBytes) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cga-sparse-'));
+  temps.push(dir);
+  const filePath = path.join(dir, name);
+  const fd = fs.openSync(filePath, 'w');
+  fs.ftruncateSync(fd, sizeBytes);
+  fs.closeSync(fd);
   return filePath;
 }
 
@@ -260,5 +284,124 @@ describe('prepareLocalFiles — preconditions', () => {
     expect(typeof entry.nodePath).toBe('string');
     expect(typeof entry.sourcePath).toBe('string');
     expect(fs.existsSync(entry.nodePath)).toBe(true);
+  });
+
+  // Verifies that passing >20 attachment paths is rejected upfront before staging or checking filesystem existence.
+  it('rejects >20 parsed attachment entries before staging without inspecting filesystem', () => {
+    // 21 non-existent dummy paths: if existence were checked or staging were attempted, it would fail with "File not found"
+    const paths = Array.from({ length: 21 }, (_, i) => `/nonexistent/path/item-${i + 1}.png`);
+    const out = prepareLocalFiles(paths);
+    expect(out.ok).toBe(false);
+    expect(out.reason).toMatch(/Too many attachments/i);
+    expect(out.reason).toContain('21');
+    expect(out.reason).toContain('20');
+    expect(out.reason).not.toMatch(/File not found/);
+  });
+
+  // Verifies that >20 attachment entries passed via a single comma-separated string are rejected before staging.
+  it('rejects >20 attachment entries passed as comma-separated paths before staging', () => {
+    const items = Array.from({ length: 25 }, (_, i) => `/nonexistent/item-${i}.txt`).join(',');
+    const out = prepareLocalFiles(items);
+    expect(out.ok).toBe(false);
+    expect(out.reason).toMatch(/Too many attachments/i);
+    expect(out.reason).toContain('25');
+  });
+
+  // Verifies that exactly 20 valid attachments are accepted without exceeding the count limit.
+  it('accepts exactly 20 valid attachments', () => {
+    const files = Array.from({ length: 20 }, (_, i) => tmpFileWithContent(`file-${i}.txt`, 'test'));
+    const out = prepareLocalFiles(files);
+    expect(out.ok).toBe(true);
+    expect(out.files).toHaveLength(20);
+  });
+
+  // Verifies the exact 20 MiB boundary for image files: 20 MiB is allowed, 20 MiB + 1 byte is rejected.
+  it('enforces 20 MiB boundary for image files using sparse files', () => {
+    const limit = IMAGE_MAX_SIZE_BYTES;
+    const okImg = tmpSparseFile('photo.png', limit);
+    const okRes = prepareLocalFiles(okImg);
+    expect(okRes.ok).toBe(true);
+
+    const tooBigImg = tmpSparseFile('large.jpg', limit + 1);
+    const errRes = prepareLocalFiles(tooBigImg);
+    expect(errRes.ok).toBe(false);
+    expect(errRes.reason).toMatch(/File too large/i);
+    expect(errRes.reason).toContain('20 MiB');
+  });
+
+  // Verifies that the 20 MiB image limit applies across all supported image extensions case-insensitively.
+  it('applies 20 MiB limit across supported image extensions case-insensitively', () => {
+    const limit = IMAGE_MAX_SIZE_BYTES;
+    for (const ext of ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.PNG', '.JPG']) {
+      const file = tmpSparseFile(`img${ext}`, limit + 1);
+      const res = prepareLocalFiles(file);
+      expect(res.ok).toBe(false);
+      expect(res.reason).toMatch(/File too large/i);
+    }
+  });
+
+  // Verifies the exact 50 MiB boundary for CSV and spreadsheet files: 50 MiB is allowed, 50 MiB + 1 byte is rejected.
+  it('enforces 50 MiB boundary for CSV and spreadsheet files using sparse files', () => {
+    const limit = SPREADSHEET_MAX_SIZE_BYTES;
+    const okCsv = tmpSparseFile('table.csv', limit);
+    const okRes = prepareLocalFiles(okCsv);
+    expect(okRes.ok).toBe(true);
+
+    const tooBigCsv = tmpSparseFile('big_table.csv', limit + 1);
+    const errRes = prepareLocalFiles(tooBigCsv);
+    expect(errRes.ok).toBe(false);
+    expect(errRes.reason).toMatch(/File too large/i);
+    expect(errRes.reason).toContain('50 MiB');
+  });
+
+  // Verifies that the 50 MiB limit applies across all spreadsheet extensions (.csv, .tsv, .xls, .xlsx).
+  it('applies 50 MiB limit across spreadsheet extensions (.csv, .tsv, .xls, .xlsx)', () => {
+    const limit = SPREADSHEET_MAX_SIZE_BYTES;
+    for (const ext of ['.csv', '.tsv', '.xls', '.xlsx']) {
+      const file = tmpSparseFile(`data${ext}`, limit + 1);
+      const res = prepareLocalFiles(file);
+      expect(res.ok).toBe(false);
+      expect(res.reason).toMatch(/File too large/i);
+    }
+  });
+
+  // Verifies the exact 512 MiB boundary for general files (.pdf, .bin, etc.): 512 MiB is allowed, 512 MiB + 1 byte is rejected.
+  it('enforces 512 MiB boundary for all other files using sparse files', () => {
+    const limit = DEFAULT_MAX_SIZE_BYTES;
+    const okDoc = tmpSparseFile('doc.pdf', limit);
+    const okRes = prepareLocalFiles(okDoc);
+    expect(okRes.ok).toBe(true);
+
+    const tooBigDoc = tmpSparseFile('huge.pdf', limit + 1);
+    const errRes = prepareLocalFiles(tooBigDoc);
+    expect(errRes.ok).toBe(false);
+    expect(errRes.reason).toMatch(/File too large/i);
+    expect(errRes.reason).toContain('512 MiB');
+  });
+
+  // Verifies that document token limits (~2M tokens) are left service-side and text files within 512 MiB are not read or tokenized locally.
+  it('leaves 2M-token document limit service-side without tokenizing or reading content', () => {
+    const textFile = tmpSparseFile('large_text.txt', 100 * 1024 * 1024);
+    const res = prepareLocalFiles(textFile);
+    expect(res.ok).toBe(true);
+  });
+
+  // Verifies that relative paths are accepted internally and resolved via path.resolve for backward compatibility.
+  it('resolves relative paths via path.resolve for backward compatibility', () => {
+    const file = tmpFileWithContent('relative-test.txt', 'relative');
+    const relativePath = path.relative(process.cwd(), file);
+    const out = prepareLocalFiles(relativePath);
+    expect(out.ok).toBe(true);
+    expect(out.files[0].sourcePath).toBe(path.resolve(relativePath));
+  });
+
+  // Verifies getMaxFileSize helper correctly routes file types to their size limits.
+  it('returns correct max file size for various file paths', () => {
+    expect(getMaxFileSize('photo.png')).toBe(IMAGE_MAX_SIZE_BYTES);
+    expect(getMaxFileSize('photo.JPEG')).toBe(IMAGE_MAX_SIZE_BYTES);
+    expect(getMaxFileSize('sheet.csv')).toBe(SPREADSHEET_MAX_SIZE_BYTES);
+    expect(getMaxFileSize('sheet.xlsx')).toBe(SPREADSHEET_MAX_SIZE_BYTES);
+    expect(getMaxFileSize('doc.pdf')).toBe(DEFAULT_MAX_SIZE_BYTES);
+    expect(getMaxFileSize('README')).toBe(DEFAULT_MAX_SIZE_BYTES);
   });
 });

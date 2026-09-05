@@ -29,6 +29,15 @@ The public arguments and output columns intentionally match `chatgpt-agent`, but
 - Gemini must run in a foreground tab; this operational constraint intentionally differs from ChatGPT.
 - `source`, protocol completion events, citation richness, and image metadata are site-specific even though Hub normalization returns the same top-level shape.
 
+## Attachment limits
+
+Local attachments passed to `--file` are validated before staging and upload:
+
+- **Count**: At most 10 local files per turn.
+- **Ordinary files**: Up to 100 MiB per file (text, images, documents, archives, unknown types).
+- **Video files**: Up to 2 GiB per file for common video formats (`.mp4`, `.mov`, `.avi`, `.mkv`, `.webm`, etc.).
+- **Site-side & special imports**: Media duration limits (e.g. video/audio duration), internal ZIP inspection, context token window (1M tokens), and special sources (code folders, GitHub repos, Google Drive, NotebookLM) are enforced site-side or require dedicated flows outside direct `--file` uploads.
+
 ## Install
 
 ```bash

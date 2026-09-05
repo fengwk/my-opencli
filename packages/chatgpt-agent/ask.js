@@ -169,7 +169,7 @@ export const askCommand = cli({
   name: 'ask',
   access: 'write',
   description:
-    'Send a prompt to ChatGPT via protocol stream (WS); return text, files, and images for one turn',
+    'Send a prompt to ChatGPT Agent; return text, files, and images for one turn',
   domain: CHATGPT_DOMAIN,
   strategy: Strategy.COOKIE,
   browser: true,
@@ -185,18 +185,18 @@ export const askCommand = cli({
       name: 'timeout',
       type: 'int',
       default: DEFAULT_TIMEOUT_SEC,
-      help: `Max seconds to wait for the protocol turn (default ${DEFAULT_TIMEOUT_SEC})`,
+      help: `Max seconds to wait for the agent turn (default ${DEFAULT_TIMEOUT_SEC})`,
     },
     {
       name: 'file',
       valueRequired: true,
       repeatable: true,
-      help: 'Local file to attach (repeatable: --file a.png --file b.png); comma-separated also ok',
+      help: 'Local file to attach (repeatable up to 20 files: --file "/absolute/path/to/file1" --file "/absolute/path/to/file2"); comma-separated also ok',
     },
     {
       name: 'op',
       valueRequired: true,
-      help: 'Output directory for exported images (default: ~/Pictures/chatgpt-agent)',
+      help: 'Output directory for images and files (default: ~/Pictures/chatgpt-agent)',
     },
   ],
   columns: [
