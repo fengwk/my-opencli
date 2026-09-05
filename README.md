@@ -8,6 +8,7 @@ Personal OpenCLI plugins, installed via the official plugin mechanism.
 |------|------|-------------|
 | `utils` | `packages/utils` | Host-Chrome utilities; `opencli utils scrape` fetches pages in the background by default with my-mcp HTML/markdown cleaning |
 | `chatgpt-agent` | `packages/chatgpt-agent` | Protocol-stream ChatGPT agent (WS text/files/images, sequential upload, DOM file download, official-style image export) |
+| `gemini-agent` | `packages/gemini-agent` | Protocol-stream Gemini agent (StreamGenerate text/images, sequential upload, native generated-image download) |
 | `jimeng-agent` | `packages/jimeng-agent` | Jimeng Agent video drafts (rich `@` mentions, checkpointed prepare/`--submit`, status search, official download) |
 
 ## Requirements (fork)
@@ -23,6 +24,7 @@ These plugins **require an OpenCLI fork**, not stock upstream alone:
 Minimum ranges are the compatibility floor; the verified columns name the paired fork Release that has been published and checked. Package version (`1.8.7-fengwk.9`) and git tag (`fork-v1.8.7-fengwk.9`) are related but not the same string — do not treat the package version as a tag name.
 
 Install and reload **both** the forked CLI and its matching Browser Bridge / Extension. Mismatched CLI/extension pairs will fail at runtime even if the plugin installs cleanly.
+`gemini-agent` specifically requires Browser Bridge `1.0.30` for raw CDP input, network capture, hardened file input, and download lifecycle support.
 
 See your OpenCLI fork’s `FORK.md` for packaging details.
 
@@ -37,16 +39,19 @@ Exact local install from the subplugin package path:
 REPO="$(pwd)"
 
 opencli plugin uninstall chatgpt-agent 2>/dev/null || true
+opencli plugin uninstall gemini-agent 2>/dev/null || true
 opencli plugin uninstall jimeng-agent 2>/dev/null || true
 opencli plugin uninstall utils 2>/dev/null || true
 # Local installs use the standalone subplugin path (not the monorepo root).
 opencli plugin install "${REPO}/packages/chatgpt-agent"
+opencli plugin install "${REPO}/packages/gemini-agent"
 opencli plugin install "${REPO}/packages/jimeng-agent"
 opencli plugin install "${REPO}/packages/utils"
 
 # verify
 opencli plugin list
 opencli chatgpt-agent ask --help
+opencli gemini-agent ask --help
 opencli jimeng-agent video --help
 opencli utils scrape --help
 ```
@@ -60,6 +65,8 @@ Install individual subplugins from this GitHub repo:
 ```bash
 opencli plugin uninstall chatgpt-agent 2>/dev/null || true
 opencli plugin install github:fengwk/my-opencli/chatgpt-agent
+opencli plugin uninstall gemini-agent 2>/dev/null || true
+opencli plugin install github:fengwk/my-opencli/gemini-agent
 opencli plugin uninstall jimeng-agent 2>/dev/null || true
 opencli plugin install github:fengwk/my-opencli/jimeng-agent
 opencli plugin uninstall utils 2>/dev/null || true
@@ -67,6 +74,7 @@ opencli plugin install github:fengwk/my-opencli/utils
 
 opencli plugin list
 opencli chatgpt-agent ask --help
+opencli gemini-agent ask --help
 opencli jimeng-agent video --help
 opencli utils scrape --help
 ```
@@ -110,6 +118,12 @@ opencli chatgpt-agent ask '用一句话说明今天天气如何' --timeout 180
 
 # continue session
 opencli chatgpt-agent ask '继续' --session <conversationId>
+
+# Gemini text / image (protocol StreamGenerate)
+opencli gemini-agent ask '用一句话说明 Docker 是做什么的' --timeout 180
+opencli gemini-agent ask '画一只坐在窗台上的橘猫' --op ~/Pictures/gemini-agent
+opencli gemini-agent ask '概括附件' --file ./notes.txt
+opencli gemini-agent ask '继续补充两点' --session <conversationId>
 
 # multi file (repeatable flags)
 opencli chatgpt-agent ask '读这两个附件并概括' \

@@ -2,7 +2,7 @@
   "name": "my-opencli",
   "version": "0.1.36",
   "opencli": ">=1.8.7",
-  "description": "Personal OpenCLI plugins (chatgpt-agent, jimeng-agent, utils)",
+  "description": "Personal OpenCLI plugins (chatgpt-agent, gemini-agent, jimeng-agent, utils)",
   "plugins": {
     "utils": {
       "path": "packages/utils",
@@ -13,6 +13,12 @@
     "chatgpt-agent": {
       "path": "packages/chatgpt-agent",
       "description": "Protocol-stream ChatGPT agent: WS capture, sequential upload, file/image export",
+      "version": "0.1.36",
+      "opencli": ">=1.8.7"
+    },
+    "gemini-agent": {
+      "path": "packages/gemini-agent",
+      "description": "Protocol-stream Gemini agent: StreamGenerate capture, sequential attachment upload, generated-image download",
       "version": "0.1.36",
       "opencli": ">=1.8.7"
     },
