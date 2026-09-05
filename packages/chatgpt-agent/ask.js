@@ -39,7 +39,7 @@ import {
 } from './src/image-export.js';
 import { collectDownloadsToOutputDir } from './src/artifact-collect.js';
 import {
-  ensureNotGenerating,
+  ensureIdleSurfaceWithRecovery,
   recoverChatSurfaceAfterFailure,
 } from './src/session-recovery.js';
 
@@ -269,11 +269,13 @@ export const askCommand = cli({
     }
 
     // Previous failed turns may leave Thinking / stop-button active. Wait or stop
-    // before sending, otherwise the next prompt fills the composer but cannot submit.
-    const preSendGen = await ensureNotGenerating(page, {
+    // before sending; if still generating, perform hard recovery before giving up.
+    const preSendIdle = await ensureIdleSurfaceWithRecovery(page, {
       timeoutSec: Math.min(45, timeoutSec),
+      session,
+      hardReset: bootConversation,
     });
-    if (preSendGen.stillGenerating) {
+    if (!preSendIdle.ok) {
       throw new CommandExecutionError(
         'STILL_GENERATING: previous ChatGPT turn is still active after stop',
         'Open the automation tab, stop generation or open chatgpt.com/new, then retry.',
@@ -449,6 +451,8 @@ export const askCommand = cli({
           expectedCount: artifacts.images.length,
           outputDir: managedOutputDir,
           settleMs: 1200,
+          pollIterations: 60,
+          canContinue: () => remainingMs() >= 2_000,
           // Caller owns route validation: build the reload hook only for a
           // verified /c/<id> conversation URL. At most one reload happens in
           // the dedicated automation tab when the first visual export has no
@@ -470,6 +474,27 @@ export const askCommand = cli({
       }
 
       assertSuccessfulImageExports(artifacts, downloads);
+
+      // Successful image turns may leave the web UI in a lagging "Thinking" / stop state
+      // even after protocol stream and DOM export finish. Run bounded idle recovery so subsequent
+      // turns are not blocked. Never discard obtained artifacts if cleanup warns or fails.
+      if ((artifacts.images || []).length > 0 && remainingMs() >= 15_000) {
+        try {
+          const cleanupBudgetSec = Math.min(10, Math.max(2, Math.floor((remainingMs() - 5_000) / 1000)));
+          const cleanup = await ensureIdleSurfaceWithRecovery(page, {
+            timeoutSec: cleanupBudgetSec,
+            session,
+            hardReset: bootConversation,
+          });
+          if (!cleanup.ok && process.env.OPENCLI_VERBOSE) {
+            console.error('[chatgpt-agent] post-image idle recovery warning: surface still not idle after cleanup');
+          }
+        } catch (err) {
+          if (process.env.OPENCLI_VERBOSE) {
+            console.error(`[chatgpt-agent] post-image idle cleanup warning: ${err?.message || err}`);
+          }
+        }
+      }
 
       if (process.env.OPENCLI_VERBOSE && downloads.length) {
         console.error(
