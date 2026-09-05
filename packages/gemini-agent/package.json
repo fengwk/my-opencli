@@ -1,0 +1,10 @@
+{
+  "name": "opencli-plugin-gemini-agent",
+  "version": "0.1.36",
+  "private": true,
+  "type": "module",
+  "description": "Protocol-stream Gemini agent for OpenCLI (StreamGenerate text/images + human-like upload/export)",
+  "peerDependencies": {
+    "@jackwener/opencli": ">=1.8.7"
+  }
+}
