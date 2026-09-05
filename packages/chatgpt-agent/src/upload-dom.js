@@ -153,10 +153,24 @@ function mimeFromPath(filePath) {
   return 'application/octet-stream';
 }
 
-/**
- * @param {string|string[]|undefined} fileArg
- * @returns {{ ok: true, files: Array<{ nodePath: string, browserPath: string, name: string }> } | { ok: false, reason: string }}
- */
+export const MAX_ATTACHMENT_COUNT = 20;
+export const IMAGE_MAX_SIZE_BYTES = 20 * 1024 * 1024;
+export const SPREADSHEET_MAX_SIZE_BYTES = 50 * 1024 * 1024;
+export const DEFAULT_MAX_SIZE_BYTES = 512 * 1024 * 1024;
+
+const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp']);
+const SPREADSHEET_EXTENSIONS = new Set(['.csv', '.tsv', '.xls', '.xlsx']);
+
+export function getMaxFileSize(filePath) {
+  const ext = path.extname(String(filePath)).toLowerCase();
+  if (IMAGE_EXTENSIONS.has(ext)) return IMAGE_MAX_SIZE_BYTES;
+  if (SPREADSHEET_EXTENSIONS.has(ext)) return SPREADSHEET_MAX_SIZE_BYTES;
+  const mime = mimeFromPath(filePath);
+  if (mime.startsWith('image/')) return IMAGE_MAX_SIZE_BYTES;
+  if (mime === 'text/csv') return SPREADSHEET_MAX_SIZE_BYTES;
+  return DEFAULT_MAX_SIZE_BYTES;
+}
+
 /**
  * Accept:
  *   - undefined / ''
@@ -164,6 +178,9 @@ function mimeFromPath(filePath) {
  *   - comma-separated string
  *   - string[] from repeatable --file a --file b
  *   - mixed (array items may themselves be comma-separated)
+ *
+ * @param {string|string[]|undefined} fileArg
+ * @returns {{ ok: true, files: Array<{ nodePath: string, browserPath: string, name: string }> } | { ok: false, reason: string }}
  */
 export function prepareLocalFiles(fileArg) {
   if (fileArg == null || fileArg === '') return { ok: true, files: [] };
@@ -181,14 +198,27 @@ export function prepareLocalFiles(fileArg) {
   };
   push(fileArg);
 
+  if (raw.length > MAX_ATTACHMENT_COUNT) {
+    return {
+      ok: false,
+      reason: `Too many attachments (${raw.length}); maximum is ${MAX_ATTACHMENT_COUNT}`,
+    };
+  }
+
   const files = [];
   for (const item of raw) {
     const nodePath = path.resolve(item);
     if (!fs.existsSync(nodePath)) return { ok: false, reason: `File not found: ${nodePath}` };
     const st = fs.statSync(nodePath);
     if (!st.isFile()) return { ok: false, reason: `Not a file: ${nodePath}` };
-    if (st.size > 100 * 1024 * 1024) {
-      return { ok: false, reason: `File too large (${(st.size / 1024 / 1024).toFixed(1)} MB)` };
+    const limit = getMaxFileSize(nodePath);
+    if (st.size > limit) {
+      const limitMiB = Math.round(limit / (1024 * 1024));
+      const actualMiB = (st.size / (1024 * 1024)).toFixed(1);
+      return {
+        ok: false,
+        reason: `File too large (${actualMiB} MiB exceeds ${limitMiB} MiB limit): ${nodePath}`,
+      };
     }
     // Stage onto a Windows-visible path so setFileInput works (official path).
     const staged = stageForBrowserUpload(nodePath);

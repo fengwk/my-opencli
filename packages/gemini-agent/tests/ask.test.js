@@ -22,10 +22,17 @@ describe('gemini-agent/ask command registration', () => {
     expect(chatgptAskCommand.siteSession).toBeUndefined();
   });
 
-  it('defaults the protocol turn timeout to 1200 seconds', () => {
+  it('defaults turn timeout to 1200 seconds with agent-facing help', () => {
     const timeout = askCommand.args.find((arg) => arg.name === 'timeout');
     expect(timeout).toMatchObject({ type: 'int', default: 1200 });
     expect(timeout.help).toContain('default 1200');
+    expect(timeout.help).not.toContain('protocol turn');
+  });
+
+  it('uses agent-facing description without protocol-internal phrasing', () => {
+    expect(askCommand.description).not.toContain('StreamGenerate');
+    expect(askCommand.description).not.toContain('batchexecute');
+    expect(askCommand.description).toMatch(/Gemini/i);
   });
 
   it('exposes the same result columns as chatgpt-agent ask', () => {
@@ -60,11 +67,17 @@ describe('gemini-agent/ask command registration', () => {
     expect(file).toMatchObject({ repeatable: true, valueRequired: true });
   });
 
-  // Public path examples must not depend on the caller's current working directory.
-  it('uses generic absolute paths in attachment help', () => {
+  // Public path examples must not depend on the caller's current working directory and should state max limit.
+  it('uses generic absolute paths and documents max 10 in attachment help', () => {
     const file = askCommand.args.find((arg) => arg.name === 'file');
-    expect(file.help).toContain('--file /absolute/path/to/a.png');
-    expect(file.help).toContain('--file /absolute/path/to/b.png');
+    expect(file.help).toContain('--file "/absolute/path/to/a.png"');
+    expect(file.help).toContain('--file "/absolute/path/to/b.png"');
+    expect(file.help).toMatch(/up to 10 files/i);
+  });
+
+  it('keeps --op option scoped to image output directory', () => {
+    const op = askCommand.args.find((arg) => arg.name === 'op');
+    expect(op.help).toContain('exported images');
   });
 
   it('rejects malformed session values before browser navigation', async () => {
