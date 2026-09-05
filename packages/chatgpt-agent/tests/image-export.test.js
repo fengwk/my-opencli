@@ -40,6 +40,7 @@ vi.mock('@jackwener/opencli/utils', () => ({
 
 const {
   exportNewImagesLikeOfficial,
+  isContinueAllowed,
   makeInspectPlaceholder,
   runImageExportAttempt,
 } = await import('../src/image-export.js');
@@ -520,5 +521,147 @@ describe('exportNewImagesLikeOfficial', () => {
     expect(results[0].downloaded).toBe(false);
     expect(results[0].error).toBe('sparse-placeholder-rejected');
     expect(saveBase64ToFile).not.toHaveBeenCalled();
+  });
+
+  // When an image takes longer than the legacy 12 poll iterations to appear in the DOM (e.g. at poll 15),
+  // passing an extended pollIterations (e.g. 30) allows exportNewImagesLikeOfficial to capture and save the asset.
+  it('captures and downloads an image that appears after the legacy 12 poll iterations when pollIterations is expanded', async () => {
+    const outputDir = tmpOutputDir();
+    const page = pageReturningInspection(OPAQUE_STATS);
+
+    let pollCount = 0;
+    getChatGPTVisibleImageUrls.mockImplementation(async () => {
+      pollCount += 1;
+      if (pollCount >= 15) {
+        return [OPAQUE_BLACK_DATA_URL];
+      }
+      return [];
+    });
+
+    getChatGPTImageAssets.mockResolvedValue([{
+      url: OPAQUE_BLACK_DATA_URL,
+      dataUrl: OPAQUE_BLACK_DATA_URL,
+      mimeType: 'image/png',
+      width: 480,
+      height: 480,
+    }]);
+
+    const results = await exportNewImagesLikeOfficial(page, {
+      beforeUrls: [],
+      expectedCount: 1,
+      outputDir,
+      settleMs: 0,
+      pollIterations: 30,
+    });
+
+    expect(pollCount).toBe(15);
+    expect(results[0].downloaded).toBe(true);
+    expect(results[0].url).toBe(OPAQUE_BLACK_DATA_URL);
+    expect(saveBase64ToFile).toHaveBeenCalledTimes(1);
+  });
+
+  // The canContinue predicate (e.g. remainingMs() >= 2000) halts polling early before user timeout expires.
+  it('halts polling early when canContinue budget gate returns false', async () => {
+    const outputDir = tmpOutputDir();
+    const page = pageReturningInspection(OPAQUE_STATS);
+
+    let pollCount = 0;
+    getChatGPTVisibleImageUrls.mockImplementation(async () => {
+      pollCount += 1;
+      return [];
+    });
+
+    let gateCalls = 0;
+    const canContinue = vi.fn(() => {
+      gateCalls += 1;
+      return gateCalls < 3;
+    });
+
+    const results = await exportNewImagesLikeOfficial(page, {
+      beforeUrls: [],
+      expectedCount: 1,
+      outputDir,
+      settleMs: 0,
+      pollIterations: 60,
+      canContinue,
+    });
+
+    expect(results[0].downloaded).toBe(false);
+    expect(results[0].error).toBe('no-new-visible-image-urls');
+    expect(pollCount).toBeLessThanOrEqual(3);
+    expect(saveBase64ToFile).not.toHaveBeenCalled();
+  });
+
+  // Verify backwards compatibility: default polling stops at DEFAULT_POLL_ITERATIONS (12) when unspecified.
+  it('defaults to 12 poll iterations when pollIterations is not specified', async () => {
+    const outputDir = tmpOutputDir();
+    const page = pageReturningInspection(OPAQUE_STATS);
+
+    let pollCount = 0;
+    getChatGPTVisibleImageUrls.mockImplementation(async () => {
+      pollCount += 1;
+      return [];
+    });
+
+    const results = await exportNewImagesLikeOfficial(page, {
+      beforeUrls: [],
+      expectedCount: 1,
+      outputDir,
+      settleMs: 0,
+    });
+
+    expect(pollCount).toBe(12);
+    expect(results[0].downloaded).toBe(false);
+    expect(results[0].error).toBe('no-new-visible-image-urls');
+  });
+
+  // Budget gate fail-closed: returning undefined or non-boolean halts polling immediately.
+  it('halts polling immediately when canContinue returns undefined (fail-closed)', async () => {
+    const outputDir = tmpOutputDir();
+    const page = pageReturningInspection(OPAQUE_STATS);
+
+    let pollCount = 0;
+    getChatGPTVisibleImageUrls.mockImplementation(async () => {
+      pollCount += 1;
+      return [];
+    });
+
+    const canContinue = vi.fn(() => undefined);
+
+    const results = await exportNewImagesLikeOfficial(page, {
+      beforeUrls: [],
+      expectedCount: 1,
+      outputDir,
+      settleMs: 0,
+      pollIterations: 60,
+      canContinue,
+    });
+
+    expect(results[0].downloaded).toBe(false);
+    expect(results[0].error).toBe('no-new-visible-image-urls');
+    expect(pollCount).toBe(0);
+    expect(canContinue).toHaveBeenCalledTimes(1);
+    expect(saveBase64ToFile).not.toHaveBeenCalled();
+  });
+});
+
+describe('isContinueAllowed', () => {
+  it('returns true when predicate is omitted or null', () => {
+    expect(isContinueAllowed(undefined)).toBe(true);
+    expect(isContinueAllowed(null)).toBe(true);
+  });
+
+  it('returns true when predicate explicitly returns true', () => {
+    expect(isContinueAllowed(() => true)).toBe(true);
+  });
+
+  it('returns false for undefined, false, truthy non-boolean, or thrown errors (fail-closed)', () => {
+    expect(isContinueAllowed(() => false)).toBe(false);
+    expect(isContinueAllowed(() => undefined)).toBe(false);
+    expect(isContinueAllowed(() => null)).toBe(false);
+    expect(isContinueAllowed(() => 1)).toBe(false);
+    expect(isContinueAllowed(() => 'true')).toBe(false);
+    expect(isContinueAllowed(() => { throw new Error('boom'); })).toBe(false);
+    expect(isContinueAllowed('not-a-fn')).toBe(false);
   });
 });
