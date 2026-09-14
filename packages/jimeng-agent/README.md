@@ -126,7 +126,12 @@ Failure phase: `checkpoint`. This gate does **not** reopen or re-check the Auto 
 
 ## Status / download
 
-Search history by asset id or prompt snippet, optionally download the newest ready video:
+Search history by asset id or prompt snippet, optionally download the newest ready video.
+
+The history search box now lives in the page header (portaled out of the
+record-list container). The adapter still binds that unique visible input to
+the unique visible `[data-record-list-container]` / `record-list-container`
+feed, including the legacy nested layout.
 
 ```bash
 # Search only

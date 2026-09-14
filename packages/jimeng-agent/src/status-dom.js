@@ -40,14 +40,38 @@ const RECORD_ROOT_WRAPPER_HINTS_RE_SOURCE = '^(list|virtual|item|content|contain
 const ASSET_ID_RE_SOURCE = '^[0-9a-fA-F]{16}$';
 const LABELED_ASSET_ID_RE_SOURCE = '资产编号\\s*[：:]\\s*([0-9a-fA-F]{16})';
 const EMPTY_STATE_TEXT = '暂未找到相关内容';
+const EMPTY_STATE_PREFIX_BUDGET = 16;
 const SKELETON_SELECTOR = '#ssr-generated-record-feed-skeleton, [id*="generated-record-feed-skeleton"], [class*="record-feed-skeleton"]';
 const HISTORY_ROOT_SELECTOR = '[class*="record-list-container"]';
+// Prefer the semantic data hook when present; keep the class token as fallback.
+const HISTORY_FEED_SELECTOR = [
+  '[data-record-list-container="true"]',
+  HISTORY_ROOT_SELECTOR,
+].join(', ');
 const TASK_SEARCH_INPUT_SELECTOR = [
   'input[placeholder="搜索"]',
   'input[placeholder*="搜索"]',
+  '[class*="search-input"] input',
+  '[class*="filter-container"] input',
   '.search-input-BUcnKA input',
   '.filter-container-yW2QOH input',
 ].join(', ');
+// The 2026-09 redesign portals the history search box into the page header, so
+// the input is no longer a DOM descendant of the record feed. Resolve by
+// closest() first (legacy nested layout), then the unique visible feed.
+const HISTORY_SCOPE_RESOLVE_BODY = `
+  const resolveHistoryScope = (input, visibleFn) => {
+    const feedSelector = ${JSON.stringify(HISTORY_FEED_SELECTOR)};
+    if (input && typeof input.closest === 'function') {
+      const owner = input.closest(feedSelector);
+      if (owner) return owner;
+    }
+    const feeds = [...document.querySelectorAll(feedSelector)];
+    const visibleFeeds = typeof visibleFn === 'function' ? feeds.filter(visibleFn) : feeds;
+    if (visibleFeeds.length === 1) return visibleFeeds[0];
+    return feeds.length === 1 ? feeds[0] : null;
+  };
+`;
 
 export { JIMENG_DOMAIN };
 
@@ -153,6 +177,14 @@ export function isJimengTaskListReady(state) {
     && state?.recordListVisible
     && !state?.skeletonVisible,
   );
+}
+
+export function isJimengEmptyStateText(value) {
+  const text = String(value ?? '').replace(/\s+/g, '').trim();
+  if (!text) return false;
+  if (text === EMPTY_STATE_TEXT) return true;
+  return text.includes(EMPTY_STATE_TEXT)
+    && text.length <= EMPTY_STATE_TEXT.length + EMPTY_STATE_PREFIX_BUDGET;
 }
 
 // In-page helpers shared by the settle wait and the record scan. `record-*`
@@ -459,10 +491,11 @@ async function waitForTaskListReady(page, { timeoutMs = 12_000 } = {}) {
           && rect.width > 0
           && rect.height > 0;
       };
+      ${HISTORY_SCOPE_RESOLVE_BODY}
       const inputs = [...document.querySelectorAll(${JSON.stringify(TASK_SEARCH_INPUT_SELECTOR)})]
         .filter(visible);
       const historyRoot = inputs.length === 1
-        ? inputs[0].closest(${JSON.stringify(HISTORY_ROOT_SELECTOR)})
+        ? resolveHistoryScope(inputs[0], visible)
         : null;
       const searchInputVisible = inputs.length === 1;
       const recordListVisible = !!historyRoot && visible(historyRoot);
@@ -495,9 +528,10 @@ async function applyTaskPromptFilter(page, searchKey) {
       const rect = el.getBoundingClientRect();
       return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
     };
+    ${HISTORY_SCOPE_RESOLVE_BODY}
     const inputs = [...document.querySelectorAll(${JSON.stringify(TASK_SEARCH_INPUT_SELECTOR)})].filter(visible);
     if (inputs.length !== 1) return { ok: false };
-    const historyRoot = inputs[0].closest(${JSON.stringify(HISTORY_ROOT_SELECTOR)});
+    const historyRoot = resolveHistoryScope(inputs[0], visible);
     if (!historyRoot || !visible(historyRoot)) return { ok: false };
     inputs[0].setAttribute('data-opencli-jimeng-search', ${JSON.stringify(marker)});
     historyRoot.setAttribute('data-opencli-jimeng-history', ${JSON.stringify(marker)});
@@ -536,6 +570,7 @@ export async function waitForQuerySettled(
   while (Date.now() < deadline) {
     const state = await page.evaluate(`(() => {
       ${RECORD_ROOT_HELPERS_BODY}
+      ${HISTORY_SCOPE_RESOLVE_BODY}
       const markedInputs = [...document.querySelectorAll('[data-opencli-jimeng-search="${marker}"]')];
       const markedScopes = [...document.querySelectorAll('[data-opencli-jimeng-history="${marker}"]')];
       const input = markedInputs.length === 1 ? markedInputs[0] : null;
@@ -545,7 +580,7 @@ export async function waitForQuerySettled(
         && scope
         && visibleEl(input)
         && visibleEl(scope)
-        && input.closest(${JSON.stringify(HISTORY_ROOT_SELECTOR)}) === scope
+        && resolveHistoryScope(input, visibleEl) === scope
       );
       const inputValue = input ? String(input.value ?? '') : '';
       const skeletonVisible = scopeReady && [...scope.querySelectorAll(${JSON.stringify(SKELETON_SELECTOR)})]
@@ -553,9 +588,14 @@ export async function waitForQuerySettled(
       const texts = scopeReady ? collectRecordRoots(scope)
         .map((el) => (el.innerText || el.textContent || '').trim())
         .filter(Boolean) : [];
+      const emptyCanon = ${JSON.stringify(EMPTY_STATE_TEXT)};
       const emptyStateVisible = scopeReady && [...scope.querySelectorAll('div, span, p, li')]
         .filter(visibleEl)
-        .some((el) => String(el.innerText || el.textContent || '').replace(/\\s+/g, '').trim() === ${JSON.stringify(EMPTY_STATE_TEXT)});
+        .some((el) => {
+          const text = String(el.innerText || el.textContent || '').replace(/\\s+/g, '').trim();
+          return text === emptyCanon
+            || (text.includes(emptyCanon) && text.length <= ${EMPTY_STATE_TEXT.length + EMPTY_STATE_PREFIX_BUDGET});
+        });
       return { scopeReady, inputValue, skeletonVisible, texts, emptyStateVisible };
     })()`).catch(() => null);
     if (!state) {
@@ -742,11 +782,12 @@ function inferTaskTypeFromItem(item, mediaUrl) {
 
 async function resetTaskListToLatest(page, { marker } = {}) {
   const reset = await page.evaluate(`(() => {
+    ${HISTORY_SCOPE_RESOLVE_BODY}
     const inputs = [...document.querySelectorAll('[data-opencli-jimeng-search="${marker}"]')];
     const roots = [...document.querySelectorAll('[data-opencli-jimeng-history="${marker}"]')];
     if (inputs.length !== 1 || roots.length !== 1) return false;
     const root = roots[0];
-    if (inputs[0].closest(${JSON.stringify(HISTORY_ROOT_SELECTOR)}) !== root) return false;
+    if (resolveHistoryScope(inputs[0]) !== root) return false;
     const container = root.querySelector('[class*="record-virtual-list"]') || root;
     container.scrollTop = 0;
     return true;
@@ -823,6 +864,7 @@ export async function scrollTaskList(page, { marker }) {
         && rect.width > 0
         && rect.height > 0;
     };
+    ${HISTORY_SCOPE_RESOLVE_BODY}
     const inputs = [...document.querySelectorAll('[data-opencli-jimeng-search="${marker}"]')];
     const roots = [...document.querySelectorAll('[data-opencli-jimeng-history="${marker}"]')];
     if (inputs.length !== 1 || roots.length !== 1) return { kind: 'scope-lost' };
@@ -830,7 +872,7 @@ export async function scrollTaskList(page, { marker }) {
     if (
       !visible(inputs[0])
       || !visible(root)
-      || inputs[0].closest(${JSON.stringify(HISTORY_ROOT_SELECTOR)}) !== root
+      || resolveHistoryScope(inputs[0], visible) !== root
     ) {
       return { kind: 'scope-lost' };
     }
@@ -845,6 +887,7 @@ export async function scrollTaskList(page, { marker }) {
 export function buildRecordScanExpression(marker = '') {
   return `(() => {
     ${RECORD_ROOT_HELPERS_BODY}
+    ${HISTORY_SCOPE_RESOLVE_BODY}
     const inputs = [...document.querySelectorAll('[data-opencli-jimeng-search="${marker}"]')];
     const scopes = [...document.querySelectorAll('[data-opencli-jimeng-history="${marker}"]')];
     if (inputs.length !== 1 || scopes.length !== 1) {
@@ -854,7 +897,7 @@ export function buildRecordScanExpression(marker = '') {
     if (
       !visibleEl(inputs[0])
       || !visibleEl(scope)
-      || inputs[0].closest(${JSON.stringify(HISTORY_ROOT_SELECTOR)}) !== scope
+      || resolveHistoryScope(inputs[0], visibleEl) !== scope
     ) return { ok: false, reason: 'scope-lost', items: [] };
     const roots = collectRecordRoots(scope);
     const items = roots.map((el) => {
