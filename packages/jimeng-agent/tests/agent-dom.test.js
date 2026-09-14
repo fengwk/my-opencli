@@ -501,6 +501,69 @@ describe('jimeng-agent/agent-dom — mention input safety', () => {
   });
 });
 
+describe('jimeng-agent/agent-dom — current Jimeng upload contract', () => {
+  it('matches both the current remove control element and the legacy remove attribute', () => {
+    const selector = sourceBetween(
+      'const REMOVE_CONTROL_SELECTOR = [',
+      'const UPLOAD_BRIDGE_KEY',
+    );
+    expect(selector).toContain('[data-reference-remove-button="true"]');
+    expect(selector).toContain('[class*="remove-button-"]:not([class*="remove-button-container"])');
+  });
+
+  it('treats the composer "+" tile as an upload entry so surface readiness no longer requires a resident file input', () => {
+    const probe = sourceBetween(
+      'export async function probeJimengAgentSurface(',
+      'async function openWorkspace(',
+    );
+    expect(probe).toContain('const uploadTiles =');
+    expect(probe).toContain('uploadTileCount: uploadTiles.length');
+    expect(probe).toContain('ready: !!editor && (fileInputs.length > 0 || uploadTiles.length > 0)');
+    expect(probe).not.toContain('ready: !!editor && fileInputs.length > 0');
+  });
+
+  it('suppresses the site file chooser and routes the tile click through the real file input', () => {
+    const bridge = sourceBetween(
+      'async function installUploadBridge(',
+      '/** Mark the newest visible composer "+" upload tile. */',
+    );
+    // File System Access API must be removed so the site falls back to a file input.
+    expect(bridge).toContain('delete window.showOpenFilePicker');
+    expect(bridge).toContain('file-system-access-not-suppressed');
+    // The native picker must be silenced so the CDP assignment can fill the input.
+    expect(bridge).toContain('__opencliJimengFilePickerSuppressed');
+    expect(bridge).toContain('proto.showPicker = function');
+    expect(bridge).toContain('proto.click = function');
+    expect(bridge).toContain("String(this.type).toLowerCase() === 'file'");
+
+    const acquire = sourceBetween(
+      'async function acquireUploadSlot(',
+      'async function markVisibleUploadAlertBaseline(',
+    );
+    // Legacy input first, then the tile click and its synthetic retry.
+    expect(acquire).toContain("via: 'existing-input'");
+    expect(acquire).toContain("via: 'tile-click'");
+    expect(acquire).toContain("via: 'tile-synthetic'");
+    expect(acquire).toContain('await installUploadBridge(page)');
+    expect(acquire).toContain('dispatchUploadTileSequence(page, tile.selector)');
+  });
+
+  it('replays a full pointer/mouse sequence so React accepts the tile activation', () => {
+    const sequence = sourceBetween(
+      'async function dispatchUploadTileSequence(',
+      'async function waitForUploadFileInput(',
+    );
+    for (const event of ['pointerover', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+      expect(sequence).toContain(`fire('${event}'`);
+    }
+    expect(sequence).toContain('bubbles: true');
+  });
+
+  it('no longer asks the caller to avoid clicking the upload tile', () => {
+    expect(agentDomSource).not.toContain('Do NOT click the dock "+" before setFileInput');
+  });
+});
+
 describe('jimeng-agent/agent-dom — prompt structure validation', () => {
   it('preserves empty lines while normalizing mention markers and incidental whitespace', () => {
     expect(normalizePromptValidationLines('prefix\n\n@图片1 作为参考\n@视频1')).toEqual([
