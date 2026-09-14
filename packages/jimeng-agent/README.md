@@ -51,6 +51,21 @@ OPENCLI_BROWSER_COMMAND_TIMEOUT=300 opencli jimeng-agent video \
 Reference flags are repeatable. Labels are assigned independently by media kind
 and upload order: `图片1`, `图片2`, `视频1`, `音频1`, and so on.
 
+## Reference upload contract
+
+Jimeng changed how the composer accepts references. The adapter supports both
+generations and picks whichever the live page exposes:
+
+| Generation | Upload entry | How the adapter fills it |
+|---|---|---|
+| Current | Composer `+` tile (`reference-upload-*`); the site opens a chooser on click | The adapter removes `window.showOpenFilePicker` so the site takes its own `<input type="file">` fallback, silences the native picker on that input, clicks the tile, then assigns the file with CDP `DOM.setFileInputFiles` |
+| Legacy | Hidden `input[type="file"]` always present in the dock | The adapter marks the resident input and assigns the file directly |
+
+Only the site's own fallback input is used — nothing is uploaded outside the
+visible UI, and no file chooser is intercepted at the browser-protocol level.
+The reference card remove control is likewise resolved through both contracts
+(`[data-reference-remove-button="true"]` or `.remove-button-*`).
+
 Each `video` run auto-generates a 16-char hex `assetId`, embeds `资产编号：<id>` into
 the agent prompt, and returns it in the CLI result for later `status --search_key`.
 
@@ -111,7 +126,12 @@ Failure phase: `checkpoint`. This gate does **not** reopen or re-check the Auto 
 
 ## Status / download
 
-Search history by asset id or prompt snippet, optionally download the newest ready video:
+Search history by asset id or prompt snippet, optionally download the newest ready video.
+
+The history search box now lives in the page header (portaled out of the
+record-list container). The adapter still binds that unique visible input to
+the unique visible `[data-record-list-container]` / `record-list-container`
+feed, including the legacy nested layout.
 
 ```bash
 # Search only
