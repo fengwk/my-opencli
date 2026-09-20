@@ -1,6 +1,6 @@
 {
   "name": "opencli-plugin-jimeng-agent",
-  "version": "0.1.43",
+  "version": "0.1.44",
   "private": true,
   "type": "module",
   "description": "Jimeng Agent video drafts with Canvas preparation, exact resource correlation, status search and official download",
