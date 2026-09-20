@@ -9,6 +9,7 @@ import {
   normalizeCanvasResourceArgs,
 } from './src/canvas-resource-contract.js';
 import { JIMENG_DOMAIN } from './src/canvas-contract.js';
+import { cliColumns, fromCliArgs, toCliRows } from './src/cli-public.js';
 import { runJimengCanvasStatus } from './src/canvas-resource-dom.js';
 
 export const canvasStatusCommand = cli({
@@ -30,18 +31,18 @@ export const canvasStatusCommand = cli({
       help: 'Existing canvas project id or full AI Canvas URL',
     },
     {
-      name: 'asset_id',
+      name: 'asset-id',
       valueRequired: true,
-      help: 'Optional 16-character assetId returned by canvas-video for exact turn/resource correlation',
+      help: 'Optional 16-character asset-id returned by canvas-video for exact turn/resource correlation',
     },
     {
-      name: 'max_pages',
+      name: 'max-pages',
       type: 'int',
       default: DEFAULT_CANVAS_EVENT_MAX_PAGES,
       help: `Maximum pages to read per session/event list (default ${DEFAULT_CANVAS_EVENT_MAX_PAGES})`,
     },
   ],
-  columns: [
+  columns: cliColumns([
     'status',
     'projectId',
     'projectTitle',
@@ -69,12 +70,12 @@ export const canvasStatusCommand = cli({
     'eventsScanned',
     'scanComplete',
     'canvasUrl',
-  ],
+  ]),
   validateArgs: (kwargs) => {
-    normalizeCanvasResourceArgs(kwargs);
+    normalizeCanvasResourceArgs(fromCliArgs(kwargs));
   },
   func: async (page, kwargs) => {
-    const canonical = normalizeCanvasResourceArgs(kwargs);
-    return runJimengCanvasStatus(page, canonical);
+    const canonical = normalizeCanvasResourceArgs(fromCliArgs(kwargs));
+    return toCliRows(await runJimengCanvasStatus(page, canonical));
   },
 });

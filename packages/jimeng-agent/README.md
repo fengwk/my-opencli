@@ -46,7 +46,7 @@ OPENCLI_BROWSER_COMMAND_TIMEOUT=300 opencli jimeng-agent canvas-video \
   --prompt '请以@图片1作为人物形象参考。' \
   --duration 5 \
   --ratio 16:9 \
-  --model_version seedance2.0 \
+  --model-version seedance2.0 \
   --submit 0
 
 # 2. Formally submit in a new canvas (--submit 1)
@@ -56,7 +56,7 @@ OPENCLI_BROWSER_COMMAND_TIMEOUT=300 opencli jimeng-agent canvas-video \
   --prompt '请以@图片1作为人物形象参考。' \
   --duration 5 \
   --ratio 16:9 \
-  --model_version seedance2.0 \
+  --model-version seedance2.0 \
   --submit 1
 
 # 3. Formally submit in an existing canvas by project id
@@ -65,7 +65,7 @@ OPENCLI_BROWSER_COMMAND_TIMEOUT=300 opencli jimeng-agent canvas-video \
   --prompt '镜头推近，展现细节。' \
   --duration 5 \
   --ratio 16:9 \
-  --model_version seedance2.0 \
+  --model-version seedance2.0 \
   --submit 1
 ```
 
@@ -101,7 +101,7 @@ Filter to the resources created from one exact `canvas-video` submission:
 ```bash
 opencli jimeng-agent canvas-status \
   --canvas <projectId> \
-  --asset_id 9ef879de0504e787 \
+  --asset-id 9ef879de0504e787 \
   -f json
 ```
 
@@ -138,7 +138,7 @@ OPENCLI_BROWSER_COMMAND_TIMEOUT=300 opencli jimeng-agent video \
   --prompt '请以@图片1作为人物形象参考。' \
   --duration 5 \
   --ratio 16:9 \
-  --model_version seedance2.0 \
+  --model-version seedance2.0 \
   --submit 0
 
 # Formal submit after the same checkpoint passes
@@ -149,9 +149,9 @@ OPENCLI_BROWSER_COMMAND_TIMEOUT=300 opencli jimeng-agent video \
   --prompt '请以@图片1作为人物形象，参考@视频1的运镜。' \
   --duration 5 \
   --ratio 16:9 \
-  --model_version seedance2.0 \
+  --model-version seedance2.0 \
   --submit 1
-# Result includes auto-generated assetId (16-char hex). Use it with status --search_key.
+# Result includes auto-generated assetId (16-char hex). Use it with status --search-key.
 ```
 
 Reference flags are repeatable. Labels are assigned independently by media kind
@@ -173,7 +173,7 @@ The reference card remove control is likewise resolved through both contracts
 (`[data-reference-remove-button="true"]` or `.remove-button-*`).
 
 Each `video` run auto-generates a 16-char hex `assetId`, embeds `资产编号：<id>` into
-the agent prompt, and returns it in the CLI result for later `status --search_key`.
+the agent prompt, and returns it in the CLI result for later `status --search-key`.
 
 ## Two-phase gates
 
@@ -243,13 +243,13 @@ feed, including the legacy nested layout.
 # Search only
 opencli jimeng-agent status \
   --workspace <workspace-id> \
-  --search_key b7e4f19a2c0d5e68 \
+  --search-key b7e4f19a2c0d5e68 \
   --download 0
 
 # Search + download newest ready video
 opencli jimeng-agent status \
   --workspace <workspace-id> \
-  --search_key b7e4f19a2c0d5e68 \
+  --search-key b7e4f19a2c0d5e68 \
   --download 1 \
   --output ~/Downloads/jimeng-agent
 ```

@@ -6,6 +6,7 @@
 import { cli, Strategy } from '@jackwener/opencli/registry';
 
 import { prepareJimengAgentAsk, JIMENG_DOMAIN } from './src/agent-dom.js';
+import { cliColumns, fromCliArgs, toCliRow } from './src/cli-public.js';
 import { normalizeAskArgs } from './src/contract.js';
 import { prepareBrowserReferenceAssets } from './src/media.js';
 
@@ -63,7 +64,7 @@ export const videoCommand = cli({
       help: 'Requested output ratio',
     },
     {
-      name: 'model_version',
+      name: 'model-version',
       valueRequired: true,
       required: true,
       choices: [
@@ -88,7 +89,7 @@ export const videoCommand = cli({
       help: '0 = prepare only after green checkpoint (default); 1 = formally submit generation after checkpoint passes',
     },
   ],
-  columns: [
+  columns: cliColumns([
     'status',
     'workspace',
     'workspaceUrl',
@@ -102,19 +103,19 @@ export const videoCommand = cli({
     'threadId',
     'conversationId',
     'submitRequestCount',
-  ],
+  ]),
   validateArgs: (kwargs) => {
-    normalizeAskArgs(kwargs);
+    normalizeAskArgs(fromCliArgs(kwargs));
   },
   func: async (page, kwargs) => {
-    const canonical = normalizeAskArgs(kwargs);
+    const canonical = normalizeAskArgs(fromCliArgs(kwargs));
     const preflight = prepareBrowserReferenceAssets(canonical);
     try {
       const prepared = await prepareJimengAgentAsk(page, canonical, preflight.assets);
-      return [{
+      return [toCliRow({
         ...prepared,
         uploaded: JSON.stringify(prepared.uploaded),
-      }];
+      })];
     } finally {
       preflight.cleanup();
     }

@@ -19,17 +19,17 @@ describe('jimeng-agent/canvas-status command registration', () => {
   it('exposes exact asset filtering and resource identity columns', () => {
     const byName = new Map(canvasStatusCommand.args.map((arg) => [arg.name, arg]));
     expect(byName.get('canvas')).toMatchObject({ required: true, valueRequired: true });
-    expect(byName.get('asset_id')).toMatchObject({ valueRequired: true });
-    expect(byName.get('max_pages')).toMatchObject({ type: 'int', default: 20 });
+    expect(byName.get('asset-id')).toMatchObject({ valueRequired: true });
+    expect(byName.get('max-pages')).toMatchObject({ type: 'int', default: 20 });
     for (const column of [
       'status',
-      'projectId',
-      'assetId',
-      'turnId',
-      'resourceId',
-      'downloadUrl',
-      'resourceCount',
-      'scanComplete',
+      'project-id',
+      'asset-id',
+      'turn-id',
+      'resource-id',
+      'download-url',
+      'resource-count',
+      'scan-complete',
     ]) {
       expect(canvasStatusCommand.columns).toContain(column);
     }

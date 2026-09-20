@@ -144,11 +144,11 @@ opencli jimeng-agent video \
   --prompt '请以@图片1作为人物形象参考。' \
   --duration 5 \
   --ratio 16:9 \
-  --model_version seedance2.0
+  --model-version seedance2.0
 
 # optional formal submit after checkpoint, then search/download by assetId
 opencli jimeng-agent video ... --submit 1
-opencli jimeng-agent status --workspace <workspace-id> --search_key <assetId> --download 1
+opencli jimeng-agent status --workspace <workspace-id> --search-key <asset-id> --download 1
 
 # prepare in a newly created AI Canvas (default --submit 0) and optionally name it
 opencli jimeng-agent canvas-video \
@@ -157,11 +157,11 @@ opencli jimeng-agent canvas-video \
   --image ./人物.png \
   --prompt '请以@图片1作为人物形象参考。' \
   --ratio 16:9 \
-  --model_version seedance2.0
+  --model-version seedance2.0
 
 # inspect every Canvas resource, or correlate one canvas-video assetId exactly
 opencli jimeng-agent canvas-status --canvas <project-id>
-opencli jimeng-agent canvas-status --canvas <project-id> --asset_id <assetId>
+opencli jimeng-agent canvas-status --canvas <project-id> --asset-id <assetId>
 ```
 
 ### WSL + Windows Chrome

@@ -8,7 +8,7 @@ function validArgs(overrides = {}) {
   return {
     workspace: '11718040705548',
     ratio: '16:9',
-    model_version: 'seedance2.0',
+    'model-version': 'seedance2.0',
     duration: 5,
     retry: 0,
     ...overrides,
@@ -42,11 +42,12 @@ describe('jimeng-agent/video command registration', () => {
 
   it('declares checkpoint and submit outcome columns with prepare-first semantics', () => {
     expect(videoCommand.columns).toContain('submitted');
-    expect(videoCommand.columns).toContain('checkpointOk');
+    expect(videoCommand.columns).toContain('checkpoint-ok');
     expect(videoCommand.columns).toContain('confirmation');
-    expect(videoCommand.columns).toContain('threadId');
-    expect(videoCommand.columns).toContain('conversationId');
-    expect(videoCommand.columns).toContain('submitRequestCount');
+    expect(videoCommand.columns).toContain('thread-id');
+    expect(videoCommand.columns).toContain('conversation-id');
+    expect(videoCommand.columns).toContain('submit-request-count');
+    expect(videoCommand.columns).toContain('asset-id');
     expect(videoCommand.description).toMatch(/checkpoint/i);
     const byName = new Map(videoCommand.args.map((arg) => [arg.name, arg]));
     expect(byName.get('submit')).toMatchObject({ type: 'int', default: 0 });

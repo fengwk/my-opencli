@@ -4,6 +4,7 @@
 
 import { cli, Strategy } from '@jackwener/opencli/registry';
 
+import { cliColumns, fromCliArgs, toCliRows } from './src/cli-public.js';
 import { JIMENG_DOMAIN, runJimengStatus } from './src/status-dom.js';
 import { normalizeStatusArgs } from './src/status-contract.js';
 
@@ -28,7 +29,7 @@ export const statusCommand = cli({
       help: 'Jimeng workspace id used in the visible generate URL',
     },
     {
-      name: 'search_key',
+      name: 'search-key',
       valueRequired: true,
       required: true,
       help: 'Search key / asset id / prompt snippet used to filter history cards',
@@ -53,7 +54,7 @@ export const statusCommand = cli({
       help: 'Max matching rows to return (default 1)',
     },
     {
-      name: 'max_pages',
+      name: 'max-pages',
       type: 'int',
       default: 5,
       help: 'Max virtual-list scroll pages while searching (default 5)',
@@ -64,7 +65,7 @@ export const statusCommand = cli({
       help: 'Download directory when --download 1 (default: ~/Downloads/jimeng-agent)',
     },
   ],
-  columns: [
+  columns: cliColumns([
     'status',
     'workspace',
     'searchKey',
@@ -79,12 +80,12 @@ export const statusCommand = cli({
     'downloadNote',
     'matchCount',
     'text',
-  ],
+  ]),
   validateArgs: (kwargs) => {
-    normalizeStatusArgs(kwargs);
+    normalizeStatusArgs(fromCliArgs(kwargs));
   },
   func: async (page, kwargs) => {
-    const canonical = normalizeStatusArgs(kwargs);
-    return runJimengStatus(page, canonical);
+    const canonical = normalizeStatusArgs(fromCliArgs(kwargs));
+    return toCliRows(await runJimengStatus(page, canonical));
   },
 });

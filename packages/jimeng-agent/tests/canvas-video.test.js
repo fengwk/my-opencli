@@ -8,7 +8,7 @@ function validArgs(overrides = {}) {
   return {
     canvas: 'new',
     ratio: '16:9',
-    model_version: 'seedance2.0',
+    'model-version': 'seedance2.0',
     duration: 5,
     retry: 0,
     ...overrides,
@@ -40,15 +40,16 @@ describe('jimeng-agent/canvas-video command registration', () => {
 
   it('declares expected output columns', () => {
     expect(canvasVideoCommand.columns).toContain('canvas');
-    expect(canvasVideoCommand.columns).toContain('canvasMode');
-    expect(canvasVideoCommand.columns).toContain('projectId');
-    expect(canvasVideoCommand.columns).toContain('canvasTitle');
-    expect(canvasVideoCommand.columns).toContain('canvasUrl');
+    expect(canvasVideoCommand.columns).toContain('canvas-mode');
+    expect(canvasVideoCommand.columns).toContain('project-id');
+    expect(canvasVideoCommand.columns).toContain('canvas-title');
+    expect(canvasVideoCommand.columns).toContain('canvas-url');
     expect(canvasVideoCommand.columns).toContain('submitted');
-    expect(canvasVideoCommand.columns).toContain('checkpointOk');
+    expect(canvasVideoCommand.columns).toContain('checkpoint-ok');
     expect(canvasVideoCommand.columns).toContain('confirmation');
-    expect(canvasVideoCommand.columns).toContain('sessionId');
-    expect(canvasVideoCommand.columns).toContain('submitRequestCount');
+    expect(canvasVideoCommand.columns).toContain('session-id');
+    expect(canvasVideoCommand.columns).toContain('submit-request-count');
+    expect(canvasVideoCommand.columns).toContain('asset-id');
   });
 
   it('validates args through pure contract validation', () => {

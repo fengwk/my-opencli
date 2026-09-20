@@ -12,6 +12,7 @@ import {
   JIMENG_DOMAIN,
   normalizeCanvasAskArgs,
 } from './src/canvas-contract.js';
+import { cliColumns, fromCliArgs, toCliRow } from './src/cli-public.js';
 import { prepareJimengCanvasAsk } from './src/canvas-dom.js';
 import { prepareBrowserReferenceAssets } from './src/media.js';
 
@@ -76,7 +77,7 @@ export const canvasVideoCommand = cli({
       help: 'Requested output ratio',
     },
     {
-      name: 'model_version',
+      name: 'model-version',
       valueRequired: true,
       required: true,
       choices: [
@@ -102,7 +103,7 @@ export const canvasVideoCommand = cli({
       help: '0 = prepare only after green checkpoint (default); 1 = formally submit generation after checkpoint passes',
     },
   ],
-  columns: [
+  columns: cliColumns([
     'status',
     'canvas',
     'canvasMode',
@@ -118,19 +119,19 @@ export const canvasVideoCommand = cli({
     'confirmation',
     'sessionId',
     'submitRequestCount',
-  ],
+  ]),
   validateArgs: (kwargs) => {
-    normalizeCanvasAskArgs(kwargs);
+    normalizeCanvasAskArgs(fromCliArgs(kwargs));
   },
   func: async (page, kwargs) => {
-    const canonical = normalizeCanvasAskArgs(kwargs);
+    const canonical = normalizeCanvasAskArgs(fromCliArgs(kwargs));
     const preflight = prepareBrowserReferenceAssets(canonical);
     try {
       const prepared = await prepareJimengCanvasAsk(page, canonical, preflight.assets);
-      return [{
+      return [toCliRow({
         ...prepared,
         uploaded: JSON.stringify(prepared.uploaded),
-      }];
+      })];
     } finally {
       preflight.cleanup();
     }
