@@ -222,6 +222,8 @@ export function evaluateCanvasContentCheckpoint(snapshot, expectations) {
   const observedMentionLabels = Array.isArray(snapshot?.richMentionLabels)
     ? snapshot.richMentionLabels
     : [];
+  const editorText = snapshot?.editorTextNormalized || '';
+  const textAnchors = expectations?.textAnchors || [];
   const checks = {
     surfaceReady: snapshot?.surfaceReady === true,
     referenceCount: Number(snapshot?.referenceCount) === expectedReferences,
@@ -231,10 +233,7 @@ export function evaluateCanvasContentCheckpoint(snapshot, expectations) {
     noProcessing: snapshot?.processingCount === 0,
     noMentionMenu: snapshot?.menuVisible !== true,
     assetIdPresent: snapshot?.assetIdPresent === true,
-    promptAnchorsInOrder: anchorsInOrder(
-      snapshot?.editorTextNormalized || '',
-      expectations?.textAnchors || [],
-    ),
+    promptAnchorsInOrder: anchorsInOrder(editorText, textAnchors),
   };
   if (snapshot?.requireSubmitArmed === true) {
     checks.submitArmed = snapshot?.submitEnabled === true;
@@ -242,10 +241,14 @@ export function evaluateCanvasContentCheckpoint(snapshot, expectations) {
   const failures = Object.entries(checks)
     .filter(([, ok]) => !ok)
     .map(([name]) => name);
+  const anchorMismatch = checks.promptAnchorsInOrder
+    ? null
+    : firstAnchorMismatch(editorText, textAnchors);
   return {
     ok: failures.length === 0,
     failures,
     checks,
+    anchorMismatch,
     phase: 'checkpoint',
     expected: {
       references: expectedReferences,
@@ -358,6 +361,30 @@ function anchorsInOrder(haystack, anchors) {
     cursor = index + anchor.length;
   }
   return true;
+}
+
+/**
+ * Locate the first prompt anchor that is missing or out of order.
+ * Anchors are fixed-size chunks of the expected prompt, so the editor slice
+ * next to the failure point is what usually reveals the DOM mismatch.
+ */
+function firstAnchorMismatch(haystack, anchors) {
+  let cursor = 0;
+  for (let index = 0; index < anchors.length; index += 1) {
+    const anchor = anchors[index];
+    if (!anchor) continue;
+    const at = haystack.indexOf(anchor, cursor);
+    if (at < 0) {
+      const from = Math.max(0, cursor - 40);
+      return {
+        index,
+        anchor: anchor.slice(0, 80),
+        editorAtCursor: haystack.slice(from, from + 120),
+      };
+    }
+    cursor = at + anchor.length;
+  }
+  return null;
 }
 
 function describeType(value) {

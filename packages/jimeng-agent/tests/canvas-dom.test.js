@@ -9,6 +9,7 @@ import {
   canvasMentionTextMatchesVariant,
   clearCanvasComposer,
   evaluateCanvasSubmitUIState,
+  fillCanvasPrompt,
   getCanvasMimeType,
   prepareJimengCanvasAsk,
   probeJimengCanvasSurface,
@@ -176,6 +177,92 @@ describe('jimeng-agent/canvas-dom — rich mention preparation', () => {
     expect(canvasMentionTextMatchesVariant('图片1.png', '图片1')).toBe(true);
     expect(canvasMentionTextMatchesVariant('@图片1', '图片1')).toBe(true);
     expect(canvasMentionTextMatchesVariant('图片10.png', '图片1')).toBe(false);
+  });
+
+  // Without the composer model the editor owns the caret after typed text, so
+  // mentions must be anchored to the end or they land mid-prompt.
+  function createFillPromptPage({ modelInsertion, events, mentions }) {
+    const state = { count: 0, labels: [] };
+    return {
+      click: vi.fn(async (selector) => {
+        if (selector.includes('mention-candidate-')) {
+          const label = mentions[state.count];
+          if (typeof label === 'string') {
+            state.count += 1;
+            state.labels.push(label);
+            events.push(`mention:${label}`);
+          }
+        }
+        return { ok: true };
+      }),
+      sleep: vi.fn(async () => undefined),
+      nativeKeyPress: vi.fn(async () => undefined),
+      insertText: vi.fn(async () => {
+        events.push('typed-text');
+      }),
+      evaluate: vi.fn(async (expression) => {
+        assertEvaluableExpression(expression);
+        if (expression.includes('insertSegments')) {
+          if (!modelInsertion) return { ok: false };
+          events.push('model-text');
+          return { ok: true, via: 'insertSegments' };
+        }
+        if (expression.includes('range.selectNodeContents')) {
+          events.push('caret-at-end');
+          return { ok: true };
+        }
+        if (expression.includes('const inlineNodes = separator')) {
+          return {
+            editorFound: true,
+            count: state.count,
+            labels: [...state.labels],
+            menuVisible: false,
+          };
+        }
+        if (expression.includes('mention-button-not-found')) return { ok: true };
+        if (expression.includes('return canvasVisible(panel)')) return true;
+        if (expression.includes('mention-candidate-')) return { ok: true };
+        return undefined;
+      }),
+    };
+  }
+
+  it('anchors the caret before every mention when the composer model is unavailable', async () => {
+    const events = [];
+    const mentions = ['图片1', '视频1'];
+    const page = createFillPromptPage({ modelInsertion: false, events, mentions });
+
+    await fillCanvasPrompt(page, '前@图片1中@视频1后', assets);
+
+    expect(events).toEqual([
+      'caret-at-end',
+      'typed-text',
+      'caret-at-end',
+      'mention:图片1',
+      'caret-at-end',
+      'typed-text',
+      'caret-at-end',
+      'mention:视频1',
+      'caret-at-end',
+      'typed-text',
+    ]);
+  });
+
+  it('leaves the caret to the composer model when model insertion is available', async () => {
+    const events = [];
+    const mentions = ['图片1', '视频1'];
+    const page = createFillPromptPage({ modelInsertion: true, events, mentions });
+
+    await fillCanvasPrompt(page, '前@图片1中@视频1后', assets);
+
+    expect(events).toEqual([
+      'model-text',
+      'mention:图片1',
+      'model-text',
+      'mention:视频1',
+      'model-text',
+    ]);
+    expect(page.insertText).not.toHaveBeenCalled();
   });
 
   // Consecutive submissions must not replace the stop control with a mistaken send click.

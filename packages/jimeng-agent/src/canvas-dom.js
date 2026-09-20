@@ -69,6 +69,9 @@ const UPLOAD_ALERT_ID_ATTR = 'data-opencli-jimeng-canvas-alert-id';
 const UPLOAD_ALERT_REGISTRY_KEY = '__opencliJimengCanvasAlertBaselineRegistry';
 
 let markerCounter = 0;
+// Composer-model insertion keeps the caret itself; the CDP fallback does not.
+const COMPOSER_MODEL_INSERTION = 'insertSegments';
+let lastPromptInsertionMethod = '';
 function nextMarker(prefix) {
   markerCounter += 1;
   return `jimeng-canvas-${prefix}-${Date.now()}-${markerCounter}-${Math.random().toString(36).slice(2, 7)}`;
@@ -1419,7 +1422,7 @@ async function placeCanvasPromptCaretAtEnd(page) {
 }
 
 async function insertCanvasPromptText(page, text) {
-  if (!text) return;
+  if (!text) return '';
   const inserted = await page.evaluate(`((promptText) => {
     ${buildCanvasModelLocatorScript()}
     const model = findCanvasComposerModel();
@@ -1429,7 +1432,7 @@ async function insertCanvasPromptText(page, text) {
     }
     return { ok: false };
   })(${JSON.stringify(text)})`);
-  if (inserted?.ok) return;
+  if (inserted?.ok) return COMPOSER_MODEL_INSERTION;
 
   const caret = await placeCanvasPromptCaretAtEnd(page);
   if (!caret?.ok) {
@@ -1441,11 +1444,11 @@ async function insertCanvasPromptText(page, text) {
   }
   if (typeof page.insertText === 'function') {
     await page.insertText(text);
-    return;
+    return 'insertText';
   }
   if (typeof page.nativeType === 'function') {
     await page.nativeType(text);
-    return;
+    return 'nativeType';
   }
   throw phaseError(
     'prompt',
@@ -1787,12 +1790,20 @@ export async function fillCanvasPrompt(page, agentPrompt, assets = []) {
 
   const segments = buildCanvasMentionSegments(agentPrompt, assets);
   let expectedMentionCount = 0;
+  let insertionVia = '';
   for (const segment of segments) {
     if (segment.type === 'text') {
-      await insertCanvasPromptText(page, segment.value);
+      insertionVia = await insertCanvasPromptText(page, segment.value);
+      lastPromptInsertionMethod = insertionVia || lastPromptInsertionMethod;
       continue;
     }
     expectedMentionCount += 1;
+    // Without the composer model, typed text leaves the caret wherever the
+    // editor put it; rich mentions would then land mid-prompt. Anchor the
+    // caret at the end first so mentions append in prompt order.
+    if (insertionVia && insertionVia !== COMPOSER_MODEL_INSERTION) {
+      await placeCanvasPromptCaretAtEnd(page);
+    }
     await insertCanvasRichMention(page, segment.asset, expectedMentionCount);
   }
 
@@ -1929,6 +1940,7 @@ export async function collectCanvasContentCheckpointSnapshot(page, canonical, as
 
     return {
       surfaceReady,
+      promptSeparatorFound: !!separator,
       referenceCount: allUploadItems !== null ? uploadItems.length : attachmentDomChips.length,
       observedChipLabels: chipLabels,
       processingCount,
@@ -1966,9 +1978,12 @@ export async function runCanvasContentCheckpoint(page, canonical, assets, option
 
   const report = evaluateCanvasContentCheckpoint(snapshot, expectations);
   if (!report.ok) {
+    const mismatch = report.anchorMismatch
+      ? `, anchor#${report.anchorMismatch.index}=${JSON.stringify(report.anchorMismatch.anchor)}, editor=${JSON.stringify(report.anchorMismatch.editorAtCursor)}`
+      : '';
     throw phaseError(
       'checkpoint',
-      `Canvas content checkpoint failed: ${report.failures.join(', ')} (observed chips=${snapshot.referenceCount}, expected=${expectations.expectedReferences}, labels=${JSON.stringify(snapshot.observedChipLabels || []).slice(0, 300)}, mentions=${JSON.stringify(snapshot.richMentionLabels || []).slice(0, 300)}, sendArmed=${snapshot.submitEnabled})`,
+      `Canvas content checkpoint failed: ${report.failures.join(', ')} (observed chips=${snapshot.referenceCount}, expected=${expectations.expectedReferences}, labels=${JSON.stringify(snapshot.observedChipLabels || []).slice(0, 300)}, mentions=${JSON.stringify(snapshot.richMentionLabels || []).slice(0, 300)}, sendArmed=${snapshot.submitEnabled}, promptVia=${lastPromptInsertionMethod || 'unknown'}, separator=${snapshot.promptSeparatorFound === true}, editorChars=${(snapshot.editorTextNormalized || '').length}${mismatch})`,
       'No generation was submitted. Inspect the canvas composer chips and prompt.',
     );
   }
