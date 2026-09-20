@@ -181,8 +181,9 @@ describe('jimeng-agent/canvas-dom — rich mention preparation', () => {
 
   // Without the composer model the editor owns the caret after typed text, so
   // mentions must be anchored to the end or they land mid-prompt.
-  function createFillPromptPage({ modelInsertion, events, mentions }) {
+  function createFillPromptPage({ modelInsertion, events, mentions, settle }) {
     const state = { count: 0, labels: [] };
+    let settlePolls = 0;
     return {
       click: vi.fn(async (selector) => {
         if (selector.includes('mention-candidate-')) {
@@ -202,6 +203,14 @@ describe('jimeng-agent/canvas-dom — rich mention preparation', () => {
       }),
       evaluate: vi.fn(async (expression) => {
         assertEvaluableExpression(expression);
+        if (expression.includes('const expectedTail =')) {
+          settlePolls += 1;
+          const result = settle
+            ? settle(settlePolls)
+            : { ok: true, length: 0 };
+          if (settle && result?.ok) events.push('text-settled');
+          return result;
+        }
         if (expression.includes('insertSegments')) {
           if (!modelInsertion) return { ok: false };
           events.push('model-text');
@@ -263,6 +272,50 @@ describe('jimeng-agent/canvas-dom — rich mention preparation', () => {
       'model-text',
     ]);
     expect(page.insertText).not.toHaveBeenCalled();
+  });
+
+  // A mention bound before its preceding text lands drops or reorders that text.
+  it('binds each mention only after the inserted text settled in the editor', async () => {
+    const events = [];
+    const mentions = ['图片1'];
+    const page = createFillPromptPage({
+      modelInsertion: true,
+      events,
+      mentions,
+      settle: (polls) => (polls >= 3 ? { ok: true, length: 80 } : { ok: false, length: 0 }),
+    });
+
+    await fillCanvasPrompt(page, '前@图片1后', assets);
+
+    expect(events).toEqual([
+      'model-text',
+      'text-settled',
+      'mention:图片1',
+      'model-text',
+      'text-settled',
+    ]);
+  });
+
+  it('fails the prompt phase when inserted text never reaches the editor', async () => {
+    let now = 1_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const events = [];
+    const mentions = ['图片1'];
+    const page = createFillPromptPage({
+      modelInsertion: true,
+      events,
+      mentions,
+      settle: () => ({ ok: false, length: 0 }),
+    });
+    page.sleep = vi.fn(async (seconds) => {
+      now += Math.round(seconds * 1000);
+    });
+
+    await expect(fillCanvasPrompt(page, '前@图片1后', assets)).rejects.toMatchObject({
+      phase: 'prompt',
+      message: expect.stringContaining('did not settle'),
+    });
+    expect(events).toEqual(['model-text']);
   });
 
   // Consecutive submissions must not replace the stop control with a mistaken send click.
@@ -470,6 +523,7 @@ describe('jimeng-agent/canvas-dom — preparation scenarios', () => {
           return canvasUrl;
         }
         assertEvaluableExpression(expression);
+        if (expression.includes('const expectedTail =')) return { ok: true, length: 0 }; // prompt text settled
         if (expression.includes("reason: 'materializer-not-ready'")) {
           return {
             ok: true,

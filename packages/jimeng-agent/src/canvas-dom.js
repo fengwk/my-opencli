@@ -1421,6 +1421,36 @@ async function placeCanvasPromptCaretAtEnd(page) {
   })()`);
 }
 
+/**
+ * The composer model and CDP insertion both land in the editor asynchronously.
+ * Inserting a rich mention while the previous text is still in flight drops or
+ * reorders that text, so every text segment must be observed in the editor
+ * before the next mention is bound.
+ */
+async function waitForCanvasPromptText(page, text, timeoutMs = 5_000) {
+  const expectedTail = String(text || '').replace(/[\u00a0\u200b\s]+/g, '');
+  if (!expectedTail) return;
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    last = await page.evaluate(`(() => {
+      ${buildCanvasLocatorScript()}
+      const expectedTail = ${JSON.stringify(expectedTail)};
+      const editor = findCanvasPromptEditor();
+      if (!editor) return { ok: false, reason: 'editor-not-found' };
+      const text = (editor.textContent || '').replace(/[\\u00a0\\u200b\\s]+/g, '');
+      return { ok: text.endsWith(expectedTail), length: text.length };
+    })()`).catch((error) => ({ ok: false, reason: describeError(error) }));
+    if (last?.ok) return;
+    await page.sleep(0.12);
+  }
+  throw phaseError(
+    'prompt',
+    `Canvas prompt text did not settle in the editor (${last?.reason || `chars=${last?.length ?? 'unknown'}`})`,
+    'No generation was submitted. The composer text insertion stalled; retry the run.',
+  );
+}
+
 async function insertCanvasPromptText(page, text) {
   if (!text) return '';
   const inserted = await page.evaluate(`((promptText) => {
@@ -1795,6 +1825,7 @@ export async function fillCanvasPrompt(page, agentPrompt, assets = []) {
     if (segment.type === 'text') {
       insertionVia = await insertCanvasPromptText(page, segment.value);
       lastPromptInsertionMethod = insertionVia || lastPromptInsertionMethod;
+      await waitForCanvasPromptText(page, segment.value);
       continue;
     }
     expectedMentionCount += 1;
