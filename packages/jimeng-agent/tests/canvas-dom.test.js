@@ -203,7 +203,7 @@ describe('jimeng-agent/canvas-dom — rich mention preparation', () => {
       }),
       evaluate: vi.fn(async (expression) => {
         assertEvaluableExpression(expression);
-        if (expression.includes('const expectedTail =')) {
+        if (expression.includes('const expectedText =')) {
           settlePolls += 1;
           const result = settle
             ? settle(settlePolls)
@@ -313,7 +313,7 @@ describe('jimeng-agent/canvas-dom — rich mention preparation', () => {
 
     await expect(fillCanvasPrompt(page, '前@图片1后', assets)).rejects.toMatchObject({
       phase: 'prompt',
-      message: expect.stringContaining('did not settle'),
+      message: expect.stringContaining('never reached the editor'),
     });
     expect(events).toEqual(['model-text']);
   });
@@ -523,7 +523,7 @@ describe('jimeng-agent/canvas-dom — preparation scenarios', () => {
           return canvasUrl;
         }
         assertEvaluableExpression(expression);
-        if (expression.includes('const expectedTail =')) return { ok: true, length: 0 }; // prompt text settled
+        if (expression.includes('const expectedText =')) return { ok: true, length: 0 }; // prompt text settled
         if (expression.includes("reason: 'materializer-not-ready'")) {
           return {
             ok: true,

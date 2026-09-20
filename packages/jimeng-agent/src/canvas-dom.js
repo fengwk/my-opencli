@@ -1427,26 +1427,35 @@ async function placeCanvasPromptCaretAtEnd(page) {
  * reorders that text, so every text segment must be observed in the editor
  * before the next mention is bound.
  */
-async function waitForCanvasPromptText(page, text, timeoutMs = 5_000) {
-  const expectedTail = String(text || '').replace(/[\u00a0\u200b\s]+/g, '');
-  if (!expectedTail) return;
+async function waitForCanvasPromptText(page, text, timeoutMs = 6_000) {
+  const expectedText = String(text || '').replace(/[\u00a0\u200b\s]+/g, '');
+  if (!expectedText) return;
   const deadline = Date.now() + timeoutMs;
   let last = null;
   while (Date.now() < deadline) {
     last = await page.evaluate(`(() => {
       ${buildCanvasLocatorScript()}
-      const expectedTail = ${JSON.stringify(expectedTail)};
+      const expectedText = ${JSON.stringify(expectedText)};
       const editor = findCanvasPromptEditor();
       if (!editor) return { ok: false, reason: 'editor-not-found' };
       const text = (editor.textContent || '').replace(/[\\u00a0\\u200b\\s]+/g, '');
-      return { ok: text.endsWith(expectedTail), length: text.length };
+      return {
+        // A mention may only bind after its preceding text reached the editor.
+        // Final order is verified by the content checkpoint instead, which
+        // tolerates editor-added trailing nodes.
+        ok: text.includes(expectedText),
+        atEnd: text.endsWith(expectedText),
+        length: text.length,
+        head: text.slice(0, 120),
+        tail: text.slice(-120),
+      };
     })()`).catch((error) => ({ ok: false, reason: describeError(error) }));
     if (last?.ok) return;
     await page.sleep(0.12);
   }
   throw phaseError(
     'prompt',
-    `Canvas prompt text did not settle in the editor (${last?.reason || `chars=${last?.length ?? 'unknown'}`})`,
+    `Canvas prompt segment never reached the editor (chars=${last?.length ?? 'unknown'}, expected=${JSON.stringify(expectedText.slice(-40))}, editorHead=${JSON.stringify(last?.head ?? '')}, editorTail=${JSON.stringify(last?.tail ?? '')}${last?.reason ? `, reason=${last.reason}` : ''})`,
     'No generation was submitted. The composer text insertion stalled; retry the run.',
   );
 }
