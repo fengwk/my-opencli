@@ -137,7 +137,7 @@ opencli chatgpt-agent ask '读这两个附件并概括' \
 # images export dir
 opencli chatgpt-agent ask '画一只猫' --op ~/Pictures/chatgpt-agent
 
-# prepare a Jimeng Agent video draft (default --submit 0); result includes auto assetId
+# prepare a Jimeng Agent video draft (default --submit 0); result includes auto asset-id
 opencli jimeng-agent video \
   --workspace <workspace-id> \
   --image ./人物.png \
@@ -146,7 +146,7 @@ opencli jimeng-agent video \
   --ratio 16:9 \
   --model-version seedance2.0
 
-# optional formal submit after checkpoint, then search/download by assetId
+# optional formal submit after checkpoint, then search/download by asset-id
 opencli jimeng-agent video ... --submit 1
 opencli jimeng-agent status --workspace <workspace-id> --search-key <asset-id> --download 1
 
@@ -159,9 +159,9 @@ opencli jimeng-agent canvas-video \
   --ratio 16:9 \
   --model-version seedance2.0
 
-# inspect every Canvas resource, or correlate one canvas-video assetId exactly
+# inspect every Canvas resource, or correlate one canvas-video asset-id exactly
 opencli jimeng-agent canvas-status --canvas <project-id>
-opencli jimeng-agent canvas-status --canvas <project-id> --asset-id <assetId>
+opencli jimeng-agent canvas-status --canvas <project-id> --asset-id <asset-id>
 ```
 
 ### WSL + Windows Chrome

@@ -23,10 +23,17 @@ describe('jimeng-agent/canvas-status command registration', () => {
     expect(byName.get('max-pages')).toMatchObject({ type: 'int', default: 20 });
     for (const column of [
       'status',
+      'status-code',
       'project-id',
       'asset-id',
       'turn-id',
+      'node-title',
+      'batch-id',
       'resource-id',
+      'created-at-iso',
+      'width',
+      'height',
+      'prompt',
       'download-url',
       'resource-count',
       'scan-complete',

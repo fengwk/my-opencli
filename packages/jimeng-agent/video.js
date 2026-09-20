@@ -86,6 +86,7 @@ export const videoCommand = cli({
       name: 'submit',
       type: 'int',
       default: 0,
+      choices: [0, 1],
       help: '0 = prepare only after green checkpoint (default); 1 = formally submit generation after checkpoint passes',
     },
   ],

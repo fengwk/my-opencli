@@ -51,15 +51,15 @@ export function normalizeCanvasResourceArgs(kwargs = {}) {
   if (kwargs.asset_id !== undefined && kwargs.asset_id !== null) {
     if (typeof kwargs.asset_id !== 'string') {
       throw new ArgumentError(
-        "Invalid 'asset_id': expected string",
-        'Pass the 16-character assetId returned by canvas-video.',
+        "Invalid 'asset-id': expected string",
+        'Pass --asset-id with the 16-character value returned by canvas-video.',
       );
     }
     assetId = kwargs.asset_id.trim().toLowerCase();
     if (!/^[0-9a-f]{16}$/.test(assetId)) {
       throw new ArgumentError(
-        `Invalid 'asset_id': '${kwargs.asset_id}'`,
-        'Pass the 16-character hexadecimal assetId returned by canvas-video.',
+        `Invalid 'asset-id': '${kwargs.asset_id}'`,
+        'Pass --asset-id with the 16-character hexadecimal value returned by canvas-video.',
       );
     }
   }
@@ -74,8 +74,8 @@ export function normalizeCanvasResourceArgs(kwargs = {}) {
     || maxPages > MAX_CANVAS_EVENT_MAX_PAGES
   ) {
     throw new ArgumentError(
-      `Invalid 'max_pages': expected integer 1-${MAX_CANVAS_EVENT_MAX_PAGES}`,
-      `Use --max_pages between 1 and ${MAX_CANVAS_EVENT_MAX_PAGES}.`,
+      `Invalid 'max-pages': expected integer 1-${MAX_CANVAS_EVENT_MAX_PAGES}`,
+      `Use --max-pages between 1 and ${MAX_CANVAS_EVENT_MAX_PAGES}.`,
     );
   }
 

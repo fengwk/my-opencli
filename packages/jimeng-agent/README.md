@@ -29,13 +29,13 @@ opencli jimeng-agent status --help
 | Command | Target | Surface |
 |---|---|---|
 | `video` | Generate page | `https://jimeng.jianying.com/ai-tool/generate?workspace=<workspace-id>` |
-| `canvas-video` | AI Canvas | `https://jimeng.jianying.com/ai-tool/ai-canvas` (`--canvas new` or `--canvas <projectId>`) |
-| `canvas-status` | AI Canvas | List every current/historical resource, optionally correlated to one `assetId` |
-| `status` | History | Search and official download by assetId |
+| `canvas-video` | AI Canvas | `https://jimeng.jianying.com/ai-tool/ai-canvas` (`--canvas new` or `--canvas <project-id>`) |
+| `canvas-status` | AI Canvas | List every current/historical resource, optionally correlated to one `asset-id` |
+| `status` | History | Search and official download by `asset-id` |
 
 ## Canvas Video Example (`canvas-video`)
 
-Supports creating a new canvas (`--canvas new`) or continuing in an existing canvas (`--canvas <projectId>`):
+Supports creating a new canvas (`--canvas new`) or continuing in an existing canvas (`--canvas <project-id>`):
 
 ```bash
 # 1. Prepare in a new canvas (--canvas new, prepare-only default)
@@ -70,16 +70,16 @@ OPENCLI_BROWSER_COMMAND_TIMEOUT=300 opencli jimeng-agent canvas-video \
 ```
 
 Canvas video flow:
-1. Opens `/ai-tool/ai-canvas?enter_from=page_click&from_page=create` (`--canvas new`) or `/ai-tool/ai-canvas/<projectId>`.
+1. Opens `/ai-tool/ai-canvas?enter_from=page_click&from_page=create` (`--canvas new`) or `/ai-tool/ai-canvas/<project-id>`.
 2. When `--canvas new --title <name>` is supplied, waits for the real project id and persists the title through `/octo_api/v1/project/update`. Titles are limited to 60 characters; `--title` is rejected for existing canvases to prevent accidental renames.
 3. Expands the right-hand AI conversation panel (文案「与 AI 对话」).
 4. Clears leftover composer content.
 5. Uploads references through the canvas composer's native attachment model and verifies visible ready chips.
-6. Types prompt directives, including `资产编号：<assetId>`, and replaces each `@图片N` / `@视频N` / `@音频N` placeholder through the visible `@` picker. Candidate selection is bound to the current upload's exact `attachmentId`, so historical same-name resources are never selected ambiguously.
+6. Types prompt directives, including `资产编号：<asset-id>`, and replaces each `@图片N` / `@视频N` / `@音频N` placeholder through the visible `@` picker. Candidate selection is bound to the current upload's exact `attachmentId`, so historical same-name resources are never selected ambiguously.
 7. Performs content checkpoint (validates uploaded attachments, ordered rich-reference chips, and prompt anchors).
-8. With `--submit 1`, waits for any active Canvas Agent turn (`canvas-agent-stop`) to finish, then clicks the unique enabled send control. Success requires either a correlated server ACK or the exact `assetId` to move from the composer into the sent-message area; ambiguous states fail closed.
+8. With `--submit 1`, waits for any active Canvas Agent turn (`canvas-agent-stop`) to finish, then clicks the unique enabled send control. Success requires either a correlated server ACK or the exact `asset-id` to move from the composer into the sent-message area; ambiguous states fail closed.
 9. With `--submit 0`, leaves the verified draft visible and never clicks send.
-10. Returns `projectId`, `canvasTitle`, `canvasUrl`, `assetId`, `submitted`, `checkpointOk`.
+10. Returns `project-id`, `canvas-title`, `canvas-url`, `asset-id`, `submitted`, `checkpoint-ok`.
 
 `confirmation` is `ack_confirmed` when a correlated response is captured,
 `ui_confirmed` when the exact sent-message transition is observed, and `none`
@@ -92,7 +92,7 @@ generating, completed, failed, canceled, and deleted generations:
 
 ```bash
 opencli jimeng-agent canvas-status \
-  --canvas <projectId> \
+  --canvas <project-id> \
   -f json
 ```
 
@@ -100,7 +100,7 @@ Filter to the resources created from one exact `canvas-video` submission:
 
 ```bash
 opencli jimeng-agent canvas-status \
-  --canvas <projectId> \
+  --canvas <project-id> \
   --asset-id 9ef879de0504e787 \
   -f json
 ```
@@ -112,7 +112,7 @@ project/draft/get
   -> every node.data.resourceId and resourceBatches[].resourceIds
 
 canvas_agent/sessions/list -> canvas_agent/events/list
-  -> 资产编号:<assetId> on TURN_STARTED / INPUT_ACCEPTED
+  -> 资产编号:<asset-id> on TURN_STARTED / INPUT_ACCEPTED
   -> same turn_id TOOL_CALL_FINISHED(run_nodes)
   -> render_infos[].artifacts[].resource_id
 
@@ -120,12 +120,12 @@ resource/batch_get
   -> live status, generation metadata, and signed media URLs
 ```
 
-This same-turn artifact join is the authoritative `assetId` correlation; input
+This same-turn artifact join is the authoritative `asset-id` correlation; input
 reference `resource_id` values are not treated as generated outputs. Numeric
 resource states are normalized as `200=generating`, `1000=ready`,
 `1001=failed`, `1002=canceled`, and `2000=deleted`. If an exact submitted turn
 exists but has not emitted an artifact yet, the result is `pending`. Pagination
-fails closed when `--max_pages` is exhausted, so a partial scan is never
+fails closed when `--max-pages` is exhausted, so a partial scan is never
 reported as a complete list.
 
 ## Example
@@ -151,7 +151,7 @@ OPENCLI_BROWSER_COMMAND_TIMEOUT=300 opencli jimeng-agent video \
   --ratio 16:9 \
   --model-version seedance2.0 \
   --submit 1
-# Result includes auto-generated assetId (16-char hex). Use it with status --search-key.
+# Result includes auto-generated `asset-id` (16-char hex). Use it with status --search-key.
 ```
 
 Reference flags are repeatable. Labels are assigned independently by media kind
@@ -172,7 +172,7 @@ visible UI, and no file chooser is intercepted at the browser-protocol level.
 The reference card remove control is likewise resolved through both contracts
 (`[data-reference-remove-button="true"]` or `.remove-button-*`).
 
-Each `video` run auto-generates a 16-char hex `assetId`, embeds `资产编号：<id>` into
+Each `video` run auto-generates a 16-char hex `asset-id`, embeds `资产编号：<id>` into
 the agent prompt, and returns it in the CLI result for later `status --search-key`.
 
 ## Two-phase gates
@@ -212,23 +212,23 @@ Failure phase: `checkpoint`. This gate does **not** reopen or re-check the Auto 
 - Formal submit requires active network capture of `POST /mweb/v1/creation_agent/v2/conversation`.
   If network capture is unavailable, submit fails before clicking generate.
 - Successful submission requires explicit server ACK:
-  - HTTP 2xx status matching canonical `assetId`
+  - HTTP 2xx status matching canonical `asset-id`
   - Valid SSE `handshake` with non-empty `thread_id` and conversation consistency
   - Valid SSE `stream_complete` with `success=true` and `error_code=0`
 - The post-click capture buffer is preserved for the full ACK window and read
   once, so an observed request cannot disappear and be downgraded to `not-sent`.
 - A fresh retry is allowed only when no conversation request was captured and
-  the `assetId` still exists solely in the composer. Before that retry clicks,
+  the `asset-id` still exists solely in the composer. Before that retry clicks,
   any delayed matching request/ACK from the prior attempt is consumed and
   causes confirmation or a fail-closed stop instead of a second paid click.
 - If a submit request is seen but the response is missing, truncated, or unconfirmed,
   or if the server explicitly rejects the request, the command stops immediately and
   prohibits automatic retries to prevent duplicate charges or infinite loops.
-- Output columns include `status`, `workspace`, `workspaceUrl`, `uploaded`, `mentions`,
-  `assetId`, `retryUsed`, `submitted`, `checkpointOk`, `confirmation`, `threadId`,
-  `conversationId`, and `submitRequestCount`.
-- Successful prepare results include `checkpointOk: true`, `submitted: false`, and `confirmation: 'none'`.
-- Confirmed submit results include `checkpointOk: true`, `submitted: true`, `confirmation: 'ack_confirmed'`, `threadId`, and `conversationId`.
+- Output columns include `status`, `workspace`, `workspace-url`, `uploaded`, `mentions`,
+  `asset-id`, `retry-used`, `submitted`, `checkpoint-ok`, `confirmation`, `thread-id`,
+  `conversation-id`, and `submit-request-count`.
+- Successful prepare results include `checkpoint-ok: true`, `submitted: false`, and `confirmation: 'none'`.
+- Confirmed submit results include `checkpoint-ok: true`, `submitted: true`, `confirmation: 'ack_confirmed'`, `thread-id`, and `conversation-id`.
 
 ## Status / download
 
@@ -254,13 +254,13 @@ opencli jimeng-agent status \
   --output ~/Downloads/jimeng-agent
 ```
 
-Returned fields include `status` (`ready` / `generating` / `cancelled` / `not_found`), `dataId`, `taskType`, `path`, `collected`, `collectedFrom`, `downloadBytes`, `downloadNote`.
+Returned fields include `status` (`ready` / `generating` / `cancelled` / `not_found` / `failed` / `unknown`), `data-id`, `task-type`, `path`, `collected`, `collected-from`, `download-bytes`, `download-note`, `download-error`, and `download-warning`.
 
 Download strategy (`--download 1`) mirrors `chatgpt-agent` file collection:
 
 1. Prefer the official card **下载** button via `waitForDownload` (full quality; typically ~9MB+)
 2. Remap Windows Chrome paths (`C:\...` → `/mnt/c/...` on WSL)
-3. Copy into managed `--output` and rewrite `path` (`collected=true`, `collectedFrom=<chrome path>`)
+3. Copy into managed `--output` and rewrite `path` (`collected=true`, `collected-from=<chrome path>`)
 4. Fall back only to a search-API media URL whose business/asset identity
    uniquely matches the selected DOM row; otherwise fail closed
 

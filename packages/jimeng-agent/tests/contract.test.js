@@ -519,24 +519,26 @@ describe('jimeng-agent/contract — model_version CLI flag advertising', () => {
     return captured;
   }
 
-  it('advertises --model_version (underscore) when the value is unknown', () => {
+  it('advertises the public --model-version flag when the value is unknown', () => {
     const err = captureError({ model_version: 'definitely-not-a-real-model' });
-    expect(err.hint).toContain('--model_version');
-    expect(err.hint).not.toContain('--model-version');
+    expect(err.message).toContain("'model-version'");
+    expect(err.message).not.toContain("'model_version'");
+    expect(err.hint).toContain('--model-version');
+    expect(err.hint).not.toContain('--model_version');
   });
 
-  it('advertises --model_version (underscore) when the field is missing', () => {
+  it('advertises the public --model-version flag when the field is missing', () => {
     const err = captureError({ model_version: undefined });
     // The missing-value path also surfaces the allow-list to keep the
-    // help actionable; either way --model_version must be present.
-    expect(err.hint).toContain('--model_version');
-    expect(err.hint).not.toContain('--model-version');
+    // help actionable; either way --model-version must be present.
+    expect(err.hint).toContain('--model-version');
+    expect(err.hint).not.toContain('--model_version');
   });
 
-  it('advertises --model_version (underscore) when the value is not a string', () => {
+  it('advertises the public --model-version flag when the value is not a string', () => {
     const err = captureError({ model_version: 42 });
-    expect(err.hint).toContain('--model_version');
-    expect(err.hint).not.toContain('--model-version');
+    expect(err.hint).toContain('--model-version');
+    expect(err.hint).not.toContain('--model_version');
   });
 });
 

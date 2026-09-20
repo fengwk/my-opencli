@@ -188,7 +188,7 @@ describe('jimeng-agent/canvas-resource-dom — read-only integration', () => {
 
     await expect(
       listAllCanvasEvents(page, 'session-1', 1),
-    ).rejects.toThrow('increase --max_pages');
+    ).rejects.toThrow('increase --max-pages');
   });
 
   it('follows session and event page tokens without dropping earlier pages', async () => {

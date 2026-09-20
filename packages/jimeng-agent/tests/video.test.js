@@ -50,6 +50,6 @@ describe('jimeng-agent/video command registration', () => {
     expect(videoCommand.columns).toContain('asset-id');
     expect(videoCommand.description).toMatch(/checkpoint/i);
     const byName = new Map(videoCommand.args.map((arg) => [arg.name, arg]));
-    expect(byName.get('submit')).toMatchObject({ type: 'int', default: 0 });
+    expect(byName.get('submit')).toMatchObject({ type: 'int', default: 0, choices: [0, 1] });
   });
 });

@@ -169,6 +169,22 @@ describe('jimeng-agent/status-contract', () => {
     })).toThrow(ArgumentError);
   });
 
+  it('uses public kebab-case flags in validation errors', () => {
+    for (const args of [
+      { workspace: '1', search_key: '' },
+      { workspace: '1', search_key: 'abc', max_pages: 0 },
+    ]) {
+      try {
+        normalizeStatusArgs(args);
+        throw new Error('expected normalizeStatusArgs to fail');
+      } catch (error) {
+        expect(error).toBeInstanceOf(ArgumentError);
+        expect(error.hint).not.toMatch(/--(?:search_key|max_pages)/);
+        expect(error.hint).toMatch(/--(?:search-key|max-pages)/);
+      }
+    }
+  });
+
   it('classifies generating / cancelled / ready statuses from card text', () => {
     expect(classifyTaskStatus('认真思考中...')).toBe('generating');
     expect(classifyTaskStatus('排队加速中')).toBe('generating');

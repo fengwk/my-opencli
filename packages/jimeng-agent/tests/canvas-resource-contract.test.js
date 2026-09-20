@@ -183,6 +183,22 @@ describe('jimeng-agent/canvas-resource-contract — arguments', () => {
       max_pages: 0,
     })).toThrow(ArgumentError);
   });
+
+  it('uses public kebab-case flags in validation errors', () => {
+    for (const args of [
+      { canvas: PROJECT_ID, asset_id: 'bad' },
+      { canvas: PROJECT_ID, max_pages: 0 },
+    ]) {
+      try {
+        normalizeCanvasResourceArgs(args);
+        throw new Error('expected normalizeCanvasResourceArgs to fail');
+      } catch (error) {
+        expect(error).toBeInstanceOf(ArgumentError);
+        expect(error.hint).not.toMatch(/--(?:asset_id|max_pages)/);
+        expect(error.hint).toMatch(/--(?:asset-id|max-pages)/);
+      }
+    }
+  });
 });
 
 describe('jimeng-agent/canvas-resource-contract — snapshot and event correlation', () => {

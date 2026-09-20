@@ -83,7 +83,7 @@ export async function runJimengCanvasStatus(page, canonical) {
     if (error instanceof CommandExecutionError) throw error;
     throw new CommandExecutionError(
       `JIMENG_CANVAS_STATUS_FAILED: ${describeError(error)}`,
-      'Verify canvas access and retry. Increase --max_pages only when the error reports an incomplete event scan.',
+      'Verify canvas access and retry. Increase --max-pages only when the error reports an incomplete event scan.',
     );
   }
 }
@@ -241,7 +241,7 @@ function selectResourceIds(draftResources, correlation, assetId) {
 
 function incompleteScanError(path, maxPages) {
   return new Error(
-    `${path} still has more data after ${maxPages} pages; increase --max_pages to avoid an incomplete resource list`,
+    `${path} still has more data after ${maxPages} pages; increase --max-pages to avoid an incomplete resource list`,
   );
 }
 

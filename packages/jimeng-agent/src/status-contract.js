@@ -115,32 +115,34 @@ function normalizePositiveInt(raw, defaultValue, name) {
   }
   const n = typeof raw === 'number' ? raw : Number(String(raw).trim());
   if (!Number.isSafeInteger(n) || n < 1) {
+    const publicName = name.replace(/_/g, '-');
     throw new ArgumentError(
-      `Invalid ${name}: '${raw}' (must be a positive integer)`,
-      `Pass --${name} as a positive integer.`,
+      `Invalid ${publicName}: '${raw}' (must be a positive integer)`,
+      `Pass --${publicName} as a positive integer.`,
     );
   }
   return n;
 }
 
 function requireNonBlankString(raw, name) {
+  const publicName = name.replace(/_/g, '-');
   if (raw === undefined || raw === null) {
     throw new ArgumentError(
-      `Missing required argument: '${name}'`,
-      `Pass a non-empty --${name} value.`,
+      `Missing required argument: '${publicName}'`,
+      `Pass a non-empty --${publicName} value.`,
     );
   }
   if (typeof raw !== 'string') {
     throw new ArgumentError(
-      `Invalid '${name}': expected string, got ${describeType(raw)}`,
-      `Pass --${name} as a plain string.`,
+      `Invalid '${publicName}': expected string, got ${describeType(raw)}`,
+      `Pass --${publicName} as a plain string.`,
     );
   }
   const value = raw.trim();
   if (!value) {
     throw new ArgumentError(
-      `Invalid '${name}': value is blank`,
-      `Pass a non-empty --${name} value.`,
+      `Invalid '${publicName}': value is blank`,
+      `Pass a non-empty --${publicName} value.`,
     );
   }
   return value;

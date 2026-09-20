@@ -38,6 +38,7 @@ export const statusCommand = cli({
       name: 'download',
       type: 'int',
       default: 0,
+      choices: [0, 1],
       help: '0 = return status only (default); 1 = download the newest ready video match',
     },
     {
@@ -78,7 +79,13 @@ export const statusCommand = cli({
     'collectedFrom',
     'downloadBytes',
     'downloadNote',
+    'downloadError',
+    'downloadWarning',
+    'downloadSkipped',
     'matchCount',
+    'rank',
+    'source',
+    'mediaUrl',
     'text',
   ]),
   validateArgs: (kwargs) => {

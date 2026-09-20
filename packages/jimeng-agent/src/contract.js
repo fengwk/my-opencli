@@ -172,7 +172,7 @@ export function normalizeAskArgs(kwargs = {}) {
 
   const workspace = requireNonBlankStringField(kwargs, 'workspace');
   const ratio = requireChoiceField(kwargs, 'ratio', RATIOS, '--ratio');
-  const modelVersion = requireChoiceField(kwargs, 'model_version', MODEL_VERSIONS, '--model_version');
+  const modelVersion = requireChoiceField(kwargs, 'model_version', MODEL_VERSIONS, '--model-version');
 
   const duration = normalizeDuration(kwargs.duration);
   const retry = normalizeRetry(kwargs.retry);
@@ -262,28 +262,29 @@ function requireNonBlankStringField(kwargs, key) {
 
 function requireChoiceField(kwargs, key, choices, flag) {
   const raw = kwargs[key];
+  const publicKey = toFlag(key).slice(2);
   if (raw === undefined || raw === null) {
     throw new ArgumentError(
-      `Missing required argument: '${key}'`,
+      `Missing required argument: '${publicKey}'`,
       `Pass one of: ${choices.join(', ')} via ${flag}.`,
     );
   }
   if (typeof raw !== 'string') {
     throw new ArgumentError(
-      `Invalid '${key}': expected string, got ${describeType(raw)}`,
+      `Invalid '${publicKey}': expected string, got ${describeType(raw)}`,
       `Pass ${flag} as a string.`,
     );
   }
   const trimmed = raw.trim();
   if (trimmed.length === 0) {
     throw new ArgumentError(
-      `Invalid '${key}': value is blank`,
+      `Invalid '${publicKey}': value is blank`,
       `Pass one of: ${choices.join(', ')} via ${flag}.`,
     );
   }
   if (!choices.includes(trimmed)) {
     throw new ArgumentError(
-      `Invalid '${key}': '${raw}' (must be one of ${choices.join(', ')})`,
+      `Invalid '${publicKey}': '${raw}' (must be one of ${choices.join(', ')})`,
       `Pass one of: ${choices.join(', ')} via ${flag}.`,
     );
   }
