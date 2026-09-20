@@ -9,7 +9,7 @@ Personal OpenCLI plugins, installed via the official plugin mechanism.
 | `utils` | `packages/utils` | Host-Chrome utilities; `opencli utils scrape` fetches pages in the background by default with my-mcp HTML/markdown cleaning |
 | `chatgpt-agent` | `packages/chatgpt-agent` | Protocol-stream ChatGPT agent (WS text/files/images, sequential upload, DOM file download, official-style image export) |
 | `gemini-agent` | `packages/gemini-agent` | Protocol-stream Gemini agent (StreamGenerate text/images, sequential upload, native generated-image download) |
-| `jimeng-agent` | `packages/jimeng-agent` | Jimeng Agent video drafts (rich `@` mentions, checkpointed prepare/`--submit`, status search, official download) |
+| `jimeng-agent` | `packages/jimeng-agent` | Jimeng Agent video drafts on Generate and AI Canvas (checkpointed prepare/`--submit`, exact resource correlation, status search, official download) |
 
 ## Requirements (fork)
 
@@ -53,6 +53,8 @@ opencli plugin list
 opencli chatgpt-agent ask --help
 opencli gemini-agent ask --help
 opencli jimeng-agent video --help
+opencli jimeng-agent canvas-video --help
+opencli jimeng-agent canvas-status --help
 opencli utils scrape --help
 ```
 
@@ -76,6 +78,8 @@ opencli plugin list
 opencli chatgpt-agent ask --help
 opencli gemini-agent ask --help
 opencli jimeng-agent video --help
+opencli jimeng-agent canvas-video --help
+opencli jimeng-agent canvas-status --help
 opencli utils scrape --help
 ```
 
@@ -145,6 +149,19 @@ opencli jimeng-agent video \
 # optional formal submit after checkpoint, then search/download by assetId
 opencli jimeng-agent video ... --submit 1
 opencli jimeng-agent status --workspace <workspace-id> --search_key <assetId> --download 1
+
+# prepare in a newly created AI Canvas (default --submit 0) and optionally name it
+opencli jimeng-agent canvas-video \
+  --canvas new \
+  --title '人物镜头测试' \
+  --image ./人物.png \
+  --prompt '请以@图片1作为人物形象参考。' \
+  --ratio 16:9 \
+  --model_version seedance2.0
+
+# inspect every Canvas resource, or correlate one canvas-video assetId exactly
+opencli jimeng-agent canvas-status --canvas <project-id>
+opencli jimeng-agent canvas-status --canvas <project-id> --asset_id <assetId>
 ```
 
 ### WSL + Windows Chrome

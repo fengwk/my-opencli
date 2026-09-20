@@ -19,8 +19,114 @@ The `video` command:
 ```bash
 opencli plugin install /path/to/my-opencli/packages/jimeng-agent
 opencli jimeng-agent video --help
+opencli jimeng-agent canvas-video --help
+opencli jimeng-agent canvas-status --help
 opencli jimeng-agent status --help
 ```
+
+## Commands
+
+| Command | Target | Surface |
+|---|---|---|
+| `video` | Generate page | `https://jimeng.jianying.com/ai-tool/generate?workspace=<workspace-id>` |
+| `canvas-video` | AI Canvas | `https://jimeng.jianying.com/ai-tool/ai-canvas` (`--canvas new` or `--canvas <projectId>`) |
+| `canvas-status` | AI Canvas | List every current/historical resource, optionally correlated to one `assetId` |
+| `status` | History | Search and official download by assetId |
+
+## Canvas Video Example (`canvas-video`)
+
+Supports creating a new canvas (`--canvas new`) or continuing in an existing canvas (`--canvas <projectId>`):
+
+```bash
+# 1. Prepare in a new canvas (--canvas new, prepare-only default)
+OPENCLI_BROWSER_COMMAND_TIMEOUT=300 opencli jimeng-agent canvas-video \
+  --canvas new \
+  --title '人物镜头测试' \
+  --image ./人物.png \
+  --prompt '请以@图片1作为人物形象参考。' \
+  --duration 5 \
+  --ratio 16:9 \
+  --model_version seedance2.0 \
+  --submit 0
+
+# 2. Formally submit in a new canvas (--submit 1)
+OPENCLI_BROWSER_COMMAND_TIMEOUT=300 opencli jimeng-agent canvas-video \
+  --canvas new \
+  --image ./人物.png \
+  --prompt '请以@图片1作为人物形象参考。' \
+  --duration 5 \
+  --ratio 16:9 \
+  --model_version seedance2.0 \
+  --submit 1
+
+# 3. Formally submit in an existing canvas by project id
+OPENCLI_BROWSER_COMMAND_TIMEOUT=300 opencli jimeng-agent canvas-video \
+  --canvas c9d7fc9d-7c2f-447b-9ad9-90bb03d2da84 \
+  --prompt '镜头推近，展现细节。' \
+  --duration 5 \
+  --ratio 16:9 \
+  --model_version seedance2.0 \
+  --submit 1
+```
+
+Canvas video flow:
+1. Opens `/ai-tool/ai-canvas?enter_from=page_click&from_page=create` (`--canvas new`) or `/ai-tool/ai-canvas/<projectId>`.
+2. When `--canvas new --title <name>` is supplied, waits for the real project id and persists the title through `/octo_api/v1/project/update`. Titles are limited to 60 characters; `--title` is rejected for existing canvases to prevent accidental renames.
+3. Expands the right-hand AI conversation panel (文案「与 AI 对话」).
+4. Clears leftover composer content.
+5. Uploads references through the canvas composer's native attachment model and verifies visible ready chips.
+6. Types prompt directives, including `资产编号：<assetId>`, and replaces each `@图片N` / `@视频N` / `@音频N` placeholder through the visible `@` picker. Candidate selection is bound to the current upload's exact `attachmentId`, so historical same-name resources are never selected ambiguously.
+7. Performs content checkpoint (validates uploaded attachments, ordered rich-reference chips, and prompt anchors).
+8. With `--submit 1`, waits for any active Canvas Agent turn (`canvas-agent-stop`) to finish, then clicks the unique enabled send control. Success requires either a correlated server ACK or the exact `assetId` to move from the composer into the sent-message area; ambiguous states fail closed.
+9. With `--submit 0`, leaves the verified draft visible and never clicks send.
+10. Returns `projectId`, `canvasTitle`, `canvasUrl`, `assetId`, `submitted`, `checkpointOk`.
+
+`confirmation` is `ack_confirmed` when a correlated response is captured,
+`ui_confirmed` when the exact sent-message transition is observed, and `none`
+for prepare-only runs.
+
+## Canvas resource status (`canvas-status`)
+
+List all resources currently referenced by an existing canvas, including
+generating, completed, failed, canceled, and deleted generations:
+
+```bash
+opencli jimeng-agent canvas-status \
+  --canvas <projectId> \
+  -f json
+```
+
+Filter to the resources created from one exact `canvas-video` submission:
+
+```bash
+opencli jimeng-agent canvas-status \
+  --canvas <projectId> \
+  --asset_id 9ef879de0504e787 \
+  -f json
+```
+
+The command is read-only. It combines four Canvas-owned data sources:
+
+```text
+project/draft/get
+  -> every node.data.resourceId and resourceBatches[].resourceIds
+
+canvas_agent/sessions/list -> canvas_agent/events/list
+  -> 资产编号:<assetId> on TURN_STARTED / INPUT_ACCEPTED
+  -> same turn_id TOOL_CALL_FINISHED(run_nodes)
+  -> render_infos[].artifacts[].resource_id
+
+resource/batch_get
+  -> live status, generation metadata, and signed media URLs
+```
+
+This same-turn artifact join is the authoritative `assetId` correlation; input
+reference `resource_id` values are not treated as generated outputs. Numeric
+resource states are normalized as `200=generating`, `1000=ready`,
+`1001=failed`, `1002=canceled`, and `2000=deleted`. If an exact submitted turn
+exists but has not emitted an artifact yet, the result is `pending`. Pagination
+fails closed when `--max_pages` is exhausted, so a partial scan is never
+reported as a complete list.
 
 ## Example
 
