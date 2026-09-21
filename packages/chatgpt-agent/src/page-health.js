@@ -50,11 +50,60 @@ export async function probeChatSurface(page) {
     const main = document.querySelector('main') || document.body;
     const mainText = ((main && (main.innerText || main.textContent)) || '').trim();
     const mainLen = mainText.length;
+    const rawErrorish = new RegExp(
+      ${JSON.stringify(PAGE_ERRORISH_RE.source)},
+      ${JSON.stringify(PAGE_ERRORISH_RE.flags)},
+    ).test(mainText);
+    const hasGenerationFailureText = new RegExp(
+      ${JSON.stringify(GENERATION_FAILED_RE.source)},
+      ${JSON.stringify(GENERATION_FAILED_RE.flags)},
+    ).test(mainText);
+    let surfaceText = mainText;
+    if (hasGenerationFailureText) {
+      const parts = [];
+      const walker = document.createTreeWalker(main, 4);
+      let textNode = walker.nextNode();
+      while (textNode) {
+        const owner = textNode.parentElement;
+        const excluded = owner && owner.closest(
+          '[data-message-author-role="user"], '
+          + '[data-message-author-role="assistant"] .markdown, #prompt-textarea, '
+          + '[data-testid="prompt-textarea"], .ProseMirror[contenteditable="true"], '
+          + '[contenteditable="true"][role="textbox"]',
+        );
+        if (!excluded) parts.push(textNode.nodeValue || '');
+        textNode = walker.nextNode();
+      }
+      surfaceText = parts.join(' ');
+    }
+    const errorish = hasGenerationFailureText
+      ? new RegExp(
+        ${JSON.stringify(PAGE_ERRORISH_RE.source)},
+        ${JSON.stringify(PAGE_ERRORISH_RE.flags)},
+      ).test(surfaceText)
+      : rawErrorish;
+    const generationFailed = new RegExp(
+      ${JSON.stringify(GENERATION_FAILED_RE.source)},
+      ${JSON.stringify(GENERATION_FAILED_RE.flags)},
+    ).test(surfaceText);
     const onConversation = /\\/c\\/[A-Za-z0-9-]+/.test(url);
     // Composer-only shell on an existing conversation = broken or still hydrating.
     const blankThread = onConversation && messages === 0 && mainLen < 120;
     const generating = !!document.querySelector('[data-testid="stop-button"]');
-    return { url, composer, messages, mainLen, mainText: mainText.slice(0, 8000), onConversation, blankThread, generating };
+    return {
+      url,
+      composer,
+      messages,
+      mainLen,
+      // Keep the latest text for diagnostics, but classify the full non-user
+      // surface above so long threads are covered without treating prompts as UI.
+      mainText: mainText.slice(-8000),
+      errorish,
+      generationFailed,
+      onConversation,
+      blankThread,
+      generating,
+    };
   })()`).catch(() => ({
     url: '',
     composer: false,
@@ -69,8 +118,10 @@ export async function probeChatSurface(page) {
   }));
 
   const flags = classifyChatMainText(state.mainText);
-  const errorish = !!(state.errorish || flags.errorish);
-  const generationFailed = !!(state.generationFailed || flags.generationFailed);
+  const errorish = typeof state.errorish === 'boolean' ? state.errorish : flags.errorish;
+  const generationFailed = typeof state.generationFailed === 'boolean'
+    ? state.generationFailed
+    : flags.generationFailed;
   const broken = !!(
     errorish
     || !state.composer

@@ -296,6 +296,54 @@ describe('wait-timeout artifact decision', () => {
     ).rejects.toMatchObject({ code: 'GENERATION_FAILED' });
   });
 
+  it('keeps checking the page while draining the completion grace window', async () => {
+    const collector = new StreamCollector();
+    ingestStreamEvents(collector, [streamComplete]);
+    let checks = 0;
+    const checkPage = async () => {
+      checks += 1;
+      if (checks >= 2) {
+        const err = new Error('GENERATION_FAILED: failure appeared during grace');
+        err.code = 'GENERATION_FAILED';
+        throw err;
+      }
+    };
+
+    await expect(
+      waitForProtocolStream(
+        idlePage(),
+        collector,
+        immediateWaitOptions({ graceMs: 20, checkPage }),
+      ),
+    ).rejects.toMatchObject({ code: 'GENERATION_FAILED' });
+    expect(checks).toBeGreaterThanOrEqual(2);
+  });
+
+  it('lets abortPromise interrupt a pending page check', async () => {
+    let rejectBinding;
+    let markCheckStarted;
+    const checkStarted = new Promise((resolve) => {
+      markCheckStarted = resolve;
+    });
+    const bindingFailure = new Promise((_, reject) => {
+      rejectBinding = reject;
+    });
+    bindingFailure.catch(() => {});
+
+    const waitPromise = waitForProtocolStream(idlePage(), new StreamCollector(), {
+      timeoutMs: 1_200_000,
+      abortPromise: bindingFailure,
+      checkPage: () => {
+        markCheckStarted();
+        return new Promise(() => {});
+      },
+    });
+
+    await checkStarted;
+    rejectBinding(new Error('Conflicting conversationId binding'));
+
+    await expect(waitPromise).rejects.toThrow(/Conflicting conversationId binding/);
+  });
 
   // Verifies that waitForProtocolStream with a guarded collector ignores foreign frames and completes on matching conversation.
   it('drains and ignores foreign stream frames in guarded mode until matching conversation completes', async () => {

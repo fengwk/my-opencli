@@ -64,6 +64,7 @@ describe('chatgpt-agent/ask recovery execution flow', () => {
     vi.clearAllMocks();
     ensureHealthyChatSurface.mockResolvedValue({ recovered: false });
     ensureIdleSurfaceWithRecovery.mockResolvedValue({ ok: true });
+    recoverChatSurfaceAfterFailure.mockResolvedValue({});
     snapshotVisibleImageUrls.mockResolvedValue([]);
     sendChatGPTMessage.mockResolvedValue(true);
     currentChatGPTUrl.mockResolvedValue('https://chatgpt.com/c/c-test-123');
@@ -93,6 +94,26 @@ describe('chatgpt-agent/ask recovery execution flow', () => {
     );
     expect(ensureIdleSurfaceWithRecovery).toHaveBeenCalledTimes(1);
     expect(ensureIdleSurfaceWithRecovery).toHaveBeenCalledWith(page, expect.objectContaining({
+      hardReset: expect.any(Function),
+    }));
+  });
+
+  it('maps a generation-failed page check to an actionable command error', async () => {
+    const page = fakePage();
+    probeChatSurface.mockResolvedValue({
+      composer: true,
+      broken: true,
+      generationFailed: true,
+    });
+    waitForProtocolStream.mockImplementationOnce(async (_page, _collector, options) => {
+      await options.checkPage();
+      return { reason: 'unreachable' };
+    });
+
+    await expect(askCommand.func(page, { prompt: 'hello' })).rejects.toThrow(
+      /GENERATION_FAILED: ChatGPT showed a generation error banner/,
+    );
+    expect(recoverChatSurfaceAfterFailure).toHaveBeenCalledWith(page, expect.objectContaining({
       hardReset: expect.any(Function),
     }));
   });

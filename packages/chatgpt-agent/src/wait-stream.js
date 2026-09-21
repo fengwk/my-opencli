@@ -43,6 +43,12 @@ export async function waitForProtocolStream(page, collector, opts) {
     return abortPromise ? Promise.race([promise, abortPromise]) : promise;
   }
 
+  async function checkPage() {
+    if (typeof opts.checkPage === 'function') {
+      await waitAbortable(opts.checkPage());
+    }
+  }
+
   function settleMsForCollector() {
     if (collector.imagePointers.length > 0 || collector.pendingImageGen) {
       return imageSettleMs;
@@ -70,14 +76,13 @@ export async function waitForProtocolStream(page, collector, opts) {
     while (Date.now() < graceDeadline && Date.now() - start < timeoutMs) {
       await waitAbortable(page.sleep(pollMs / 1000));
       await drainOnce();
+      await checkPage();
     }
   }
 
   while (Date.now() - start < timeoutMs) {
     const n = await drainOnce();
-    if (typeof opts.checkPage === 'function') {
-      await opts.checkPage();
-    }
+    await checkPage();
     if (verbose && n > 0) {
       console.error(
         `[chatgpt-agent] ws frames+=${n} totalFrames=${collector.frameCount} `
