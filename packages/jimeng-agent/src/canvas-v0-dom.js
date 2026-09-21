@@ -24,6 +24,7 @@ import {
   buildCanvasV0CreateProjectBody,
   evaluateCanvasV0Checkpoint,
   evaluateCanvasV0PreInputControls,
+  evaluateCanvasV0SubmitReadiness,
   normalizeV0EditorText,
   readCanvasV0CreatedProject,
   V0_CANVAS_CREATE_QUERY,
@@ -73,24 +74,45 @@ function describeError(error) {
  *
  * Class names on the legacy canvas are hashed (`content-generator-PReCtV`), so
  * every locator matches the stable class *prefix* or a design-system class.
+ *
+ * The closed 对话 panel stays mounted at `left === window.innerWidth`, i.e. it
+ * has a real box but sits outside the viewport. Size plus CSS visibility alone
+ * would therefore report a closed panel as open, which silently sent every
+ * prompt into the canvas bottom composer instead of the panel, so `v0Visible`
+ * also requires the element to intersect the viewport.
  */
 function buildCanvasV0LocatorScript() {
   return `
-    const v0Visible = (el) => {
+    const v0Styled = (el) => {
       if (!el || !el.getBoundingClientRect) return false;
       const rect = el.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) return false;
       const style = window.getComputedStyle(el);
       return style.visibility !== 'hidden' && style.display !== 'none';
     };
-    const v0Roots = (scope) => [...(scope || document).querySelectorAll('[class*="content-generator"]')].filter(v0Visible);
-    const v0Sidecar = () => [...document.querySelectorAll('aside[class*="right-panel"]')].filter(v0Visible)[0] || null;
-    const v0ComposerRoot = () => {
-      const sidecar = v0Sidecar();
-      const scoped = sidecar ? v0Roots(sidecar) : [];
-      if (scoped.length > 0) return scoped[0];
-      return v0Roots(document)[0] || null;
+    const v0OnScreen = (el) => {
+      if (!el || !el.getBoundingClientRect) return false;
+      const rect = el.getBoundingClientRect();
+      return rect.left < window.innerWidth && rect.right > 0
+        && rect.top < window.innerHeight && rect.bottom > 0;
     };
+    const v0Visible = (el) => v0Styled(el) && v0OnScreen(el);
+    /** Docked means most of the element actually made it into the viewport. */
+    const v0Docked = (el) => {
+      if (!v0Styled(el)) return false;
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0) return false;
+      const visibleWidth = Math.min(rect.right, window.innerWidth) - Math.max(rect.left, 0);
+      return visibleWidth >= rect.width * 0.6;
+    };
+    const v0Roots = (scope) => [...(scope || document).querySelectorAll('[class*="content-generator"]')].filter(v0Visible);
+    const v0Sidecar = () => [...document.querySelectorAll('aside[class*="right-panel"]')].filter(v0Docked)[0] || null;
+    /** The only composer this run may type into: the docked 对话 panel composer. */
+    const v0SidecarComposer = () => {
+      const sidecar = v0Sidecar();
+      return sidecar ? (v0Roots(sidecar)[0] || null) : null;
+    };
+    const v0ComposerRoot = () => v0SidecarComposer();
     const v0Editor = (root) => {
       const scope = root || document;
       const candidates = [...scope.querySelectorAll('.tiptap.ProseMirror[contenteditable="true"]')].filter(v0Visible);
@@ -127,24 +149,70 @@ function buildCanvasV0LocatorScript() {
       const sidecar = v0Sidecar();
       return v0Roots(document).find((root) => !(sidecar && sidecar.contains(root))) || null;
     };
-    const v0CreationTypeText = () => {
-      for (const root of [v0ComposerRoot(), v0CanvasComposer()]) {
-        const select = root ? [...root.querySelectorAll('[role="combobox"]')].filter(v0Visible)[0] : null;
-        const text = select ? (select.innerText || '').replace(/\\s+/g, ' ').trim() : '';
+    /** Any visible composer, whichever dock currently renders it. */
+    const v0AnyComposer = () => v0Roots(document)[0] || null;
+    const v0PanelReady = () => !!v0Sidecar() && !!v0SidecarComposer();
+    /**
+     * Reading helper for the docked 对话 toolbar: it renders its labels as icons while
+     * the canvas keeps a zero-sized composer that still renders the text variants, so
+     * label reads tolerate any rendered node while clicks stay restricted to the panel.
+     */
+    const v0Rendered = (el) => {
+      if (!el || !el.getBoundingClientRect) return false;
+      const style = window.getComputedStyle(el);
+      return style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const v0IconKey = (node) => [...((node && node.querySelectorAll('path')) || [])]
+      .map((path) => path.getAttribute('d') || '')
+      .join('|');
+    const v0CreationTypeSelects = () => {
+      const found = [];
+      for (const root of [v0ComposerRoot(), v0CanvasComposer(), document]) {
+        if (!root) continue;
+        for (const select of root.querySelectorAll('[role="combobox"]')) {
+          if (!found.includes(select) && v0Rendered(select)) found.push(select);
+        }
+      }
+      return found;
+    };
+    /** The 创作类型 label, read from whichever rendered composer still shows it. */
+    const v0CreationTypeRead = () => {
+      const selects = v0CreationTypeSelects();
+      for (const select of selects) {
+        const text = (select.innerText || '').replace(/\\s+/g, ' ').trim();
         if (text) return { text, select };
       }
-      return { text: '', select: null };
+      return { text: '', select: selects.find(v0OnScreen) || selects[0] || null };
     };
-    const v0SettingsTrigger = () => {
-      for (const root of [v0ComposerRoot(), v0CanvasComposer()]) {
-        const trigger = root ? v0ButtonByText(root, /^(自动|自定义)$/) : null;
-        if (trigger) return trigger;
-      }
-      return v0ButtonByText(document, /^(自动|自定义)$/);
+    /** The 创作类型 trigger this run may click: the docked panel's own selector. */
+    const v0CreationTypeTarget = () => v0CreationTypeSelects().find(v0OnScreen) || null;
+    const v0CreationTypeMenu = () => [...document.querySelectorAll('[role="option"]')].filter(v0Rendered);
+    const v0CreationTypeSelected = () => {
+      const selected = [...document.querySelectorAll('[role="option"][aria-selected="true"]')].filter(v0Rendered)[0] || null;
+      return selected ? (selected.innerText || '').replace(/\\s+/g, ' ').trim() : '';
     };
-    const v0CreationTypeSelect = (root) => {
+    const v0CreationTypeOption = (label) => v0CreationTypeMenu()
+      .find((option) => (option.innerText || '').replace(/\\s+/g, ' ').trim() === label) || null;
+    const v0ToolbarTrigger = (root, pattern) => {
       const scope = root || document;
-      return [...scope.querySelectorAll('[role="combobox"]')].filter(v0Visible)[0] || null;
+      return [...scope.querySelectorAll('button')].filter(v0Rendered)
+        .find((button) => pattern.test((button.innerText || '').replace(/\\s+/g, ''))) || null;
+    };
+    /**
+     * 生成偏好 trigger. The docked panel renders it as an icon alone, so it is located by
+     * the icon it shares with the composer that still renders the 自动/自定义 label.
+     */
+    const v0SettingsTrigger = () => {
+      const docked = v0ComposerRoot();
+      const labelled = docked ? v0ToolbarTrigger(docked, /^(自动|自定义)$/) : null;
+      if (labelled) return labelled;
+      const reference = v0ToolbarTrigger(v0CanvasComposer(), /^(自动|自定义)$/)
+        || v0ToolbarTrigger(document, /^(自动|自定义)$/);
+      if (!reference || !docked) return reference;
+      const key = v0IconKey(reference);
+      if (!key) return reference;
+      return [...docked.querySelectorAll('button')].filter(v0Rendered)
+        .find((button) => v0IconKey(button) === key) || reference;
     };
     const v0UploadInput = (scope) => [...(scope || document).querySelectorAll('input[type="file"]')][0] || null;
     const v0ReferenceItems = (root) => {
@@ -185,19 +253,22 @@ export async function probeJimengCanvasV0Surface(page) {
     ${buildCanvasV0LocatorScript()}
     const sidecar = v0Sidecar();
     const composer = v0ComposerRoot();
+    const anyComposer = v0AnyComposer();
     const launcher = [...document.querySelectorAll('button')]
       .filter(v0Visible)
       .find((node) => /^对话$/.test((node.innerText || '').trim())) || null;
     const editor = composer ? v0Editor(composer) : null;
     const send = composer ? v0SendButton(composer) : null;
     const input = v0UploadInput(sidecar || document);
-    const creationType = v0CreationTypeText();
+    const creationType = v0CreationTypeRead();
     const references = composer ? v0ReferenceItems(composer).length : 0;
     return {
       href: location.href,
-      surfaceReady: !!composer,
+      surfaceReady: !!anyComposer,
       composerReady: !!composer,
+      composerInSidecar: !!sidecar && !!composer && sidecar.contains(composer),
       sidecarOpen: !!sidecar,
+      panelReady: v0PanelReady(),
       editorReady: !!editor,
       launcherVisible: !!launcher,
       uploadControlReady: !!(composer && v0UploadControl(composer)) || !!input,
@@ -271,39 +342,47 @@ export async function waitForCanvasV0Surface(page, timeoutMs = 60_000) {
   );
 }
 
+/**
+ * Dock the 对话 sidecar and keep it open.
+ *
+ * The panel must stay docked for the whole run: the prompt is typed into the
+ * panel composer, and `canvas-v0-video` only reports a prepared draft when the
+ * panel is still open. Every phase therefore re-asserts this state, and a
+ * closed panel is a hard failure instead of silently falling back to the canvas
+ * bottom composer.
+ */
 export async function ensureCanvasV0SidecarOpen(page, timeoutMs = 20_000) {
-  const initial = await probeJimengCanvasV0Surface(page);
-  if (initial.sidecarOpen) return initial;
-
-  const marked = await page.evaluate(`(() => {
-    ${buildCanvasV0LocatorScript()}
-    const launcher = [...document.querySelectorAll('button')]
-      .filter(v0Visible)
-      .find((node) => /^对话$/.test((node.innerText || '').trim()));
-    if (!launcher) return { ok: false, reason: 'launcher-not-found' };
-    launcher.setAttribute(${JSON.stringify(CANVAS_V0_TARGET_ATTR)}, 'sidecar-launcher');
-    return { ok: true };
-  })()`);
-  if (!marked?.ok) {
-    throw phaseError(
-      'sidecar',
-      `Legacy canvas 对话 launcher was not found (${marked?.reason || 'unknown'})`,
-      'Open the legacy canvas project in the visible browser and confirm the 对话 button is present.',
-    );
-  }
-
-  await page.click(`[${CANVAS_V0_TARGET_ATTR}="sidecar-launcher"]`).catch(() => null);
   const deadline = Date.now() + timeoutMs;
-  let last = null;
+  let last = await probeJimengCanvasV0Surface(page).catch((error) => ({ error: describeError(error) }));
+  let clicks = 0;
+
   while (Date.now() < deadline) {
-    await page.sleep(0.4);
+    if (last?.panelReady && last?.editorReady) return { ...last, opened: clicks > 0 };
+    // The launcher only exists while the panel is closed, so a repeat click
+    // cannot toggle an already docked panel shut.
+    const marked = await page.evaluate(`(() => {
+      ${buildCanvasV0LocatorScript()}
+      const launcher = [...document.querySelectorAll('button')]
+        .filter(v0Visible)
+        .find((node) => /^对话$/.test((node.innerText || '').trim()));
+      if (!launcher) return { ok: false, reason: 'launcher-not-found' };
+      launcher.setAttribute(${JSON.stringify(CANVAS_V0_TARGET_ATTR)}, 'sidecar-launcher');
+      return { ok: true };
+    })()`).catch((error) => ({ ok: false, reason: describeError(error) }));
+    if (marked?.ok) {
+      clicks += 1;
+      await page.click(`[${CANVAS_V0_TARGET_ATTR}="sidecar-launcher"]`).catch(() => null);
+      await page.sleep(0.6);
+    } else {
+      await page.sleep(0.4);
+    }
     last = await probeJimengCanvasV0Surface(page).catch(() => null);
-    if (last?.sidecarOpen && last?.editorReady) return last;
   }
+
   throw phaseError(
     'sidecar',
-    `Legacy canvas 对话 sidecar did not open (sidecarOpen=${last?.sidecarOpen === true}, editorReady=${last?.editorReady === true})`,
-    'No generation was submitted. Open the 对话 panel manually and retry.',
+    `Legacy canvas 对话 panel is not docked (sidecarOpen=${last?.sidecarOpen === true}, composerInSidecar=${last?.composerInSidecar === true}, editorReady=${last?.editorReady === true}, clicks=${clicks}, reason=${last?.error || 'none'})`,
+    'No generation was submitted. Open the 对话 panel manually, confirm its composer is visible, then retry.',
   );
 }
 
@@ -312,6 +391,7 @@ export async function runCanvasV0PreInputControlsCheck(page, options = {}) {
   const verdict = evaluateCanvasV0PreInputControls({
     surfaceReady: surface.surfaceReady,
     sidecarOpen: surface.sidecarOpen,
+    composerInSidecar: surface.composerInSidecar,
     editorReady: surface.editorReady,
     composerReady: surface.composerReady,
     uploadControlReady: surface.uploadControlReady,
@@ -321,7 +401,7 @@ export async function runCanvasV0PreInputControlsCheck(page, options = {}) {
     throw phaseError(
       'pre-input',
       `Legacy canvas pre-input controls failed: ${verdict.failures.join(', ')}`,
-      'No generation was submitted. Confirm the sidecar composer, the 创作类型 selector and the reference control are visible.',
+      'No generation was submitted. Confirm the docked 对话 panel composer, the 创作类型 selector and the reference control are visible.',
     );
   }
   return { ...verdict, observed: surface };
@@ -381,7 +461,7 @@ async function clickCanvasV0Control(page, locateSource, probeSource, options = {
   }
 
   throw phaseError(
-    'controls',
+    options.phase || 'controls',
     `Legacy canvas ${label} did not react to the interaction (${last?.detail || 'no detail'}; located=${located?.ok === true})`,
     'No generation was submitted. Inspect the visible legacy canvas composer and retry.',
   );
@@ -444,49 +524,91 @@ function radioProbeSource(label) {
   `;
 }
 
-async function ensureCanvasV0CreationType(page) {
-  const current = await page.evaluate(`(() => {
+const V0_CREATION_MENU_PROBE = `
+  const options = v0CreationTypeMenu();
+  return {
+    ok: options.length > 0,
+    detail: (options.length ? 'options-open' : 'options-missing') + ' selected=' + (v0CreationTypeSelected() || 'unknown'),
+  };
+`;
+
+async function readCanvasV0CreationState(page) {
+  return page.evaluate(`(() => {
     ${buildCanvasV0LocatorScript()}
-    const text = v0CreationTypeText();
-    const select = text.select
-      || (v0ComposerRoot() ? v0CreationTypeSelect(v0ComposerRoot()) : null)
-      || (v0CanvasComposer() ? v0CreationTypeSelect(v0CanvasComposer()) : null);
-    return { text: text.text, hasSelect: !!select };
+    const read = v0CreationTypeRead();
+    return {
+      text: read.text,
+      hasTarget: !!v0CreationTypeTarget(),
+      options: v0CreationTypeMenu().length,
+      selected: v0CreationTypeSelected(),
+    };
   })()`);
+}
+
+async function openCanvasV0CreationMenu(page) {
+  return clickCanvasV0Control(page, 'const target = v0CreationTypeTarget();', V0_CREATION_MENU_PROBE, {
+    label: '创作类型 selector',
+    marker: 'creation-type',
+  });
+}
+
+async function closeCanvasV0CreationMenu(page) {
+  let probe = await probeCanvasV0(page, V0_CREATION_MENU_PROBE);
+  if (!probe?.ok) return { ...probe, ok: true, detail: 'options-already-closed' };
+  await page.nativeKeyPress('Escape').catch(() => null);
+  await page.sleep(0.3);
+  probe = await probeCanvasV0(page, V0_CREATION_MENU_PROBE);
+  if (!probe?.ok) return { ...probe, ok: true, detail: 'options-closed' };
+  // This listbox does not handle Escape; clicking the trigger again closes it.
+  await page.evaluate(`(() => {
+    ${buildCanvasV0LocatorScript()}
+    const target = v0CreationTypeTarget();
+    if (target) target.click();
+  })()`).catch(() => null);
+  await page.sleep(0.3);
+  probe = await probeCanvasV0(page, V0_CREATION_MENU_PROBE);
+  return probe?.ok ? { ...probe, ok: false, detail: 'options-still-open' } : { ...probe, ok: true, detail: 'options-closed' };
+}
+
+async function ensureCanvasV0CreationType(page) {
+  const current = await readCanvasV0CreationState(page);
   if (String(current?.text || '').includes(CANVAS_V0_AGENT_MODE)) {
-    return { creationType: CANVAS_V0_AGENT_MODE, changed: false };
+    return { creationType: CANVAS_V0_AGENT_MODE, changed: false, source: 'label' };
   }
-  if (!current?.hasSelect) {
+  if (!current?.hasTarget) {
     throw phaseError(
       'controls',
       'Legacy canvas 创作类型 selector was not found',
-      'No generation was submitted. Open the sidecar composer and retry.',
+      'No generation was submitted. Open the 对话 panel composer and retry.',
     );
   }
 
-  const locateSelect = `const text = v0CreationTypeText();
-     const target = text.select
-       || (v0ComposerRoot() ? v0CreationTypeSelect(v0ComposerRoot()) : null)
-       || (v0CanvasComposer() ? v0CreationTypeSelect(v0CanvasComposer()) : null);`;
-  await clickCanvasV0Control(page, locateSelect, `
-    const popup = [...document.querySelectorAll('.lv-select-popup, [class*="lv-select-popup"]')]
-      .filter(v0Visible)
-      .find((node) => (node.innerText || '').includes(${JSON.stringify(CANVAS_V0_AGENT_MODE)}));
-    return { ok: !!popup, detail: popup ? 'options-open' : 'options-missing' };
-  `, { label: '创作类型 selector', marker: 'creation-type' });
+  // The docked 对话 toolbar renders 创作类型 as an icon, so the open option list is the
+  // only place that reports which mode the panel composer will actually submit with.
+  await openCanvasV0CreationMenu(page);
+  const opened = await readCanvasV0CreationState(page);
+  const previous = String(opened?.selected || '');
+  if (previous.includes(CANVAS_V0_AGENT_MODE)) {
+    await closeCanvasV0CreationMenu(page);
+    return { creationType: CANVAS_V0_AGENT_MODE, changed: false, source: 'listbox', previous };
+  }
 
-  const locateOption = `
-    const popup = [...document.querySelectorAll('.lv-select-popup, [class*="lv-select-popup"]')]
-      .filter(v0Visible)
-      .find((node) => (node.innerText || '').includes(${JSON.stringify(CANVAS_V0_AGENT_MODE)}));
-    const target = popup
-      ? [...popup.querySelectorAll('*')].filter(v0Visible).filter((node) => (node.innerText || '').trim() === ${JSON.stringify(CANVAS_V0_AGENT_MODE)}).pop()
-      : null;`;
-  await clickCanvasV0Control(page, locateOption, `
-    const text = v0CreationTypeText().text;
-    return { ok: text.includes(${JSON.stringify(CANVAS_V0_AGENT_MODE)}), detail: 'creationType=' + text };
+  await clickCanvasV0Control(page, `const target = v0CreationTypeOption(${JSON.stringify(CANVAS_V0_AGENT_MODE)});`, `
+    const options = v0CreationTypeMenu();
+    return { ok: options.length === 0, detail: options.length ? 'option-list-still-open' : 'option-list-closed' };
   `, { label: `创作类型 ${CANVAS_V0_AGENT_MODE} option`, marker: 'creation-type-agent' });
-  return { creationType: CANVAS_V0_AGENT_MODE, changed: true };
+
+  await openCanvasV0CreationMenu(page);
+  const confirmed = await readCanvasV0CreationState(page);
+  await closeCanvasV0CreationMenu(page);
+  if (!String(confirmed?.selected || '').includes(CANVAS_V0_AGENT_MODE)) {
+    throw phaseError(
+      'controls',
+      `Legacy canvas 创作类型 did not switch to ${CANVAS_V0_AGENT_MODE} (selected=${confirmed?.selected || 'unknown'})`,
+      `No generation was submitted. Pick ${CANVAS_V0_AGENT_MODE} in the 对话 panel composer and retry.`,
+    );
+  }
+  return { creationType: CANVAS_V0_AGENT_MODE, changed: true, source: 'listbox', previous };
 }
 
 async function openCanvasV0GenerationSettings(page) {
@@ -597,10 +719,14 @@ export async function readCanvasV0ComposerState(page) {
 }
 
 export async function clearCanvasV0Composer(page, phase = 'clear-initial') {
-  const locateEditor = 'const target = (() => { const composer = v0ComposerRoot(); return composer ? v0Editor(composer) : null; })();';
+  const locateEditor = 'const target = (() => { const composer = v0SidecarComposer(); return composer ? v0Editor(composer) : null; })();';
   const marked = await markCanvasV0Control(page, 'prompt-editor', locateEditor);
   if (!marked?.ok) {
-    throw phaseError(phase, `Legacy canvas prompt editor not found for clearing (${marked?.reason || 'unknown'})`);
+    throw phaseError(
+      phase,
+      `Legacy canvas 对话 panel composer was not found for clearing (${marked?.reason || 'unknown'})`,
+      'No generation was submitted. Dock the 对话 panel and retry.',
+    );
   }
 
   // A real click moves DOM focus into the composer; CDP key presses then land
@@ -657,10 +783,17 @@ export async function clearCanvasV0References(page, phase = 'clear-references') 
   let last = null;
   while (Date.now() < deadline) {
     last = await readCanvasV0References(page);
+    if (last?.panelDocked === false) {
+      throw phaseError(
+        phase,
+        `Legacy canvas 对话 panel closed while clearing references (panelDocked=false)`,
+        'No generation was submitted. Dock the 对话 panel and retry.',
+      );
+    }
     if (Number(last?.count) === 0) return { references: 0 };
     const removed = await page.evaluate(`(() => {
       ${buildCanvasV0LocatorScript()}
-      const composer = v0ComposerRoot();
+      const composer = v0SidecarComposer();
       const items = composer ? v0ReferenceItems(composer) : [];
       const item = items[0];
       if (!item) return { ok: false, reason: 'reference-item-missing' };
@@ -691,7 +824,8 @@ async function markCanvasV0UploadInput(page, marker) {
   return page.evaluate(`(() => {
     ${buildCanvasV0LocatorScript()}
     const sidecar = v0Sidecar();
-    const input = v0UploadInput(sidecar || document);
+    if (!sidecar) return { ok: false, reason: 'panel-not-docked' };
+    const input = v0UploadInput(sidecar);
     if (!(input instanceof HTMLInputElement)) return { ok: false, reason: 'upload-input-missing' };
     input.setAttribute(${JSON.stringify(CANVAS_V0_UPLOAD_INPUT_ATTR)}, ${JSON.stringify(marker)});
     return {
@@ -706,9 +840,10 @@ async function markCanvasV0UploadInput(page, marker) {
 async function readCanvasV0References(page) {
   return page.evaluate(`(() => {
     ${buildCanvasV0LocatorScript()}
-    const composer = v0ComposerRoot();
+    const composer = v0SidecarComposer();
     const items = composer ? v0ReferenceItems(composer) : [];
     return {
+      panelDocked: v0PanelReady(),
       count: items.length,
       alerts: v0Alerts(),
       states: items.map((item) => ({
@@ -760,7 +895,7 @@ export async function uploadCanvasV0ReferenceAssets(page, assets, uploads, start
       throw phaseError(
         'upload',
         `Could not locate the legacy canvas file input for ${asset.label} (${asset.filename}): ${input?.reason || 'unknown'}`,
-        'No generation was submitted. Confirm the 对话 composer is open and retry.',
+        'No generation was submitted. Confirm the 对话 panel is docked with its composer visible, then retry.',
         index,
       );
     }
@@ -787,9 +922,9 @@ export async function composeCanvasV0Prompt(page, agentPrompt) {
   }
   const focused = await page.evaluate(`(() => {
     ${buildCanvasV0LocatorScript()}
-    const composer = v0ComposerRoot();
+    const composer = v0SidecarComposer();
     const editor = composer ? v0Editor(composer) : null;
-    if (!editor) return { ok: false, reason: 'editor-not-found' };
+    if (!editor) return { ok: false, reason: v0Sidecar() ? 'editor-not-found' : 'panel-not-docked' };
     editor.focus();
     const range = document.createRange();
     range.selectNodeContents(editor);
@@ -835,7 +970,7 @@ export async function collectCanvasV0CheckpointSnapshot(page, canonical, assets 
   const marker = String(canonical?.assetId || '');
   return page.evaluate(`(() => {
     ${buildCanvasV0LocatorScript()}
-    const composer = v0ComposerRoot();
+    const composer = v0SidecarComposer();
     const sidecar = v0Sidecar();
     const editor = composer ? v0Editor(composer) : null;
     const send = composer ? v0SendButton(composer) : null;
@@ -846,6 +981,7 @@ export async function collectCanvasV0CheckpointSnapshot(page, canonical, assets 
     return {
       surfaceReady: !!composer && !!editor,
       sidecarOpen: !!sidecar,
+      composerInSidecar: !!sidecar && !!composer && sidecar.contains(composer),
       editorTextNormalized,
       referenceCount: composer ? v0ReferenceItems(composer).length : 0,
       assetIdPresent: marker ? editorTextNormalized.includes(marker) : true,
@@ -867,9 +1003,12 @@ export async function runCanvasV0ContentCheckpoint(page, canonical, assets = [],
     { expectedReferences: assets.length, textAnchors },
   );
   if (!verdict.ok) {
-    const hint = verdict.failures.includes('referenceCount')
-      ? 'No generation was submitted. Confirm every reference finished uploading, then retry.'
-      : 'No generation was submitted. Inspect the visible legacy canvas composer and retry.';
+    let hint = 'No generation was submitted. Inspect the visible legacy canvas composer and retry.';
+    if (verdict.failures.includes('referenceCount')) {
+      hint = 'No generation was submitted. Confirm every reference finished uploading, then retry.';
+    } else if (verdict.failures.includes('sidecarOpen') || verdict.failures.includes('composerInSidecar')) {
+      hint = 'No generation was submitted. The 对话 panel must stay docked with the prompt inside its composer.';
+    }
     const error = phaseError('checkpoint', `Legacy canvas checkpoint failed: ${verdict.failures.join(', ')} (observed=${JSON.stringify(verdict.observed)})`, hint);
     error.checkpoint = verdict;
     throw error;
@@ -882,11 +1021,11 @@ export async function detectCanvasV0SubmitUIConfirmation(page, assetId) {
   const snapshot = await page.evaluate(`(() => {
     ${buildCanvasV0LocatorScript()}
     const marker = ${JSON.stringify(marker)};
-    const composer = v0ComposerRoot();
+    const composer = v0SidecarComposer();
     const sidecar = v0Sidecar();
     const editor = composer ? v0Editor(composer) : null;
     if (!composer || !editor) {
-      return { assetIdInComposer: false, assetIdOutsideComposer: false, composerEmpty: false, agentBusy: false, error: 'composer-not-found' };
+      return { assetIdInComposer: false, assetIdOutsideComposer: false, composerEmpty: false, agentBusy: false, error: sidecar ? 'composer-not-found' : 'panel-not-docked' };
     }
     const editorText = v0EditorText(editor);
     const composerEmpty = editorText.replace(/[\\u00a0\\u200b\\s]+/g, '').length === 0;
@@ -982,19 +1121,38 @@ export async function submitCanvasV0PreparedGeneration(page, canonical, options 
       uiEvidence: preClickUI.reason,
     };
   }
-  if (!preClickUI.assetIdInComposer) {
+  if (preClickUI.assetIdInComposer !== true) {
     throw phaseError(
       'submit-unconfirmed',
-      'Legacy canvas prompt assetId disappeared before the send click',
+      `Legacy canvas prompt assetId was not in the docked 对话 composer before the send click (panel=${preClickUI.error || 'not-docked'})`,
       'No generation was submitted. Re-run the preparation and retry.',
+    );
+  }
+
+  // Sending happens inside the 对话 panel, so the panel must still be docked and
+  // the composer must still hold the prepared prompt at this point.
+  const readiness = await probeJimengCanvasV0Surface(page);
+  const readinessVerdict = evaluateCanvasV0SubmitReadiness({
+    editorHasPrompt: true,
+    sendEnabled: readiness.sendEnabled,
+    sidecarOpen: readiness.sidecarOpen,
+    composerInSidecar: readiness.composerInSidecar,
+  });
+  if (!readinessVerdict.ok) {
+    throw phaseError(
+      'submit-button-missing',
+      `Legacy canvas 对话 panel is not ready for submit (${readinessVerdict.failures.join(', ')})`,
+      'No generation was submitted. Reopen the 对话 panel with the prepared prompt and retry.',
     );
   }
 
   const marked = await page.evaluate(`(() => {
     ${buildCanvasV0LocatorScript()}
-    const composer = v0ComposerRoot();
+    const sidecar = v0Sidecar();
+    const composer = v0SidecarComposer();
     const send = composer ? v0SendButton(composer) : null;
-    if (!send) return { ok: false, reason: 'send-button-not-found' };
+    if (!send) return { ok: false, reason: sidecar ? 'send-button-not-found' : 'panel-not-docked' };
+    if (!sidecar || !sidecar.contains(send)) return { ok: false, reason: 'send-button-outside-panel' };
     if (send.disabled === true || send.getAttribute('aria-disabled') === 'true') {
       return { ok: false, reason: 'send-button-disabled' };
     }
@@ -1004,8 +1162,8 @@ export async function submitCanvasV0PreparedGeneration(page, canonical, options 
   if (!marked?.ok) {
     throw phaseError(
       'submit-button-missing',
-      `Legacy canvas send button is not usable after the checkpoint (${marked?.reason || 'unknown'})`,
-      'No generation was submitted. Confirm the composer holds the prepared prompt and retry.',
+      `Legacy canvas 对话 panel send button is not usable after the checkpoint (${marked?.reason || 'unknown'})`,
+      'No generation was submitted. Confirm the panel composer holds the prepared prompt and retry.',
     );
   }
 
@@ -1141,17 +1299,23 @@ export async function prepareJimengCanvasV0Ask(page, canonical, preparedAssets, 
   while (true) {
     try {
       await waitForCanvasV0Surface(page);
+      // The prompt is typed into the 对话 panel, so the panel is docked up front
+      // and re-asserted after every phase that can re-render the composer.
       await ensureCanvasV0SidecarOpen(page);
       await runCanvasV0PreInputControlsCheck(page, { requireUploadControl: preparedAssets.length > 0 });
       await configureCanvasV0Generation(page, canonical);
+      await ensureCanvasV0SidecarOpen(page);
 
       if (startAssetIndex === 0) {
         await clearCanvasV0Composer(page, 'clear-initial');
         await clearCanvasV0References(page, 'clear-initial');
       }
 
+      await ensureCanvasV0SidecarOpen(page);
       await uploadCanvasV0ReferenceAssets(page, preparedAssets, uploads, startAssetIndex);
+      await ensureCanvasV0SidecarOpen(page);
       await composeCanvasV0Prompt(page, canonical.agentPrompt);
+      await ensureCanvasV0SidecarOpen(page);
 
       const checkpoint = await runCanvasV0ContentCheckpoint(page, canonical, uploads, {
         requireSubmitArmed: !!canonical.submit,
@@ -1169,6 +1333,8 @@ export async function prepareJimengCanvasV0Ask(page, canonical, preparedAssets, 
             'The request may have been accepted: inspect the canvas manually and do not retry blindly.',
           );
         }
+        // Best effort: the accepted generation keeps running inside the panel.
+        await ensureCanvasV0SidecarOpen(page).catch(() => null);
       }
 
       const finalHref = await page.evaluate(() => location.href).catch(() => '');
@@ -1176,6 +1342,18 @@ export async function prepareJimengCanvasV0Ask(page, canonical, preparedAssets, 
       const finalCanvasUrl = resolvedProjectId
         ? buildCanvasV0Url({ mode: 'existing', value: resolvedProjectId, projectId: resolvedProjectId }, { projectId: resolvedProjectId })
         : finalHref;
+      const finalSurface = await probeJimengCanvasV0Surface(page).catch(() => null);
+      const panelOpen = finalSurface?.panelReady === true && finalSurface?.editorReady === true;
+      // A prepared draft is only useful when the 对话 panel is still docked.
+      // After an accepted submit the panel is best effort, because the accepted
+      // generation already runs on the server.
+      if (!panelOpen && !submitted) {
+        throw phaseError(
+          'sidecar',
+          `Legacy canvas 对话 panel is closed when the run finishes (sidecarOpen=${finalSurface?.sidecarOpen === true}, composerInSidecar=${finalSurface?.composerInSidecar === true})`,
+          'No generation was submitted. Reopen the 对话 panel and retry.',
+        );
+      }
 
       return {
         status: submitted ? 'submitted' : 'prepared',
@@ -1190,6 +1368,7 @@ export async function prepareJimengCanvasV0Ask(page, canonical, preparedAssets, 
         retryUsed: retriesUsed,
         submitted,
         checkpointOk: true,
+        panelOpen,
         confirmation: submitResult?.confirmation ?? 'none',
         sessionId: submitResult?.sessionId ?? '',
         submitRequestCount: submitResult?.submitRequestCount ?? (submitted ? 1 : 0),

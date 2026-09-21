@@ -117,6 +117,7 @@ export const canvasV0VideoCommand = cli({
     'retryUsed',
     'submitted',
     'checkpointOk',
+    'panelOpen',
     'confirmation',
     'sessionId',
     'submitRequestCount',

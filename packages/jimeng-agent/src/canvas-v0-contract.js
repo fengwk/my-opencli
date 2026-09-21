@@ -12,6 +12,9 @@
  * Everything here is pure: no browser I/O, no submission, no generation.
  */
 
+import os from 'node:os';
+import path from 'node:path';
+
 import { ArgumentError } from '@jackwener/opencli/errors';
 
 import { JIMENG_CANVAS_ORIGIN } from './canvas-contract.js';
@@ -54,6 +57,14 @@ const V0_ASK_INPUT_KEYS = Object.freeze([
   'model_version',
   'retry',
   'submit',
+]);
+const V0_STATUS_INPUT_KEYS = Object.freeze(['canvas', 'asset_id', 'record_id', 'limit']);
+const V0_DOWNLOAD_INPUT_KEYS = Object.freeze([
+  'canvas',
+  'asset_id',
+  'record_id',
+  'definition',
+  'output',
 ]);
 const CANONICAL_ASK_KEYS = Object.freeze([
   'canvas',
@@ -289,10 +300,256 @@ export function normalizeCanvasV0AskArgs(kwargs = {}) {
   return result;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Legacy canvas read-back contract (canvas-v0-status / canvas-v0-download)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Video definitions a legacy canvas history record publishes, best quality
+ * first. Verified against live /mweb/v1/get_history_by_ids responses.
+ */
+export const V0_VIDEO_DEFINITIONS = Object.freeze(['origin', '720p', '480p', '360p']);
+export const V0_DEFAULT_VIDEO_DEFINITION = '720p';
+export const V0_DEFAULT_STATUS_LIMIT = 20;
+export const V0_MAX_STATUS_LIMIT = 200;
+
+const V0_HISTORY_ID_PATTERN = /^\d{6,}$/;
+const V0_ASSET_ID_PATTERN = /^[0-9a-f]{16}$/;
+
+/**
+ * Record statuses observed on the live legacy canvas API. Codes that were never
+ * observed are reported verbatim instead of named.
+ */
+const V0_RECORD_STATUS_NAMES = Object.freeze({
+  50: 'finished',
+});
+
+export function canvasV0RecordStatusName(code) {
+  if (code === undefined || code === null || code === '') return '';
+  return V0_RECORD_STATUS_NAMES[Number(code)] || '';
+}
+
+/**
+ * Legacy history records keep the composed prompt, so `资产编号：<assetId>` is
+ * readable straight from the generated item and can anchor a status query.
+ */
+export function parseCanvasV0AssetId(value) {
+  const match = /资产编号\s*[：:]\s*([0-9a-f]{16})(?![0-9a-f])/i.exec(String(value ?? ''));
+  return match ? match[1].toLowerCase() : '';
+}
+
+/**
+ * Read the first item of a history record that carries media.
+ *
+ * @param {object} record
+ * @returns {{itemId: string, prompt: string, itemStatus: string|number, coverUrl: string,
+ *   duration: number|string, videoId: string,
+ *   definitions: Array<{definition: string, url: string, md5: string, size: number, width: number, height: number}>}|null}
+ */
+export function readCanvasV0RecordMedia(record) {
+  const items = Array.isArray(record?.item_list) ? record.item_list : [];
+  if (items.length === 0) return null;
+  let fallback = null;
+  for (const item of items) {
+    const video = item?.video;
+    const transcoded = video?.transcoded_video;
+    const base = {
+      itemId: String(item?.common_attr?.id ?? ''),
+      prompt: String(item?.common_attr?.prompt ?? ''),
+      itemStatus: item?.common_attr?.status ?? '',
+      coverUrl: String(item?.common_attr?.cover_url ?? ''),
+      duration: video?.duration ?? '',
+      videoId: String(video?.video_id ?? ''),
+    };
+    if (!transcoded || typeof transcoded !== 'object' || Array.isArray(transcoded)) {
+      fallback = fallback || { ...base, definitions: [] };
+      continue;
+    }
+    const definitions = [];
+    for (const definition of V0_VIDEO_DEFINITIONS) {
+      const entry = transcoded[definition];
+      const url = typeof entry?.video_url === 'string' ? entry.video_url.trim() : '';
+      if (!url) continue;
+      definitions.push({
+        definition,
+        url,
+        md5: String(entry?.md5 ?? ''),
+        size: Number(entry?.size) || 0,
+        width: Number(entry?.width) || 0,
+        height: Number(entry?.height) || 0,
+      });
+    }
+    if (definitions.length > 0) return { ...base, definitions };
+    fallback = fallback || { ...base, definitions: [] };
+  }
+  return fallback;
+}
+
+/**
+ * `ready` because a downloadable video exists, `failed` because the API reported a
+ * failure, `pending` otherwise (never submitted, still running, or a non-video task).
+ */
+export function evaluateCanvasV0RecordState(record, media) {
+  const failure = String(record?.fail_starling_message || record?.fail_starling_key || '').trim();
+  if (failure) return { state: 'failed', reason: failure };
+  if ((media?.definitions?.length || 0) > 0) return { state: 'ready', reason: '' };
+  return { state: 'pending', reason: '' };
+}
+
+/**
+ * Resolve the definition to download. A missing preferred definition falls back in
+ * documented quality order and reports that it did, so a download is never silent.
+ */
+export function pickCanvasV0VideoDefinition(media, preferred) {
+  const definitions = Array.isArray(media?.definitions) ? media.definitions : [];
+  if (definitions.length === 0) return null;
+  const wanted = String(preferred ?? '').trim() || V0_DEFAULT_VIDEO_DEFINITION;
+  const exact = definitions.find((entry) => entry.definition === wanted);
+  if (exact) return { ...exact, preferred: wanted, fallback: false };
+  for (const candidate of V0_VIDEO_DEFINITIONS) {
+    const hit = definitions.find((entry) => entry.definition === candidate);
+    if (hit) return { ...hit, preferred: wanted, fallback: true };
+  }
+  return null;
+}
+
+/**
+ * Normalize `canvas-v0-status` arguments: an existing legacy canvas, optionally
+ * narrowed by one generated asset id or one history record id.
+ */
+export function normalizeCanvasV0StatusArgs(kwargs = {}) {
+  if (kwargs === null || typeof kwargs !== 'object' || Array.isArray(kwargs)) {
+    throw new ArgumentError(
+      `Invalid arguments: expected a plain object, got ${describeType(kwargs)}`,
+      'Pass the command arguments as a plain JSON-style object.',
+    );
+  }
+  assertKnownInputKeys(kwargs, V0_STATUS_INPUT_KEYS, 'normalizeCanvasV0StatusArgs');
+  const identity = requireCanvasV0ExistingIdentity(kwargs.canvas, 'canvas-v0-status');
+  const limit = kwargs.limit === undefined || kwargs.limit === null || String(kwargs.limit).trim() === ''
+    ? V0_DEFAULT_STATUS_LIMIT
+    : Number(kwargs.limit);
+  if (!Number.isInteger(limit) || limit < 1 || limit > V0_MAX_STATUS_LIMIT) {
+    throw new ArgumentError(
+      `Invalid 'limit': expected an integer between 1 and ${V0_MAX_STATUS_LIMIT}, got ${describeType(kwargs.limit)}`,
+      `Pass --limit with a value between 1 and ${V0_MAX_STATUS_LIMIT}.`,
+    );
+  }
+  return {
+    canvas: identity.value,
+    canvasMode: identity.mode,
+    projectId: identity.projectId,
+    assetId: normalizeCanvasV0AssetId(kwargs.asset_id),
+    recordId: normalizeCanvasV0RecordId(kwargs.record_id, 'canvas-v0-status'),
+    limit,
+  };
+}
+
+/**
+ * Normalize `canvas-v0-download` arguments: an existing legacy canvas plus the
+ * generated record to fetch, chosen by record id, asset id, or the newest ready
+ * generation.
+ */
+export function normalizeCanvasV0DownloadArgs(kwargs = {}) {
+  if (kwargs === null || typeof kwargs !== 'object' || Array.isArray(kwargs)) {
+    throw new ArgumentError(
+      `Invalid arguments: expected a plain object, got ${describeType(kwargs)}`,
+      'Pass the command arguments as a plain JSON-style object.',
+    );
+  }
+  assertKnownInputKeys(kwargs, V0_DOWNLOAD_INPUT_KEYS, 'normalizeCanvasV0DownloadArgs');
+  const identity = requireCanvasV0ExistingIdentity(kwargs.canvas, 'canvas-v0-download');
+  const recordId = normalizeCanvasV0RecordId(kwargs.record_id, 'canvas-v0-download');
+  const assetId = normalizeCanvasV0AssetId(kwargs.asset_id);
+  if (recordId && assetId) {
+    throw new ArgumentError(
+      "Invalid arguments: 'record_id' and 'asset_id' cannot be combined",
+      'Pass either --record-id or --asset-id, or neither to download the newest ready video.',
+    );
+  }
+  const definition = String(kwargs.definition ?? '').trim() || V0_DEFAULT_VIDEO_DEFINITION;
+  if (!V0_VIDEO_DEFINITIONS.includes(definition)) {
+    throw new ArgumentError(
+      `Invalid 'definition': '${definition}' (must be one of ${V0_VIDEO_DEFINITIONS.join(', ')})`,
+      'Pass --definition origin|720p|480p|360p.',
+    );
+  }
+  return {
+    canvas: identity.value,
+    canvasMode: identity.mode,
+    projectId: identity.projectId,
+    recordId,
+    assetId,
+    definition,
+    outputDir: normalizeCanvasV0OutputDir(kwargs.output),
+  };
+}
+
+function requireCanvasV0ExistingIdentity(rawCanvas, caller) {
+  const identity = normalizeCanvasV0Identity(rawCanvas);
+  if (identity.mode !== 'existing' || !identity.projectId) {
+    throw new ArgumentError(
+      `${caller} requires an existing legacy canvas; '--canvas new' is not valid`,
+      'Pass the project id or URL printed by canvas-v0-video.',
+    );
+  }
+  return identity;
+}
+
+function normalizeCanvasV0AssetId(raw) {
+  if (raw === undefined || raw === null || String(raw).trim() === '') return '';
+  if (typeof raw !== 'string') {
+    throw new ArgumentError(
+      `Invalid 'asset_id': expected string, got ${describeType(raw)}`,
+      'Pass --asset-id with the 16-character value printed by canvas-v0-video.',
+    );
+  }
+  const assetId = raw.trim().toLowerCase();
+  if (!V0_ASSET_ID_PATTERN.test(assetId)) {
+    throw new ArgumentError(
+      `Invalid 'asset_id': '${raw}' is not a 16-character hex asset id`,
+      'Pass --asset-id with the 16-character value printed by canvas-v0-video.',
+    );
+  }
+  return assetId;
+}
+
+function normalizeCanvasV0RecordId(raw, caller) {
+  if (raw === undefined || raw === null || String(raw).trim() === '') return '';
+  if (typeof raw !== 'string' && typeof raw !== 'number') {
+    throw new ArgumentError(
+      `Invalid 'record_id': expected string, got ${describeType(raw)}`,
+      `Pass --record-id with the history record id from ${caller}.`,
+    );
+  }
+  const recordId = String(raw).trim();
+  if (!V0_HISTORY_ID_PATTERN.test(recordId)) {
+    throw new ArgumentError(
+      `Invalid 'record_id': '${recordId}' is not a numeric history record id`,
+      `Pass --record-id with the history record id from ${caller}.`,
+    );
+  }
+  return recordId;
+}
+
+function normalizeCanvasV0OutputDir(raw) {
+  if (raw === undefined || raw === null || String(raw).trim() === '') {
+    return path.join(os.homedir(), 'Downloads', 'jimeng-agent');
+  }
+  if (typeof raw !== 'string') {
+    throw new ArgumentError(
+      `Invalid 'output': expected string, got ${describeType(raw)}`,
+      'Pass --output as a directory path.',
+    );
+  }
+  return path.resolve(raw.trim());
+}
+
 export function evaluateCanvasV0PreInputControls(snapshot) {
   const checks = {
     surfaceReady: snapshot?.surfaceReady === true,
     sidecarOpen: snapshot?.sidecarOpen === true,
+    composerInSidecar: snapshot?.composerInSidecar === true,
     editorReady: snapshot?.editorReady === true,
     composerReady: snapshot?.composerReady === true,
   };
@@ -316,6 +573,9 @@ export function evaluateCanvasV0Checkpoint(snapshot, expectations) {
   const textAnchors = Array.isArray(expectations?.textAnchors) ? expectations.textAnchors : [];
   const checks = {
     surfaceReady: snapshot?.surfaceReady === true,
+    // The prepared draft only counts when it lives in the docked 对话 panel.
+    sidecarOpen: snapshot?.sidecarOpen === true,
+    composerInSidecar: snapshot?.composerInSidecar === true,
     referenceCount: Number(snapshot?.referenceCount) === expectedReferences,
     promptAnchorsInOrder: anchorsInOrder(editorText, textAnchors),
     noProcessing: snapshot?.processingCount === 0,
@@ -342,6 +602,8 @@ export function evaluateCanvasV0Checkpoint(snapshot, expectations) {
       editorText: editorText.slice(0, 400),
       processingCount: snapshot?.processingCount ?? null,
       submitEnabled: snapshot?.submitEnabled ?? null,
+      sidecarOpen: snapshot?.sidecarOpen === true,
+      composerInSidecar: snapshot?.composerInSidecar === true,
     },
   };
 }
@@ -351,14 +613,15 @@ export function normalizeV0EditorText(value) {
 }
 
 /**
- * Legacy-canvas submit readiness is read from the composer (there is no
- * generation-preference duration/model control to assert).
+ * Legacy-canvas submit readiness is read from the 对话 panel composer (there is
+ * no generation-preference duration/model control to assert).
  */
 export function evaluateCanvasV0SubmitReadiness(snapshot) {
   const checks = {
     editorHasPrompt: snapshot?.editorHasPrompt === true,
     sendEnabled: snapshot?.sendEnabled === true,
     sidecarOpen: snapshot?.sidecarOpen === true,
+    composerInSidecar: snapshot?.composerInSidecar === true,
   };
   const failures = Object.entries(checks)
     .filter(([, ok]) => !ok)

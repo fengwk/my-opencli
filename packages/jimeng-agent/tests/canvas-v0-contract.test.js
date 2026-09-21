@@ -8,15 +8,22 @@ import {
   V0_MAX_TITLE_LENGTH,
   buildCanvasV0CreateProjectBody,
   buildCanvasV0Url,
+  canvasV0RecordStatusName,
   evaluateCanvasV0Checkpoint,
   evaluateCanvasV0PreInputControls,
+  evaluateCanvasV0RecordState,
   evaluateCanvasV0SubmitReadiness,
   normalizeCanvasV0AskArgs,
   normalizeCanvasV0CreateArgs,
+  normalizeCanvasV0DownloadArgs,
   normalizeCanvasV0Identity,
+  normalizeCanvasV0StatusArgs,
   normalizeV0EditorText,
+  parseCanvasV0AssetId,
   parseCanvasV0ProjectIdFromHref,
+  pickCanvasV0VideoDefinition,
   readCanvasV0CreatedProject,
+  readCanvasV0RecordMedia,
 } from '../src/canvas-v0-contract.js';
 
 const PROJECT_ID = '22104635995404';
@@ -158,6 +165,7 @@ describe('jimeng-agent canvas-v0 verdicts', () => {
     expect(evaluateCanvasV0PreInputControls({
       surfaceReady: true,
       sidecarOpen: true,
+      composerInSidecar: true,
       editorReady: true,
       composerReady: true,
       uploadControlReady: true,
@@ -165,13 +173,34 @@ describe('jimeng-agent canvas-v0 verdicts', () => {
 
     const verdict = evaluateCanvasV0PreInputControls({ surfaceReady: true, sidecarOpen: false });
     expect(verdict.ok).toBe(false);
-    expect(verdict.failures).toEqual(expect.arrayContaining(['sidecarOpen', 'editorReady', 'composerReady']));
+    expect(verdict.failures).toEqual(expect.arrayContaining([
+      'sidecarOpen',
+      'composerInSidecar',
+      'editorReady',
+      'composerReady',
+    ]));
+  });
+
+  it('rejects a composer that is open outside the 对话 panel', () => {
+    // The canvas bottom composer shares the prompt document with the panel, so
+    // a docked panel must be asserted separately from "a composer exists".
+    const verdict = evaluateCanvasV0PreInputControls({
+      surfaceReady: true,
+      composerReady: true,
+      editorReady: true,
+      uploadControlReady: true,
+      sidecarOpen: false,
+      composerInSidecar: false,
+    });
+    expect(verdict.ok).toBe(false);
+    expect(verdict.failures).toEqual(['sidecarOpen', 'composerInSidecar']);
   });
 
   it('skips the upload control check when no reference is staged', () => {
     expect(evaluateCanvasV0PreInputControls({
       surfaceReady: true,
       sidecarOpen: true,
+      composerInSidecar: true,
       editorReady: true,
       composerReady: true,
       uploadControlReady: false,
@@ -184,6 +213,8 @@ describe('jimeng-agent canvas-v0 verdicts', () => {
     const good = evaluateCanvasV0Checkpoint(
       {
         surfaceReady: true,
+        sidecarOpen: true,
+        composerInSidecar: true,
         referenceCount: 1,
         editorTextNormalized,
         assetIdPresent: true,
@@ -207,6 +238,8 @@ describe('jimeng-agent canvas-v0 verdicts', () => {
     );
     expect(bad.ok).toBe(false);
     expect(bad.failures).toEqual(expect.arrayContaining([
+      'sidecarOpen',
+      'composerInSidecar',
       'referenceCount',
       'promptAnchorsInOrder',
       'assetIdPresent',
@@ -215,14 +248,153 @@ describe('jimeng-agent canvas-v0 verdicts', () => {
     expect(bad.anchorMismatch?.anchor).toBe('资产编号：abcd1234');
   });
 
+  it('fails the checkpoint when the 对话 panel is closed even though the anchors match', () => {
+    // A closed panel still renders the shared prompt document off-screen, so
+    // anchors alone must never be treated as a prepared draft.
+    const editorTextNormalized = normalizeV0EditorText('资产编号：abcd1234 请以参考图为主角。');
+    const verdict = evaluateCanvasV0Checkpoint(
+      {
+        surfaceReady: true,
+        sidecarOpen: false,
+        composerInSidecar: false,
+        referenceCount: 0,
+        editorTextNormalized,
+        assetIdPresent: true,
+        processingCount: 0,
+      },
+      { expectedReferences: 0, textAnchors: ['资产编号：abcd1234'] },
+    );
+    expect(verdict.ok).toBe(false);
+    expect(verdict.failures).toEqual(['sidecarOpen', 'composerInSidecar']);
+  });
+
   it('evaluates submit readiness', () => {
-    expect(evaluateCanvasV0SubmitReadiness({ editorHasPrompt: true, sendEnabled: true, sidecarOpen: true }))
-      .toMatchObject({ ok: true });
+    expect(evaluateCanvasV0SubmitReadiness({
+      editorHasPrompt: true,
+      sendEnabled: true,
+      sidecarOpen: true,
+      composerInSidecar: true,
+    })).toMatchObject({ ok: true });
     expect(evaluateCanvasV0SubmitReadiness({ editorHasPrompt: false, sendEnabled: false, sidecarOpen: true }))
-      .toMatchObject({ ok: false, failures: ['editorHasPrompt', 'sendEnabled'] });
+      .toMatchObject({ ok: false, failures: ['editorHasPrompt', 'sendEnabled', 'composerInSidecar'] });
   });
 
   it('normalizes editor text consistently for anchors', () => {
     expect(normalizeV0EditorText(' a\u00a0b\u200bc ')).toBe('abc');
+  });
+});
+
+describe('jimeng-agent canvas-v0 read-back contract', () => {
+  const PROMPT = [
+    '(必须使用 Seedance2.0 Fast 模型，**禁止使用 VIP 模型**），你必须严格按照下面的提示词内容生成1个16:9的5s视频',
+    '资产编号：58674724fb245869',
+    '',
+    '---',
+    '',
+    '请以参考图中的浣熊为主角。',
+  ].join('\n');
+
+  const RECORD = {
+    status: 50,
+    generate_type: 10,
+    finish_time: 1785513856,
+    fail_starling_message: '',
+    item_list: [{
+      common_attr: { id: '7668620787527585034', status: 144, prompt: PROMPT, cover_url: 'https://cover.example/a.jpg' },
+      video: {
+        duration: 16,
+        video_id: 'v02870g10004d9mcepa7dld73qhv779g',
+        transcoded_video: {
+          '360p': { video_url: 'https://cdn/360.mp4', md5: 'aa', size: 881942, width: 640, height: 360 },
+          '480p': { video_url: 'https://cdn/480.mp4', md5: 'bb', size: 1412765, width: 854, height: 480 },
+          '720p': { video_url: 'https://cdn/720.mp4', md5: 'cc', size: 2674291, width: 1280, height: 720 },
+          origin: { video_url: 'https://cdn/origin.mp4', md5: 'dd', size: 25543346, width: 1280, height: 720 },
+        },
+      },
+    }],
+  };
+
+  it('parses 资产编号 out of a composed legacy prompt', () => {
+    expect(parseCanvasV0AssetId(PROMPT)).toBe('58674724fb245869');
+    expect(parseCanvasV0AssetId('资产编号: 58674724FB245869')).toBe('58674724fb245869');
+    expect(parseCanvasV0AssetId('资产编号：58674724fb24586')).toBe('');
+    expect(parseCanvasV0AssetId('')).toBe('');
+  });
+
+  it('reads media definitions in quality order without guessing urls', () => {
+    const media = readCanvasV0RecordMedia(RECORD);
+    expect(media.itemId).toBe('7668620787527585034');
+    expect(media.duration).toBe(16);
+    expect(media.definitions.map((entry) => entry.definition)).toEqual(['origin', '720p', '480p', '360p']);
+    expect(media.definitions[1]).toMatchObject({ url: 'https://cdn/720.mp4', md5: 'cc', size: 2674291 });
+  });
+
+  it('falls back to a definition-less item when the record has no video', () => {
+    const media = readCanvasV0RecordMedia({
+      item_list: [{ common_attr: { id: '1', status: 20, prompt: 'prompt only' } }],
+    });
+    expect(media).toMatchObject({ itemId: '1', definitions: [] });
+    expect(readCanvasV0RecordMedia({})).toBeNull();
+  });
+
+  it('classifies a record as ready, failed or pending from observed fields', () => {
+    const media = readCanvasV0RecordMedia(RECORD);
+    expect(evaluateCanvasV0RecordState(RECORD, media)).toEqual({ state: 'ready', reason: '' });
+    expect(evaluateCanvasV0RecordState({ ...RECORD, fail_starling_message: '审核不通过' }, media))
+      .toEqual({ state: 'failed', reason: '审核不通过' });
+    expect(evaluateCanvasV0RecordState({ status: 20 }, { definitions: [] }))
+      .toEqual({ state: 'pending', reason: '' });
+  });
+
+  it('names only the status codes that were observed live', () => {
+    expect(canvasV0RecordStatusName(50)).toBe('finished');
+    expect(canvasV0RecordStatusName('50')).toBe('finished');
+    expect(canvasV0RecordStatusName(20)).toBe('');
+    expect(canvasV0RecordStatusName('')).toBe('');
+  });
+
+  it('picks the requested definition and reports a fallback', () => {
+    const media = readCanvasV0RecordMedia(RECORD);
+    expect(pickCanvasV0VideoDefinition(media, '480p')).toMatchObject({ definition: '480p', fallback: false });
+    expect(pickCanvasV0VideoDefinition(media, '4096p')).toMatchObject({ definition: 'origin', fallback: true });
+    expect(pickCanvasV0VideoDefinition(media, '')).toMatchObject({ definition: '720p', fallback: false });
+    expect(pickCanvasV0VideoDefinition({ definitions: [] }, '720p')).toBeNull();
+  });
+
+  it('normalizes status args with filters and a bounded limit', () => {
+    expect(normalizeCanvasV0StatusArgs({ canvas: '17883546906892' })).toEqual({
+      canvas: '17883546906892',
+      canvasMode: 'existing',
+      projectId: '17883546906892',
+      assetId: '',
+      recordId: '',
+      limit: 20,
+    });
+    expect(normalizeCanvasV0StatusArgs({
+      canvas: '17883546906892',
+      asset_id: '58674724FB245869',
+      record_id: '39441026984460',
+      limit: 5,
+    })).toMatchObject({ assetId: '58674724fb245869', recordId: '39441026984460', limit: 5 });
+    expect(() => normalizeCanvasV0StatusArgs({ canvas: 'new' })).toThrow(ArgumentError);
+    expect(() => normalizeCanvasV0StatusArgs({ canvas: '17883546906892', asset_id: 'short' })).toThrow(ArgumentError);
+    expect(() => normalizeCanvasV0StatusArgs({ canvas: '17883546906892', record_id: 'abc' })).toThrow(ArgumentError);
+    expect(() => normalizeCanvasV0StatusArgs({ canvas: '17883546906892', limit: 0 })).toThrow(ArgumentError);
+    expect(() => normalizeCanvasV0StatusArgs({ canvas: '17883546906892', limit: 1000 })).toThrow(ArgumentError);
+    expect(() => normalizeCanvasV0StatusArgs({ canvas: '17883546906892', typo: 1 })).toThrow(ArgumentError);
+  });
+
+  it('normalizes download args and rejects conflicting selectors', () => {
+    const defaults = normalizeCanvasV0DownloadArgs({ canvas: '17883546906892' });
+    expect(defaults).toMatchObject({ recordId: '', assetId: '', definition: '720p' });
+    expect(defaults.outputDir).toMatch(/Downloads[/\\]jimeng-agent$/);
+    expect(normalizeCanvasV0DownloadArgs({ canvas: '17883546906892', output: '/tmp/v0-dl' }))
+      .toMatchObject({ outputDir: '/tmp/v0-dl' });
+    expect(() => normalizeCanvasV0DownloadArgs({
+      canvas: '17883546906892',
+      record_id: '39441026984460',
+      asset_id: '58674724fb245869',
+    })).toThrow(ArgumentError);
+    expect(() => normalizeCanvasV0DownloadArgs({ canvas: '17883546906892', definition: '4k' })).toThrow(ArgumentError);
   });
 });

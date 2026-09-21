@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   clearCanvasV0References,
   createCanvasV0Project,
+  ensureCanvasV0SidecarOpen,
   probeJimengCanvasV0Surface,
   readCanvasV0ComposerState,
   runCanvasV0ContentCheckpoint,
@@ -223,6 +224,69 @@ describe('jimeng-agent canvas-v0 reference hygiene', () => {
   });
 });
 
+describe('jimeng-agent canvas-v0 对话 panel docking', () => {
+  const closedPanelProbe = {
+    href: `${JIMENG_CANVAS_V0_URL}/${PROJECT_ID}`,
+    surfaceReady: true,
+    composerReady: false,
+    composerInSidecar: false,
+    sidecarOpen: false,
+    panelReady: false,
+    editorReady: true,
+    launcherVisible: true,
+    uploadControlReady: true,
+    creationType: 'Agent 模式',
+    referenceCount: 0,
+    sendVisible: false,
+    sendEnabled: false,
+    ready: false,
+  };
+  const dockedPanelProbe = { ...closedPanelProbe, composerReady: true, composerInSidecar: true, sidecarOpen: true, panelReady: true, sendVisible: true, sendEnabled: true, ready: true };
+
+  it('clicks the 对话 launcher when the panel is closed off-screen', async () => {
+    let probeCount = 0;
+    const page = createMockPage([
+      ['sidecar-launcher', () => ({ ok: true })],
+      ['surfaceReady:', (text) => {
+        probeCount += 1;
+        // The closed panel is mounted but sits outside the viewport, so the
+        // probe keeps reporting a closed panel until the launcher is clicked.
+        return probeCount > 1 ? dockedPanelProbe : closedPanelProbe;
+      }],
+    ]);
+
+    const state = await ensureCanvasV0SidecarOpen(page);
+
+    expect(state.panelReady).toBe(true);
+    expect(state.opened).toBe(true);
+    expect(page.calls.keys.filter(([, selector]) => String(selector).includes('sidecar-launcher')))
+      .toEqual([['click', '[data-opencli-jimeng-v0-target="sidecar-launcher"]']]);
+  });
+
+  it('does not click anything when the panel is already docked', async () => {
+    const page = createMockPage([
+      ['surfaceReady:', () => dockedPanelProbe],
+      ['sidecar-launcher', () => ({ ok: true })],
+    ]);
+
+    const state = await ensureCanvasV0SidecarOpen(page);
+
+    expect(state.panelReady).toBe(true);
+    expect(state.opened).toBe(false);
+    expect(page.calls.keys).toEqual([]);
+  });
+
+  it('fails closed when the 对话 panel never docks', async () => {
+    const page = createMockPage([
+      ['sidecar-launcher', () => ({ ok: false, reason: 'launcher-not-found' })],
+      ['surfaceReady:', () => closedPanelProbe],
+    ]);
+
+    await expect(ensureCanvasV0SidecarOpen(page, 400))
+      .rejects.toThrow(/对话 panel is not docked/);
+  });
+});
+
 describe('jimeng-agent canvas-v0 checkpoint and submit safety', () => {
   const canonical = normalizeCanvasV0AskArgs({
     canvas: PROJECT_ID,
@@ -235,6 +299,8 @@ describe('jimeng-agent canvas-v0 checkpoint and submit safety', () => {
 
   const snapshotHandler = (overrides = {}) => ['editorTextNormalized,', () => ({
     surfaceReady: true,
+    sidecarOpen: true,
+    composerInSidecar: true,
     referenceCount: 1,
     editorTextNormalized: canonical.agentPrompt.replace(/[\u00a0\u200b\s]+/g, ''),
     assetIdPresent: true,
@@ -254,6 +320,12 @@ describe('jimeng-agent canvas-v0 checkpoint and submit safety', () => {
     const page = createMockPage([snapshotHandler({ assetIdPresent: false })]);
     await expect(runCanvasV0ContentCheckpoint(page, canonical, [{ name: 'ref.png' }]))
       .rejects.toThrow(/checkpoint failed: assetIdPresent/);
+  });
+
+  it('rejects the checkpoint when the prompt sits outside the docked panel', async () => {
+    const page = createMockPage([snapshotHandler({ sidecarOpen: false, composerInSidecar: false })]);
+    await expect(runCanvasV0ContentCheckpoint(page, canonical, [{ name: 'ref.png' }]))
+      .rejects.toThrow(/checkpoint failed: sidecarOpen, composerInSidecar/);
   });
 
   it('refuses to submit without an assetId before touching the page', async () => {
@@ -276,7 +348,40 @@ describe('jimeng-agent canvas-v0 checkpoint and submit safety', () => {
     ]);
 
     await expect(submitCanvasV0PreparedGeneration(page, { ...canonical, assetId: ASSET_ID }))
-      .rejects.toThrow(/disappeared before the send click/);
+      .rejects.toThrow(/was not in the docked 对话 composer before the send click/);
+    expect(page.calls.keys.filter(([key]) => key === 'click')).toEqual([]);
+  });
+
+  it('never clicks send when the panel is not docked', async () => {
+    const page = createMockPage([
+      ['assetIdInComposer:', () => ({
+        confirmed: false,
+        assetIdInComposer: true,
+        assetIdOutsideComposer: false,
+        composerEmpty: false,
+        agentBusy: false,
+        error: 'panel-not-docked',
+      })],
+      ['surfaceReady:', () => ({
+        href: `${JIMENG_CANVAS_V0_URL}/${PROJECT_ID}`,
+        surfaceReady: true,
+        composerReady: false,
+        composerInSidecar: false,
+        sidecarOpen: false,
+        panelReady: false,
+        editorReady: true,
+        launcherVisible: true,
+        uploadControlReady: true,
+        creationType: 'Agent 模式',
+        referenceCount: 0,
+        sendVisible: false,
+        sendEnabled: false,
+        ready: false,
+      })],
+    ]);
+
+    await expect(submitCanvasV0PreparedGeneration(page, { ...canonical, assetId: ASSET_ID }))
+      .rejects.toThrow(/panel is not ready for submit \(sendEnabled, sidecarOpen, composerInSidecar\)/);
     expect(page.calls.keys.filter(([key]) => key === 'click')).toEqual([]);
   });
 });
