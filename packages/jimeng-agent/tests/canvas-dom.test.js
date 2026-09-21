@@ -8,6 +8,7 @@ import {
   buildCanvasMentionSegments,
   canvasMentionTextMatchesVariant,
   clearCanvasComposer,
+  composeCanvasPrompt,
   evaluateCanvasSubmitUIState,
   fillCanvasPrompt,
   getCanvasMimeType,
@@ -324,6 +325,126 @@ describe('jimeng-agent/canvas-dom — rich mention preparation', () => {
     expect(events).toEqual(['focus-end', 'model-text']);
   });
 
+  // A single composer transaction cannot interleave text with mention chips, so
+  // the atomic path replaces the picker flow whenever the model exposes it.
+  const attachmentAssets = [
+    {
+      kind: 'image',
+      label: '图片1',
+      filename: 'hero.png',
+      attachmentId: 'agent-attachment-1111',
+    },
+    {
+      kind: 'video',
+      label: '视频1',
+      filename: 'motion.mp4',
+      attachmentId: 'agent-attachment-2222',
+    },
+  ];
+
+  function createAtomicPage({ docText = '', mode = 'composed', events = [], mentions = [] } = {}) {
+    let text = docText;
+    const mentionLabels = [];
+    const calls = [];
+    const page = {
+      click: vi.fn(async (selector) => {
+        if (selector.includes('mention-candidate-')) {
+          const label = mentions[mentionLabels.length];
+          if (typeof label === 'string') mentionLabels.push(label);
+          text += '@chip';
+          events.push('mention');
+        }
+        return { ok: true };
+      }),
+      sleep: vi.fn(async () => undefined),
+      nativeKeyPress: vi.fn(async () => undefined),
+      insertText: vi.fn(async (value) => {
+        text += compactText(value);
+        events.push('typed-text');
+      }),
+      evaluate: vi.fn(async (expression) => {
+        assertEvaluableExpression(expression);
+        if (expression.includes("'@chip'")) return { ok: true, text };
+        if (expression.includes('insertSegments-atomic')) {
+          const segments = expressionArgument(expression);
+          calls.push(segments);
+          if (mode === 'unavailable') {
+            return { ok: false, reason: 'composer-model-unavailable' };
+          }
+          if (mode === 'mismatch') {
+            text += 'garbage';
+            return { ok: true, via: 'insertSegments-atomic' };
+          }
+          text += segments
+            .map((segment) => (segment.type === 'text' ? compactText(segment.text) : '@chip'))
+            .join('');
+          return { ok: true, via: 'insertSegments-atomic' };
+        }
+        if (expression.includes('focus-end-unavailable')) {
+          events.push('focus-end');
+          return { ok: true };
+        }
+        if (expression.includes('insertSegments([{ type:')) {
+          text += compactText(expressionArgument(expression));
+          events.push('model-text');
+          return { ok: true, via: 'insertSegments' };
+        }
+        if (expression.includes('range.selectNodeContents')) {
+          events.push('caret-at-end');
+          return { ok: true };
+        }
+        if (expression.includes('const inlineNodes = separator')) {
+          return {
+            editorFound: true,
+            count: mentionLabels.length,
+            labels: [...mentionLabels],
+            menuVisible: false,
+          };
+        }
+        return { ok: true };
+      }),
+    };
+    return { page, calls, readText: () => text };
+  }
+
+  it('composes the whole prompt in one composer transaction', async () => {
+    const { page, calls, readText } = createAtomicPage({ docText: '@chip@chip' });
+
+    const method = await composeCanvasPrompt(page, '前@图片1中@视频1后', attachmentAssets);
+
+    expect(method).toBe('insertSegments-atomic');
+    expect(page.click).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual([
+      { type: 'text', text: '前' },
+      { type: 'mention', attachmentId: 'agent-attachment-1111', label: '图片1' },
+      { type: 'text', text: '中' },
+      { type: 'mention', attachmentId: 'agent-attachment-2222', label: '视频1' },
+      { type: 'text', text: '后' },
+    ]);
+    expect(readText()).toBe('@chip@chip前@chip中@chip后');
+  });
+
+  it('falls back to the picker flow when the composer model is unavailable', async () => {
+    const events = [];
+    const { page } = createAtomicPage({ mode: 'unavailable', events, mentions: ['图片1'] });
+
+    const method = await composeCanvasPrompt(page, '前@图片1后', [attachmentAssets[0]]);
+
+    expect(method).toBe('insertSegments');
+    expect(events).toEqual(['focus-end', 'model-text', 'mention', 'focus-end', 'model-text']);
+  });
+
+  it('fails when the atomic transaction does not match the composer document', async () => {
+    const { page } = createAtomicPage({ mode: 'mismatch' });
+
+    await expect(composeCanvasPrompt(page, '前@图片1后', [attachmentAssets[0]])).rejects.toMatchObject({
+      phase: 'prompt',
+      message: expect.stringContaining('did not match'),
+    });
+    expect(page.click).not.toHaveBeenCalled();
+  });
+
   // Consecutive submissions must not replace the stop control with a mistaken send click.
   it('waits for three stable idle polls after an active Canvas Agent turn', async () => {
     let now = 1_000;
@@ -538,7 +659,17 @@ describe('jimeng-agent/canvas-dom — preparation scenarios', () => {
         if (expression.includes('focus-end-unavailable')) return { ok: true };
         if (expression.includes("'@chip'")) return { ok: true, text: composerText };
         if (expression.includes('accepted !== false')) {
-          composerText += compactText(expressionArgument(expression));
+          const segments = expressionArgument(expression);
+          if (Array.isArray(segments)) {
+            // One transaction carrying every text and chip segment.
+            composerText += segments
+              .map((segment) => (
+                segment && segment.type === 'text' ? compactText(segment.text) : '@chip'
+              ))
+              .join('');
+            return { ok: true, via: 'insertSegments-atomic', segments: segments.length };
+          }
+          composerText += compactText(segments);
           return { ok: true, via: 'insertSegments' };
         }
         if (expression.includes("reason: 'materializer-not-ready'")) {

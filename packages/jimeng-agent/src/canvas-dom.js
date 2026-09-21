@@ -70,6 +70,7 @@ const UPLOAD_ALERT_REGISTRY_KEY = '__opencliJimengCanvasAlertBaselineRegistry';
 
 let markerCounter = 0;
 // Composer-model insertion keeps the caret itself; the CDP fallback does not.
+const COMPOSER_ATOMIC_INSERTION = 'insertSegments-atomic';
 const COMPOSER_MODEL_INSERTION = 'insertSegments';
 let lastPromptInsertionMethod = '';
 function nextMarker(prefix) {
@@ -1847,6 +1848,106 @@ async function insertCanvasRichMention(page, asset, expectedCount) {
   );
 }
 
+/**
+ * Compose the canvas prompt, preferring the single composer transaction.
+ *
+ * The mention picker inserts chips through the canvas' own asynchronous state,
+ * so interleaving it with model text insertions can reorder the prompt. One
+ * `insertSegments` call carrying every text and chip segment cannot interleave;
+ * the picker flow stays as the fallback when the composer model is unavailable.
+ */
+export async function composeCanvasPrompt(page, agentPrompt, assets = []) {
+  const baseline = await readCanvasComposerText(page);
+  const atomic = await composeCanvasPromptAtomic(page, agentPrompt, assets);
+  if (atomic?.ok) {
+    const expected = buildCanvasPromptDocumentSuffix(agentPrompt, assets);
+    const after = await readCanvasComposerText(page);
+    const composed = after?.ok === true
+      && (after.text === `${baseline?.ok ? baseline.text : ''}${expected}`
+        || after.text.endsWith(expected));
+    if (composed) {
+      lastPromptInsertionMethod = COMPOSER_ATOMIC_INSERTION;
+      return COMPOSER_ATOMIC_INSERTION;
+    }
+    const untouched = baseline?.ok === true && after?.ok === true && after.text === baseline.text;
+    if (!untouched) {
+      throw phaseError(
+        'prompt',
+        `Canvas composed the prompt but the composer document did not match (expectedTail=${JSON.stringify(expected.slice(-60))}, composerTail=${JSON.stringify(String(after?.text || '').slice(-80))})`,
+        'No generation was submitted. Reopen the AI dialog and retry.',
+      );
+    }
+  }
+  await fillCanvasPrompt(page, agentPrompt, assets);
+  return lastPromptInsertionMethod;
+}
+
+/**
+ * Expected composer text for the prompt, with every mention collapsed to the
+ * `@chip` marker used by `readCanvasComposerText`.
+ */
+function buildCanvasPromptDocumentSuffix(agentPrompt, assets) {
+  return buildCanvasMentionSegments(agentPrompt, assets)
+    .map((segment) => (segment.type === 'text' ? segment.value : '@chip'))
+    .join('')
+    .replace(/[\u00a0\u200b\s]+/g, '');
+}
+
+/**
+ * Compose the whole prompt in one composer transaction.
+ *
+ * Mention chips are ordinary `agentAttachment` chips whose descriptors already
+ * exist for the uploaded attachments, so the atomic insertion never races the
+ * canvas mention picker and cannot interleave text with chips.
+ */
+export async function composeCanvasPromptAtomic(page, agentPrompt, assets) {
+  const segments = buildCanvasMentionSegments(agentPrompt, assets);
+  const payload = segments.map((segment) => (
+    segment.type === 'text'
+      ? { type: 'text', text: segment.value }
+      : { type: 'mention', attachmentId: segment.asset.attachmentId, label: segment.asset.label }
+  ));
+  return page.evaluate(`((segments) => {
+    ${buildCanvasModelLocatorScript()}
+    const target = findCanvasComposerModel()?.composerRef?.current;
+    if (typeof target?.insertSegments !== 'function') {
+      return { ok: false, reason: 'composer-model-unavailable' };
+    }
+    if (typeof target?.getDocument !== 'function') {
+      return { ok: false, reason: 'composer-document-unavailable' };
+    }
+    const chips = new Map();
+    for (const part of target.getDocument()?.parts || []) {
+      const attachmentId = part?.type === 'chip' ? part?.data?.attachmentId : null;
+      if (attachmentId && !chips.has(attachmentId)) chips.set(attachmentId, part);
+    }
+    const newChipId = () => 'chip_' + (
+      globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function'
+        ? globalThis.crypto.randomUUID()
+        : String(Date.now()) + '-' + Math.random().toString(36).slice(2)
+    );
+    const built = [];
+    for (const segment of segments) {
+      if (segment.type === 'text') {
+        built.push({ type: 'text', text: segment.text });
+        continue;
+      }
+      const source = chips.get(segment.attachmentId);
+      if (!source) return { ok: false, reason: 'attachment-chip-missing', label: segment.label };
+      built.push({
+        type: 'chip',
+        chipId: newChipId(),
+        kind: source.kind,
+        phase: source.phase,
+        data: { ...source.data },
+      });
+    }
+    if (typeof target.focusEnd === 'function') target.focusEnd();
+    const accepted = target.insertSegments(built);
+    return { ok: accepted !== false, via: 'insertSegments-atomic', segments: built.length };
+  })(${JSON.stringify(payload)})`).catch((error) => ({ ok: false, reason: describeError(error) }));
+}
+
 export async function fillCanvasPrompt(page, agentPrompt, assets = []) {
   if (!agentPrompt) return;
 
@@ -2418,7 +2519,7 @@ export async function prepareJimengCanvasAsk(page, canonical, preparedAssets, op
       }
 
       await uploadCanvasReferenceAssets(page, preparedAssets, uploads, startAssetIndex);
-      await fillCanvasPrompt(page, canonical.agentPrompt, uploads);
+      await composeCanvasPrompt(page, canonical.agentPrompt, uploads);
 
       const checkpoint = await runCanvasContentCheckpoint(
         page,
