@@ -195,20 +195,28 @@ Legacy canvas flow:
    the requested aspect ratio, then closes the popover. The panel also renders
    that trigger as an icon, so it is located by the icon it shares with the
    composer variant that still renders the 自动/自定义 label.
-5. Clears leftover composer text **and leftover reference attachments** so
+5. Restores 生成偏好 = 自动, the state `generate` runs with, so the agent resolves
+   the model and output for the prompt (`--ratio`, `--duration` and
+   `--model-version` already ride in the composed prompt). 自动 is applied last
+   and is confirmed on the switch *and* on the 自动/自定义 mirror label, because
+   picking 视频 or a ratio drops the trigger back to 自定义. The content
+   checkpoint then re-asserts it, so a draft is never reported prepared while
+   生成偏好 was observed off.
+6. Clears leftover composer text **and leftover reference attachments** so
    repeated runs stay idempotent instead of stacking stale references.
-6. Uploads every `--image` reference through the file input and waits for each
+7. Uploads every `--image` reference through the file input and waits for each
    reference card to finish.
-7. Composes the prompt (including `资产编号：<asset-id>`) into the panel TipTap
+8. Composes the prompt (including `资产编号：<asset-id>`) into the panel TipTap
    composer and verifies the visible text.
-8. Content checkpoint: docked panel, expected reference count, prompt anchors in
-   order, `资产编号：<asset-id>` present, no generation already running.
-9. With `--submit 1`, arms a network capture on the legacy send path, then
+9. Content checkpoint: docked panel, expected reference count, prompt anchors in
+   order, `资产编号：<asset-id>` present, 生成偏好 still reading 自动, no generation
+   already running.
+10. With `--submit 1`, arms a network capture on the legacy send path, then
    requires either a correlated ACK or the exact `资产编号：<asset-id>` marker
    moving out of the composer into the sent area. Any ambiguity fails closed.
-10. With `--submit 0` (default), leaves the verified draft in place and never
+11. With `--submit 0` (default), leaves the verified draft in place and never
     clicks send.
-11. Returns `project-id`, `canvas-url`, `references`, `asset-id`, `submitted`,
+12. Returns `project-id`, `canvas-url`, `references`, `asset-id`, `submitted`,
     `checkpoint-ok`, `panel-open`, `confirmation`.
 
 ### Reading a legacy canvas back (`canvas-v0-status` / `canvas-v0-download`)
@@ -279,6 +287,10 @@ Differences from `canvas-video` worth knowing:
   rejected unless `--canvas new` is used.
 - The legacy canvas shares one composer model between the bottom composer and
   the 「对话」 sidecar, so text typed in either place is what gets submitted.
+- 生成偏好 ends on 自动 like `generate`, but the legacy app drops the trigger back
+  to 自定义 as soon as 图片/视频 or a ratio is picked, so 自动 is applied last and
+  the checkpoint re-asserts it. `--ratio`, `--duration` and `--model-version` are
+  carried by the composed prompt, not by that panel.
 - Docking the 「对话」 panel is the one step that depends on the leased tab being
   foreground: run `canvas-v0-video` against a tab the browser renders, and if the
   panel is ever reported open while sitting off-screen, the command recovers it

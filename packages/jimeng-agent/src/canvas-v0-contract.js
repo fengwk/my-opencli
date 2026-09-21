@@ -576,6 +576,10 @@ export function evaluateCanvasV0Checkpoint(snapshot, expectations) {
     // The prepared draft only counts when it lives in the docked 对话 panel.
     sidecarOpen: snapshot?.sidecarOpen === true,
     composerInSidecar: snapshot?.composerInSidecar === true,
+    // 自动 mirrors `generate` and is verified last, because the legacy app drops it
+    // back to 自定义 whenever 图片/视频 or a ratio is picked. An unreadable mirror is
+    // not a failure: configureCanvasV0Generation already confirmed it fail-closed.
+    autoPreference: snapshot?.autoEnabled !== false,
     referenceCount: Number(snapshot?.referenceCount) === expectedReferences,
     promptAnchorsInOrder: anchorsInOrder(editorText, textAnchors),
     noProcessing: snapshot?.processingCount === 0,

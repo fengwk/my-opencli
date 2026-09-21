@@ -397,4 +397,25 @@ describe('jimeng-agent canvas-v0 read-back contract', () => {
     })).toThrow(ArgumentError);
     expect(() => normalizeCanvasV0DownloadArgs({ canvas: '17883546906892', definition: '4k' })).toThrow(ArgumentError);
   });
+
+  it('fails the checkpoint when 自动 was observed off', () => {
+    const base = {
+      surfaceReady: true,
+      sidecarOpen: true,
+      composerInSidecar: true,
+      referenceCount: 0,
+      promptAnchorsInOrder: true,
+      processingCount: 0,
+      assetIdPresent: true,
+    };
+    const expectations = { expectedReferences: 0, textAnchors: [] };
+    expect(evaluateCanvasV0Checkpoint({ ...base, autoEnabled: true }, expectations).ok).toBe(true);
+    // An unreadable mirror does not fail the checkpoint: the configure step already
+    // enabled 自动 fail-closed before this gate runs.
+    expect(evaluateCanvasV0Checkpoint({ ...base, autoEnabled: null }, expectations).ok).toBe(true);
+
+    const off = evaluateCanvasV0Checkpoint({ ...base, autoEnabled: false }, expectations);
+    expect(off.ok).toBe(false);
+    expect(off.failures).toContain('autoPreference');
+  });
 });

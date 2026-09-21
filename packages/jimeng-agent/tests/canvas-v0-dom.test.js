@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   clearCanvasV0References,
+  configureCanvasV0Generation,
   createCanvasV0Project,
   ensureCanvasV0SidecarOpen,
   probeJimengCanvasV0Surface,
@@ -104,6 +105,7 @@ const surfaceReadyHandler = (fields = {}) => [['surfaceReady:',
       launcherVisible: true,
       uploadControlReady: true,
       creationType: 'Agent 模式',
+      autoEnabled: true,
       referenceCount: 0,
       sendVisible: true,
       sendEnabled: true,
@@ -357,6 +359,95 @@ describe('jimeng-agent canvas-v0 对话 panel docking', () => {
       .rejects.toThrow(/reloads=1/);
     expect(page.calls.evaluate.filter((text) => text === 'location.reload()')).toHaveLength(1);
     expect(page.calls.evaluate.filter((text) => text.includes('collapse.click()'))).toHaveLength(1);
+  });
+
+  const generationHandlers = ({ autoInitiallyOn, autoMirror }) => {
+    let autoEnabled = autoInitiallyOn;
+    let popoverProbes = 0;
+    return [
+      ['const read = v0CreationTypeRead();',
+        () => ({ text: 'Agent 模式', hasTarget: true, options: 0, selected: 'Agent 模式' })],
+      ['const target = v0SettingsTrigger();',
+        () => ({ ok: true, selector: '[data-opencli-jimeng-v0-target="generation-settings"]' })],
+      ["detail: 'settings-panel-open'",
+        () => {
+          popoverProbes += 1;
+          return popoverProbes === 1 ? { ok: true, detail: 'settings-panel-open' } : { ok: false, detail: 'popover-missing' };
+        }],
+      ['const label = "视频";', () => ({ ok: true, detail: 'radio-selected' })],
+      ['autoEnabled: v0AutoPreference()', () => ({ autoEnabled: autoMirror })],
+      ['[role="switch"]', (text) => {
+        if (text.includes('setAttribute')) {
+          return { ok: true, selector: '[data-opencli-jimeng-v0-target="auto-switch"]' };
+        }
+        if (text.includes('target.click();')) {
+          autoEnabled = true;
+          return true;
+        }
+        return { ok: autoEnabled, detail: `auto-switch aria-checked=${autoEnabled}` };
+      }],
+    ];
+  };
+
+  it('reuses an already open 生成偏好 popover instead of toggling it shut', async () => {
+    let popoverProbes = 0;
+    const page = createMockPage([
+      ['const read = v0CreationTypeRead();',
+        () => ({ text: 'Agent 模式', hasTarget: true, options: 0, selected: 'Agent 模式' })],
+      ["detail: 'settings-panel-open'", () => {
+        popoverProbes += 1;
+        // Open on the first look, closed again after the Escape that ends the phase.
+        return popoverProbes === 1 ? { ok: true, detail: 'settings-panel-open' } : { ok: false, detail: 'popover-missing' };
+      }],
+      ['const target = v0SettingsTrigger();',
+        () => ({ ok: true, selector: '[data-opencli-jimeng-v0-target="generation-settings"]' })],
+      ['const label = "视频";', () => ({ ok: true, detail: 'radio-selected' })],
+      ['autoEnabled: v0AutoPreference()', () => ({ autoEnabled: true })],
+      ['[role="switch"]', () => ({ ok: true, detail: 'auto-switch aria-checked=true' })],
+    ]);
+
+    const state = await configureCanvasV0Generation(page, {});
+
+    expect(state.autoEnabled).toBe(true);
+    expect(page.calls.evaluate.filter((text) => text.includes('.click();'))).toEqual([]);
+  });
+
+  it('turns the 自动 preference on after the video preference, like generate', async () => {
+    const page = createMockPage(generationHandlers({ autoInitiallyOn: false, autoMirror: true }));
+
+    const state = await configureCanvasV0Generation(page, {});
+
+    expect(state.autoEnabled).toBe(true);
+    expect(state.autoToggled).toBe(true);
+    expect(state.creationType).toBe('Agent 模式');
+    expect(page.calls.evaluate.filter((text) => text.includes('target.click();') && text.includes('switch'))).toHaveLength(1);
+    // The video radio was already selected, so it is only read, never clicked.
+    expect(page.calls.evaluate.filter((text) => text.includes('video-radio'))).toEqual([]);
+  });
+
+  it('leaves an already enabled 自动 preference untouched', async () => {
+    const page = createMockPage(generationHandlers({ autoInitiallyOn: true, autoMirror: true }));
+
+    const state = await configureCanvasV0Generation(page, {});
+
+    expect(state.autoEnabled).toBe(true);
+    expect(state.autoToggled).toBe(false);
+    expect(page.calls.evaluate.filter((text) => text.includes('target.click();'))).toEqual([]);
+  });
+
+  it('fails closed when the 生成偏好 panel exposes no 自动 switch', async () => {
+    const page = createMockPage([
+      ['const read = v0CreationTypeRead();',
+        () => ({ text: 'Agent 模式', hasTarget: true, options: 0, selected: 'Agent 模式' })],
+      ['const target = v0SettingsTrigger();',
+        () => ({ ok: true, selector: '[data-opencli-jimeng-v0-target="generation-settings"]' })],
+      ["detail: 'settings-panel-open'", () => ({ ok: true, detail: 'settings-panel-open' })],
+      ['const label = "视频";', () => ({ ok: true, detail: 'radio-selected' })],
+      ['[role="switch"]', () => ({ ok: false, detail: 'auto-switch-not-found' })],
+    ]);
+
+    await expect(configureCanvasV0Generation(page, {}))
+      .rejects.toThrow(/does not expose the 自动 switch/);
   });
 
   it('docks the panel on transports without cdp', async () => {

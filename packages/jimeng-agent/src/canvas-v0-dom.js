@@ -184,6 +184,19 @@ function buildCanvasV0LocatorScript() {
       }
       return { text: '', select: selects.find(v0OnScreen) || selects[0] || null };
     };
+    /**
+     * 生成偏好 自动 state mirror. The docked panel renders its trigger as an icon and
+     * the canvas keeps a zero-sized composer that still renders the text variant, so
+     * 自动/自定义 is read from any rendered clone (same trick as the 创作类型 label).
+     */
+    const v0AutoPreference = () => {
+      const label = [...document.querySelectorAll('button')]
+        .map((button) => (button.innerText || '').replace(/\\s+/g, ''))
+        .find((text) => text === '自动' || text === '自定义');
+      if (label === '自动') return true;
+      if (label === '自定义') return false;
+      return null;
+    };
     /** The 创作类型 trigger this run may click: the docked panel's own selector. */
     const v0CreationTypeTarget = () => v0CreationTypeSelects().find(v0OnScreen) || null;
     const v0CreationTypeMenu = () => [...document.querySelectorAll('[role="option"]')].filter(v0Rendered);
@@ -275,6 +288,7 @@ export async function probeJimengCanvasV0Surface(page) {
       launcherVisible: !!launcher,
       uploadControlReady: !!(composer && v0UploadControl(composer)) || !!input,
       creationType: creationType.text,
+      autoEnabled: v0AutoPreference(),
       referenceCount: references,
       sendVisible: !!send,
       sendEnabled: send ? !(send.disabled === true || send.getAttribute('aria-disabled') === 'true') : false,
@@ -506,12 +520,15 @@ async function clickCanvasV0Control(page, locateSource, probeSource, options = {
   let located = null;
 
   // The legacy canvas re-renders its toolbar (and therefore replaces the trigger
-  // node) around clicks, so every attempt re-locates and re-marks the control.
+  // node) around clicks, so every attempt re-locates the control. The first attempt
+  // locates and clicks in a single round-trip: a marked selector survives long
+  // enough for a CDP click only sometimes.
   const attempts = [
-    async (selector) => page.evaluate(`(() => {
-      const node = document.querySelector(${JSON.stringify(selector)});
-      if (!node) return false;
-      node.click();
+    async (selector, source) => page.evaluate(`(() => {
+      ${buildCanvasV0LocatorScript()}
+      ${source}
+      if (!target) return false;
+      target.click();
       return true;
     })()`),
     async (selector) => page.click(selector),
@@ -524,7 +541,7 @@ async function clickCanvasV0Control(page, locateSource, probeSource, options = {
       last = { ok: false, detail: `relocate-failed:${located?.reason || 'unknown'}` };
       continue;
     }
-    await attempt(located.selector).catch((error) => {
+    await attempt(located.selector, locateSource).catch((error) => {
       last = { ok: false, detail: `click-failed:${describeError(error)}` };
       return null;
     });
@@ -688,6 +705,13 @@ async function ensureCanvasV0CreationType(page) {
 }
 
 async function openCanvasV0GenerationSettings(page) {
+  // The popover may already be open (a previous run or the operator left it that
+  // way), and clicking its trigger would only close it again.
+  const existing = await probeCanvasV0(page, V0_POPOVER_PROBE);
+  if (existing?.ok) {
+    const marked = await markCanvasV0Control(page, 'generation-settings', 'const target = v0SettingsTrigger();');
+    return { ...existing, triggerSelector: marked?.ok ? marked.selector : '' };
+  }
   const opened = await clickCanvasV0Control(page, 'const target = v0SettingsTrigger();', V0_POPOVER_PROBE, {
     label: '生成偏好 trigger',
     marker: 'generation-settings',
@@ -707,6 +731,62 @@ async function closeCanvasV0GenerationSettings(page, triggerSelector) {
     probe = await probeCanvasV0(page, V0_POPOVER_PROBE);
   }
   return probe;
+}
+
+const V0_AUTO_SWITCH_PROBE = `
+  const popover = v0SettingsPanel();
+  const toggle = popover ? popover.querySelector('button[role="switch"]') : null;
+  if (!toggle) return { ok: false, detail: 'auto-switch-not-found' };
+  const enabled = toggle.getAttribute('aria-checked') === 'true';
+  return { ok: enabled, detail: 'auto-switch aria-checked=' + String(toggle.getAttribute('aria-checked')) };
+`;
+
+/**
+ * 自动 is what the original `generate` flow selects: the agent resolves the
+ * output for the prompt, while 选择比例 stays an explicit setting and the model
+ * with it. Picking 视频 or a ratio drops the trigger back to 自定义, so 自动 is
+ * applied last and confirmed on the mirror label (the canvas keeps a zero-sized
+ * composer whose text variant still renders 自动/自定义).
+ */
+async function ensureCanvasV0AutoPreference(page) {
+  const locateSwitch = `
+    const popover = v0SettingsPanel();
+    const target = popover ? popover.querySelector('button[role="switch"]') : null;
+  `;
+  const state = await probeCanvasV0(page, V0_AUTO_SWITCH_PROBE);
+  if (state?.detail === 'auto-switch-not-found') {
+    throw phaseError(
+      'preference',
+      'Legacy canvas 生成偏好 panel does not expose the 自动 switch',
+      'No generation was submitted. Confirm the 生成偏好 popover opens in the docked 对话 panel and retry.',
+    );
+  }
+  const toggled = !state?.ok;
+  if (toggled) {
+    await clickCanvasV0Control(page, locateSwitch, V0_AUTO_SWITCH_PROBE, {
+      label: '生成偏好 自动 switch',
+      marker: 'auto-switch',
+    });
+  }
+  // The mirror label is the state the next phase reads, so require it here too.
+  const mirrorDeadline = Date.now() + 3_000;
+  let mirror = null;
+  while (Date.now() < mirrorDeadline) {
+    mirror = await page.evaluate(`(() => {
+      ${buildCanvasV0LocatorScript()}
+      return { autoEnabled: v0AutoPreference() };
+    })()`).catch(() => null);
+    if (mirror?.autoEnabled !== false) break;
+    await page.sleep(0.4);
+  }
+  if (mirror?.autoEnabled === false) {
+    throw phaseError(
+      'preference',
+      'Legacy canvas 自动 preference did not stick (the 生成偏好 trigger still reads 自定义)',
+      'No generation was submitted. Switch 生成偏好 to 自动 in the docked 对话 panel and retry.',
+    );
+  }
+  return { autoEnabled: true, toggled };
 }
 
 export async function configureCanvasV0Generation(page, canonical = {}) {
@@ -767,10 +847,15 @@ export async function configureCanvasV0Generation(page, canonical = {}) {
     ratioMode = 'settings';
   }
 
+  // 自动 last: the video/ratio clicks above drop the trigger to 自定义.
+  const auto = await ensureCanvasV0AutoPreference(page);
+
   await closeCanvasV0GenerationSettings(page, settings.triggerSelector);
   return {
     creationType: creation.creationType,
     videoMode: true,
+    autoEnabled: auto.autoEnabled,
+    autoToggled: auto.toggled,
     ratio: ratio || '智能',
     ratioMode,
   };
@@ -1059,6 +1144,7 @@ export async function collectCanvasV0CheckpointSnapshot(page, canonical, assets 
       sidecarOpen: !!sidecar,
       composerInSidecar: !!sidecar && !!composer && sidecar.contains(composer),
       editorTextNormalized,
+      autoEnabled: v0AutoPreference(),
       referenceCount: composer ? v0ReferenceItems(composer).length : 0,
       assetIdPresent: marker ? editorTextNormalized.includes(marker) : true,
       processingCount: stop ? 1 : 0,
