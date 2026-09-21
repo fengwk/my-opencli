@@ -21,6 +21,8 @@ opencli plugin install /path/to/my-opencli/packages/jimeng-agent
 opencli jimeng-agent video --help
 opencli jimeng-agent canvas-create --help
 opencli jimeng-agent canvas-video --help
+opencli jimeng-agent canvas-v0-create --help
+opencli jimeng-agent canvas-v0-video --help
 opencli jimeng-agent canvas-status --help
 opencli jimeng-agent status --help
 ```
@@ -32,6 +34,8 @@ opencli jimeng-agent status --help
 | `video` | Generate page | `https://jimeng.jianying.com/ai-tool/generate?workspace=<workspace-id>` |
 | `canvas-create` | AI Canvas | Create a blank canvas only, return its `project-id` for later runs |
 | `canvas-video` | AI Canvas | `https://jimeng.jianying.com/ai-tool/ai-canvas` (`--canvas new` or `--canvas <project-id>`) |
+| `canvas-v0-create` | Legacy canvas | Create a blank 初代画布 (`/ai-tool/canvas`) and return its numeric `project-id` |
+| `canvas-v0-video` | Legacy canvas | `https://jimeng.jianying.com/ai-tool/canvas` (`--canvas new` or `--canvas <project-id>`) |
 | `canvas-status` | AI Canvas | List every current/historical resource, optionally correlated to one `asset-id` |
 | `status` | History | Search and official download by `asset-id` |
 
@@ -126,6 +130,76 @@ Canvas video flow:
 `confirmation` is `ack_confirmed` when a correlated response is captured,
 `ui_confirmed` when the exact sent-message transition is observed, and `none`
 for prepare-only runs.
+
+## Legacy canvas (`canvas-v0-create` / `canvas-v0-video`)
+
+The 初代画布 surface (`/ai-tool/canvas/<project-id>`) is a different editor
+from the current AI Canvas: projects are created through
+`/mweb/v1/infinite_canvas/create_project` inside the authenticated page, the
+title is limited to **20 characters**, and references are attached as files
+instead of `@图片N` mention chips.
+
+```bash
+# 1. Create a blank legacy canvas and read its numeric project id
+OPENCLI_BROWSER_COMMAND_TIMEOUT=300 opencli jimeng-agent canvas-v0-create \
+  --title '苏州猫咪 v0' \
+  -f json
+
+# 2. Prepare a draft (dry run: no generation is submitted)
+OPENCLI_BROWSER_COMMAND_TIMEOUT=300 opencli jimeng-agent canvas-v0-video \
+  --canvas 22104771569420 \
+  --image ./人物.png \
+  --prompt '请以参考图中的角色为主角生成视频。' \
+  --duration 5 \
+  --ratio 16:9 \
+  --model-version seedance2.0fast \
+  --submit 0
+
+# 3. Submit for real only after the dry run looks right
+OPENCLI_BROWSER_COMMAND_TIMEOUT=300 opencli jimeng-agent canvas-v0-video \
+  --canvas 22104771569420 \
+  --image ./人物.png \
+  --prompt '请以参考图中的角色为主角生成视频。' \
+  --duration 5 \
+  --ratio 16:9 \
+  --model-version seedance2.0fast \
+  --submit 1
+```
+
+Legacy canvas flow:
+1. `canvas-v0-create` posts an empty draft (`layers: []`) through the page's own
+   `fetch` wrapper, so the signed `sign` / `x-secsdk-*` headers stay valid, then
+   opens `<canvas-url>?enter_from=create_new&from_page=assets` and waits for the
+   composer to mount. Nothing else is changed and nothing is submitted.
+2. `canvas-v0-video` opens `--canvas new` (creating the project first) or an
+   existing `/ai-tool/canvas/<project-id>` project, expands the right-hand
+   「对话」 sidecar and verifies the composer, launcher and upload control.
+3. Applies `--ratio` in the 「生成偏好」 panel: switches to video mode and selects
+   the requested aspect ratio, then closes the popover.
+4. Clears leftover composer text **and leftover reference attachments** so
+   repeated runs stay idempotent instead of stacking stale references.
+5. Uploads every `--image` reference through the file input and waits for each
+   reference card to finish.
+6. Composes the prompt (including `资产编号：<asset-id>`) into the shared
+   TipTap composer and verifies the visible text.
+7. Content checkpoint: surface ready, expected reference count, prompt anchors in
+   order, `资产编号：<asset-id>` present, no generation already running.
+8. With `--submit 1`, arms a network capture on the legacy send path, then
+   requires either a correlated ACK or the exact `资产编号：<asset-id>` marker
+   moving out of the composer into the sent area. Any ambiguity fails closed.
+9. With `--submit 0` (default), leaves the verified draft in place and never
+   clicks send.
+10. Returns `project-id`, `canvas-url`, `references`, `asset-id`, `submitted`,
+    `checkpoint-ok`, `confirmation`.
+
+Differences from `canvas-video` worth knowing:
+
+- References are uploaded as files; `--prompt` must be plain text without
+  `@图片N`-style mentions (the legacy composer has no rich-reference picker).
+- Titles are capped at 20 characters and, as with `canvas-video`, `--title` is
+  rejected unless `--canvas new` is used.
+- The legacy canvas shares one composer model between the bottom composer and
+  the 「对话」 sidecar, so text typed in either place is what gets submitted.
 
 ## Canvas resource status (`canvas-status`)
 

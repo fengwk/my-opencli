@@ -55,6 +55,8 @@ opencli gemini-agent ask --help
 opencli jimeng-agent video --help
 opencli jimeng-agent canvas-create --help
 opencli jimeng-agent canvas-video --help
+opencli jimeng-agent canvas-v0-create --help
+opencli jimeng-agent canvas-v0-video --help
 opencli jimeng-agent canvas-status --help
 opencli utils scrape --help
 ```
@@ -81,6 +83,8 @@ opencli gemini-agent ask --help
 opencli jimeng-agent video --help
 opencli jimeng-agent canvas-create --help
 opencli jimeng-agent canvas-video --help
+opencli jimeng-agent canvas-v0-create --help
+opencli jimeng-agent canvas-v0-video --help
 opencli jimeng-agent canvas-status --help
 opencli utils scrape --help
 ```

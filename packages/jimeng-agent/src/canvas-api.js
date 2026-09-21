@@ -14,24 +14,35 @@ export const CANVAS_AGENT_SESSIONS_LIST_PATH = '/octo_api/v1/canvas_agent/sessio
 export const CANVAS_AGENT_EVENTS_LIST_PATH = '/octo_api/v1/canvas_agent/events/list';
 
 const JIMENG_APP_ID = '513695';
+export const CANVAS_PROJECT_JIMENG_APP_ID = JIMENG_APP_ID;
+const DEFAULT_ALLOWED_PATH_PREFIXES = Object.freeze(['/octo_api/v1/']);
 
 /**
  * Execute a JSON POST through the authenticated Jimeng page.
  *
+ * The page transport injects the `sign` / `x-secsdk-*` headers the Jimeng
+ * gateway expects, so both `/octo_api/v1/*` (Agent Canvas) and `/mweb/v1/*`
+ * (legacy canvas) calls go through it instead of raw HTTP.
+ *
  * @param {object} page
  * @param {string} path
  * @param {object} body
+ * @param {{ pathPrefixes?: string[] }} [options]
  * @returns {Promise<any>}
  */
-export async function requestCanvasJson(page, path, body) {
+export async function requestJimengJson(page, path, body, options = {}) {
   if (typeof page?.evaluate !== 'function') {
     throw new CommandExecutionError(
       'JIMENG_CANVAS_API_UNSUPPORTED: browser page does not support evaluate',
       'Use the OpenCLI Browser Bridge extension.',
     );
   }
-  if (typeof path !== 'string' || !path.startsWith('/octo_api/v1/')) {
-    throw new Error(`Unsupported Jimeng Canvas API path: ${String(path)}`);
+  const allowedPrefixes = Array.isArray(options.pathPrefixes) && options.pathPrefixes.length > 0
+    ? options.pathPrefixes
+    : DEFAULT_ALLOWED_PATH_PREFIXES;
+  const pathname = String(path || '').split('?')[0];
+  if (typeof path !== 'string' || !allowedPrefixes.some((prefix) => pathname.startsWith(prefix))) {
+    throw new Error(`Unsupported Jimeng API path: ${String(path)}`);
   }
 
   const expression = `(async () => {
@@ -115,6 +126,13 @@ export async function requestCanvasJson(page, path, body) {
     throw canvasApiError(path, 'response body was not a JSON object');
   }
   return result.body;
+}
+
+/**
+ * `/octo_api/v1/*` wrapper used by the Agent Canvas resource readers.
+ */
+export async function requestCanvasJson(page, path, body) {
+  return requestJimengJson(page, path, body, { pathPrefixes: DEFAULT_ALLOWED_PATH_PREFIXES });
 }
 
 export function unwrapOctoData(envelope, path, { requireData = true } = {}) {
