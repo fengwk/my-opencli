@@ -364,17 +364,29 @@ export const askCommand = cli({
       const wsNoProgressMs = Math.min(wsBudgetMs, Math.max(60_000, wsBudgetMs - 30_000));
       let waitResult;
       let lastSurfaceProbeAt = 0;
+      let lastSurface = null;
+      // One throttled page probe serves both failure-banner detection and the
+      // "still generating" gate, so each polling cycle costs at most one evaluate.
+      const probeSurface = async () => {
+        const now = Date.now();
+        if (now - lastSurfaceProbeAt >= 1000) {
+          lastSurfaceProbeAt = now;
+          lastSurface = await probeChatSurface(page);
+        }
+        return lastSurface;
+      };
       try {
         waitResult = await waitForProtocolStream(page, collector, {
           timeoutMs: wsBudgetMs,
           noProgressMs: wsNoProgressMs,
           abortPromise: bindingFailurePromise,
+          isPageBusy: async () => {
+            const surface = await probeSurface();
+            return !!(surface && surface.generating);
+          },
           checkPage: async () => {
-            const now = Date.now();
-            if (now - lastSurfaceProbeAt < 1000) return;
-            lastSurfaceProbeAt = now;
-            const surface = await probeChatSurface(page);
-            if (!surface.generationFailed) return;
+            const surface = await probeSurface();
+            if (!surface || !surface.generationFailed) return;
             const err = new Error(
               'GENERATION_FAILED: ChatGPT showed a generation error banner',
             );

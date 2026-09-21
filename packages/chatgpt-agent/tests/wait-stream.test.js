@@ -319,6 +319,67 @@ describe('wait-timeout artifact decision', () => {
     expect(checks).toBeGreaterThanOrEqual(2);
   });
 
+  it('keeps draining an empty turn stream while the page still reports generating', async () => {
+    // Reproduces the thinking-model image turn: the turn stream completes with
+    // no visible text, and the assistant answer arrives later through a
+    // conversation update. The page stays the source of truth for "not done yet".
+    const { page } = queuedPage([
+      [{
+        direction: 'received',
+        payload: JSON.stringify([streamItem([streamComplete])]),
+      }],
+      [{
+        direction: 'received',
+        payload: JSON.stringify(conversationUpdate([{
+          id: 'assistant-late',
+          author: { role: 'assistant' },
+          content: { parts: ['海边的小咖啡馆已经画好了。'] },
+        }])),
+      }],
+    ]);
+    let busyChecks = 0;
+    const result = await waitForProtocolStream(page, new StreamCollector(), {
+      timeoutMs: 5000,
+      textSettleMs: 0,
+      imageSettleMs: 0,
+      graceMs: 0,
+      pollMs: 0,
+      isPageBusy: async () => {
+        busyChecks += 1;
+        return true;
+      },
+    });
+
+    expect(busyChecks).toBeGreaterThanOrEqual(1);
+    expect(result).toEqual({ reason: 'protocol-complete', text: '海边的小咖啡馆已经画好了。' });
+  });
+
+  it('still reports an empty turn stream once the page is idle', async () => {
+    const collector = new StreamCollector();
+    ingestStreamEvents(collector, [streamComplete]);
+    let busyChecks = 0;
+    const result = await waitForProtocolStream(idlePage(), collector, immediateWaitOptions({
+      isPageBusy: async () => {
+        busyChecks += 1;
+        return false;
+      },
+    }));
+
+    expect(busyChecks).toBe(1);
+    expect(result).toEqual({ reason: 'protocol-complete-text-empty', text: '' });
+  });
+
+  it('does not conclude an empty turn while the page never settles', async () => {
+    const collector = new StreamCollector();
+    ingestStreamEvents(collector, [streamComplete]);
+    const result = await waitForProtocolStream(idlePage(), collector, immediateWaitOptions({
+      timeoutMs: 120,
+      isPageBusy: async () => true,
+    }));
+
+    expect(result.reason).toBe('wait-timeout');
+  });
+
   it('lets abortPromise interrupt a pending page check', async () => {
     let rejectBinding;
     let markCheckStarted;

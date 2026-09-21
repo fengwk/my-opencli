@@ -98,6 +98,29 @@ describe('chatgpt-agent/ask recovery execution flow', () => {
     }));
   });
 
+  it('reports the live surface as busy so an in-flight turn is not cut short', async () => {
+    const page = fakePage();
+    probeChatSurface.mockResolvedValue({
+      composer: true,
+      broken: false,
+      generating: true,
+      generationFailed: false,
+    });
+    let busy;
+    waitForProtocolStream.mockImplementationOnce(async (_page, _collector, options) => {
+      busy = await options.isPageBusy();
+      return { reason: 'stream-end' };
+    });
+
+    await askCommand.func(page, { prompt: 'hello' });
+
+    expect(busy).toBe(true);
+    expect(waitForProtocolStream).toHaveBeenCalledWith(page, expect.anything(), expect.objectContaining({
+      isPageBusy: expect.any(Function),
+      checkPage: expect.any(Function),
+    }));
+  });
+
   it('maps a generation-failed page check to an actionable command error', async () => {
     const page = fakePage();
     probeChatSurface.mockResolvedValue({

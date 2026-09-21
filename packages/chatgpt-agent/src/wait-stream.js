@@ -25,7 +25,7 @@ export const STREAM_DEFAULTS = {
 /**
  * @param {object} page OpenCLI IPage
  * @param {import('./stream-collector.js').StreamCollector} collector
- * @param {{ timeoutMs: number, textSettleMs?: number, noProgressMs?: number, pollMs?: number, graceMs?: number, pendingImageMaxQuietMs?: number, imageSettleMs?: number, abortPromise?: Promise<never>, checkPage?: () => Promise<void> }} opts
+ * @param {{ timeoutMs: number, textSettleMs?: number, noProgressMs?: number, pollMs?: number, graceMs?: number, pendingImageMaxQuietMs?: number, imageSettleMs?: number, abortPromise?: Promise<never>, checkPage?: () => Promise<void>, isPageBusy?: () => Promise<boolean> }} opts
  */
 export async function waitForProtocolStream(page, collector, opts) {
   const timeoutMs = opts.timeoutMs;
@@ -46,6 +46,15 @@ export async function waitForProtocolStream(page, collector, opts) {
   async function checkPage() {
     if (typeof opts.checkPage === 'function') {
       await waitAbortable(opts.checkPage());
+    }
+  }
+
+  async function pageBusy() {
+    if (typeof opts.isPageBusy !== 'function') return false;
+    try {
+      return (await waitAbortable(opts.isPageBusy())) === true;
+    } catch {
+      return false;
     }
   }
 
@@ -116,6 +125,18 @@ export async function waitForProtocolStream(page, collector, opts) {
         if (collector.text.length > 0 || isPendingImageGeneration()) continue;
         if (collector.needsPostStreamResolve()) {
           return { reason: 'stream-ended-await-post', text: '' };
+        }
+        // A finished turn stream with no visible text is not proof that the turn
+        // is over: thinking models complete the stream while the visible answer
+        // (and any image tool call) is still being produced, and that content
+        // arrives later through conversation updates. While the page itself
+        // reports an active turn, keep draining; the outer timeout still bounds it.
+        if (await pageBusy()) {
+          if (verbose) {
+            console.error('[chatgpt-agent] turn stream ended empty but page is still generating → keep draining');
+          }
+          await waitAbortable(page.sleep(pollMs / 1000));
+          continue;
         }
         return { reason: 'protocol-complete-text-empty', text: '' };
       }
