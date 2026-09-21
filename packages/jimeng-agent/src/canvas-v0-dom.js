@@ -298,7 +298,30 @@ export async function probeJimengCanvasV0Surface(page) {
 }
 
 export async function openCanvasV0Workspace(page, targetUrl) {
-  await page.goto(targetUrl);
+  // The browser bridge intermittently answers the first navigation of a leased
+  // target with "Navigation rejected"; a retry, then a fresh tab, is the same
+  // recovery the shipped canvas status path already uses.
+  try {
+    await page.goto(targetUrl);
+    return;
+  } catch (error) {
+    if (!/Navigation rejected/i.test(describeError(error))) throw error;
+  }
+  await page.sleep(0.25);
+  try {
+    await page.goto(targetUrl);
+    return;
+  } catch (error) {
+    if (!/Navigation rejected/i.test(describeError(error))) throw error;
+    if (typeof page.newTab === 'function' && typeof page.setActivePage === 'function') {
+      const pageId = await page.newTab(targetUrl);
+      if (pageId) {
+        await page.setActivePage(pageId);
+        return;
+      }
+    }
+    throw error;
+  }
 }
 
 /**
@@ -311,7 +334,7 @@ export async function createCanvasV0Project(page, canonical = {}) {
   assertCanvasV0PageCapabilities(page);
   const href = await page.evaluate(() => location.href).catch(() => '');
   if (!/^https?:\/\/jimeng\.jianying\.com/.test(String(href || ''))) {
-    await page.goto(CANVAS_V0_ASSET_URL);
+    await openCanvasV0Workspace(page, CANVAS_V0_ASSET_URL);
   }
   const envelope = await requestJimengJson(
     page,
@@ -403,7 +426,28 @@ const V0_SIDECAR_LAUNCHER_LOCATE = `
  */
 export async function activateCanvasV0Tab(page) {
   if (!page || typeof page.cdp !== 'function') return false;
+  // Best effort only: the browser bridge this plugin runs on refuses `Page.*`
+  // navigation-side methods, so a hidden window has to be raised by the user.
   return page.cdp('Page.bringToFront').then(() => true, () => false);
+}
+
+/**
+ * Chrome parks CSS transitions for a hidden page, so a minimized or fully covered
+ * window leaves the 对话 panel mounted off-screen (`left === innerWidth`) while the
+ * app already reports it open — no DOM-level recovery can land it. Wait for real
+ * visibility instead of clicking at a parked panel.
+ */
+async function waitForCanvasV0Visibility(page, timeoutMs = 60_000) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    last = await page
+      .evaluate('(() => ({ visibility: document.visibilityState, outerHeight: window.outerHeight }))()')
+      .catch(() => null);
+    if (last?.visibility === 'visible') return { ok: true, ...last };
+    await page.sleep(1);
+  }
+  return { ok: false, ...(last || {}) };
 }
 
 /** Collapse the stalled panel through its own header control so the launcher returns. */
@@ -458,8 +502,16 @@ async function recoverStalledCanvasV0Sidecar(page, last, state, deadline) {
 export async function ensureCanvasV0SidecarOpen(page, timeoutMs = 45_000) {
   const deadline = Date.now() + timeoutMs;
   const state = { clicks: 0, collapses: 0, reloads: 0 };
-  let last = await probeJimengCanvasV0Surface(page).catch((error) => ({ error: describeError(error) }));
   await activateCanvasV0Tab(page);
+  const shown = await waitForCanvasV0Visibility(page, Math.min(timeoutMs, 60_000));
+  if (!shown.ok) {
+    throw phaseError(
+      'sidecar',
+      `The leased browser window is not visible (visibilityState=${shown.visibility || 'unknown'}, outerHeight=${shown.outerHeight ?? 'unknown'})`,
+      'Bring the Chrome window to the front and restore it if it is minimized, then retry: the legacy 对话 panel slide-in never runs while the page is hidden.',
+    );
+  }
+  let last = await probeJimengCanvasV0Surface(page).catch((error) => ({ error: describeError(error) }));
 
   while (Date.now() < deadline) {
     if (last?.panelReady && last?.editorReady) return { ...last, opened: state.clicks > 0 };

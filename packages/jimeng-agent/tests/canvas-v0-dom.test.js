@@ -23,7 +23,10 @@ const ASSET_ID = 'cd3014e9eeadb1a6';
 const CREATE_PATH = '/mweb/v1/infinite_canvas/create_project';
 
 function createMockPage(handlers = []) {
-  const calls = { evaluate: [], goto: [], keys: [], inserts: [], setFileInput: [], cdp: [] };
+  const calls = { evaluate: [], goto: [], keys: [], inserts: [], setFileInput: [], cdp: [], cdpArgs: [] };
+  const cdpResponses = {};
+  let gotoRejections = 0;
+  let newTabCalls = [];
   const page = {
     calls,
     async evaluate(script) {
@@ -39,6 +42,10 @@ function createMockPage(handlers = []) {
     },
     async goto(url) {
       calls.goto.push(url);
+      if (gotoRejections > 0) {
+        gotoRejections -= 1;
+        throw new Error('Navigation rejected.');
+      }
       return {};
     },
     async sleep() {
@@ -62,8 +69,24 @@ function createMockPage(handlers = []) {
       calls.setFileInput.push([selector, filePath, options]);
       return { ok: true };
     },
-    async cdp(method) {
+    async cdp(method, params) {
       calls.cdp.push(method);
+      calls.cdpArgs.push(params ?? null);
+      return cdpResponses[method] ?? {};
+    },
+    cdpResponses,
+    rejectGoto(times) {
+      gotoRejections = times;
+    },
+    get newTabCalls() {
+      return newTabCalls;
+    },
+    async newTab(url) {
+      newTabCalls.push(url);
+      return 'page-2';
+    },
+    async setActivePage(pageId) {
+      calls.setActivePage = pageId;
       return {};
     },
     async startNetworkCapture() {
@@ -158,6 +181,36 @@ describe('jimeng-agent canvas-v0 create flow', () => {
     const createScript = page.calls.evaluate.find((text) => text.includes(CREATE_PATH));
     expect(createScript).toBeTruthy();
     expect(createScript).toContain(JSON.stringify(buildCanvasV0CreateProjectBody({ name: '苏州猫咪' })));
+  });
+
+  it('retries a rejected navigation and falls back to a fresh tab', async () => {
+    const page = createMockPage([
+      ['=> location.href', () => 'https://jimeng.jianying.com/ai-tool/asset'],
+      [CREATE_PATH, () => transport({
+        ret: '0',
+        errmsg: 'success',
+        data: { project_id: PROJECT_ID, draft_id: '22063470174988', version: '1' },
+      })],
+      ['surfaceReady:', () => ({ href: `${JIMENG_CANVAS_V0_URL}/${PROJECT_ID}`, surfaceReady: true, editorReady: true, ready: true })],
+    ]);
+    // Rejections for the asset pre-flight (2 attempts) and for the canvas open (2).
+    page.rejectGoto(4);
+
+    const rows = await runJimengCanvasV0Create(page, { title: '苏州猫咪' });
+
+    expect(rows[0].status).toBe('created');
+    // Each site retries in place once, then hands the URL to a fresh tab.
+    expect(page.calls.goto).toEqual([
+      'https://jimeng.jianying.com/ai-tool/asset',
+      'https://jimeng.jianying.com/ai-tool/asset',
+      `${JIMENG_CANVAS_V0_URL}/${PROJECT_ID}`,
+      `${JIMENG_CANVAS_V0_URL}/${PROJECT_ID}`,
+    ]);
+    expect(page.newTabCalls).toEqual([
+      'https://jimeng.jianying.com/ai-tool/asset',
+      `${JIMENG_CANVAS_V0_URL}/${PROJECT_ID}`,
+    ]);
+    expect(page.calls.setActivePage).toBe('page-2');
   });
 
   it('surfaces a readable failure when the create API rejects the request', async () => {
@@ -280,6 +333,7 @@ describe('jimeng-agent canvas-v0 对话 panel docking', () => {
   };
   const dockedPanelProbe = { ...closedPanelProbe, composerReady: true, composerInSidecar: true, sidecarOpen: true, panelReady: true, sendVisible: true, sendEnabled: true, ready: true };
 
+  const visiblePageHandler = () => ['document.visibilityState', () => ({ visibility: 'visible', outerHeight: 900 })];
   const sidecarMarkHandler = () => ['setAttribute', (text) => (text.includes('sidecar-launcher')
     ? { ok: true, selector: '[data-opencli-jimeng-v0-target="sidecar-launcher"]' }
     : undefined)];
@@ -288,6 +342,7 @@ describe('jimeng-agent canvas-v0 对话 panel docking', () => {
   it('activates the tab and clicks the 对话 launcher in-page when the panel is closed', async () => {
     let probeCount = 0;
     const page = createMockPage([
+      visiblePageHandler(),
       inPageClickHandler(),
       sidecarMarkHandler(),
       ['surfaceReady:', () => {
@@ -309,8 +364,46 @@ describe('jimeng-agent canvas-v0 对话 panel docking', () => {
     expect(page.calls.evaluate.filter((text) => text.includes('pointerdown') && text.includes('/^对话$/'))).toHaveLength(1);
   });
 
+  it('waits for the page to become visible before docking the panel', async () => {
+    let visibleReads = 0;
+    let probeCount = 0;
+    const page = createMockPage([
+      ['document.visibilityState', () => {
+        visibleReads += 1;
+        // The window starts minimized: the panel's slide-in cannot run yet.
+        return visibleReads > 1 ? { visibility: 'visible', outerHeight: 900 } : { visibility: 'hidden', outerHeight: 0 };
+      }],
+      inPageClickHandler(),
+      sidecarMarkHandler(),
+      ['surfaceReady:', () => {
+        probeCount += 1;
+        return probeCount > 1 ? dockedPanelProbe : closedPanelProbe;
+      }],
+    ]);
+
+    const state = await ensureCanvasV0SidecarOpen(page);
+
+    expect(state.panelReady).toBe(true);
+    expect(state.opened).toBe(true);
+    expect(visibleReads).toBeGreaterThan(1);
+  });
+
+  it('fails with an actionable message while the page stays hidden', async () => {
+    const page = createMockPage([
+      ['document.visibilityState', () => ({ visibility: 'hidden', outerHeight: 0 })],
+      inPageClickHandler(),
+      sidecarMarkHandler(),
+      ['surfaceReady:', () => closedPanelProbe],
+    ]);
+
+    await expect(ensureCanvasV0SidecarOpen(page, 1_500)).rejects.toThrow(/not visible/);
+    // Clicking a parked panel cannot land it, so nothing is clicked at all.
+    expect(page.calls.evaluate.filter((text) => text.includes('pointerdown') && text.includes('/^对话$/'))).toEqual([]);
+  });
+
   it('does not click anything when the panel is already docked', async () => {
     const page = createMockPage([
+      visiblePageHandler(),
       inPageClickHandler(),
       sidecarMarkHandler(),
       ['surfaceReady:', () => dockedPanelProbe],
@@ -327,6 +420,7 @@ describe('jimeng-agent canvas-v0 对话 panel docking', () => {
   it('collapses a stalled slide-in instead of clicking the missing launcher', async () => {
     let probeCount = 0;
     const page = createMockPage([
+      visiblePageHandler(),
       ['operation-button', (text) => (text.includes('pointerdown') ? true : undefined)],
       inPageClickHandler(),
       sidecarMarkHandler(),
@@ -350,6 +444,7 @@ describe('jimeng-agent canvas-v0 对话 panel docking', () => {
 
   it('reloads the project once before failing on a stalled panel', async () => {
     const page = createMockPage([
+      visiblePageHandler(),
       ['operation-button', () => true],
       inPageClickHandler(),
       sidecarMarkHandler(),
@@ -460,6 +555,7 @@ describe('jimeng-agent canvas-v0 对话 panel docking', () => {
   it('docks the panel on transports without cdp', async () => {
     let probeCount = 0;
     const page = createMockPage([
+      visiblePageHandler(),
       inPageClickHandler(),
       sidecarMarkHandler(),
       ['surfaceReady:', () => {
@@ -477,6 +573,7 @@ describe('jimeng-agent canvas-v0 对话 panel docking', () => {
 
   it('fails closed when the 对话 panel never docks', async () => {
     const page = createMockPage([
+      visiblePageHandler(),
       inPageClickHandler(),
       sidecarMarkHandler(),
       ['surfaceReady:', () => closedPanelProbe],
