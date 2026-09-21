@@ -219,9 +219,16 @@ Legacy canvas flow:
    presence rather than by counting media elements: each expected reference must
    be visible as an attachment card — an image, a video, or a non-image
    attachment such as audio, which carries no `<img>` and is recognized by its
-   overlay label. Re-uploading a file that is already attached stays idempotent,
-   and a previously attached reference that disappears fails the run immediately
-   instead of polling until the timeout.
+   overlay label. Cards are bound to the expected references by a
+   maximum-cardinality injective match (exact label first), so a valid upload is
+   never reported as missing just because the panel ordered its cards
+   differently from the upload order. A verdict needs two identical consecutive
+   reads: one snapshot is never enough, neither to confirm an attachment nor to
+   declare one dropped (a reduced card set only counts as a drop once the file
+   that was just uploaded is visible in it *and* the same card set repeats, and
+   a failed read is retried instead of being read as an empty composer). A
+   reference that really was dropped is reported at its own index, so a retry
+   resumes there instead of leaving it out.
 8. Composes the prompt (including `资产编号：<asset-id>`) into the panel TipTap
    composer and verifies the visible text.
 9. Content checkpoint: docked panel, expected reference count, prompt anchors in

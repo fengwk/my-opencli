@@ -29,6 +29,7 @@ import {
   evaluateCanvasV0Checkpoint,
   evaluateCanvasV0PreInputControls,
   evaluateCanvasV0SubmitReadiness,
+  matchCanvasV0Attachment,
   matchCanvasV0AttachmentSet,
   normalizeV0EditorText,
   readCanvasV0CreatedProject,
@@ -1137,29 +1138,74 @@ function describeCanvasV0Cards(cards) {
     .join(',');
 }
 
+/** Stable identity for one observed card set, including in-place replacements. */
+function fingerprintCanvasV0Cards(cards) {
+  return JSON.stringify((Array.isArray(cards) ? cards : []).map((card) => [
+    String(card?.index || ''),
+    String(card?.kind || ''),
+    String(card?.label || ''),
+    String(card?.durationText || ''),
+    String(card?.imageSrc || ''),
+  ]));
+}
+
+/**
+ * Valid reads a verdict must repeat before it is trusted. The panel re-renders
+ * while a file is being attached, so a single snapshot can show an optimistic
+ * full match or hide an attachment that is only being swapped; production
+ * always needs two identical consecutive reads.
+ */
+const CANVAS_V0_ATTACHMENT_STABLE_READS = 2;
+
 /**
  * Wait until every asset uploaded so far is visibly attached.
  *
  * Presence-based instead of count-based: the panel replaces the newest slot in
  * place (a fresh `blob:` source for images/videos, a new overlay label for
  * attachments), so an already-attached file stays matched after a re-upload and
- * the card count never exceeds the two the panel keeps. A previously matched
- * asset that stops matching means the site dropped it for a newer upload, which
- * fails fast instead of polling until the timeout.
+ * the card count never exceeds the two the panel keeps.
+ *
+ * Every verdict is confirmed by {@link CANVAS_V0_ATTACHMENT_STABLE_READS}
+ * consecutive identical valid reads. One snapshot is never enough: a single
+ * full match can still be a re-render gap, and a single snapshot missing an
+ * earlier attachment can still be a transient state. A previously matched asset
+ * that disappears is only reported as dropped once the currently uploaded asset
+ * is visible in the same reduced card set and that exact card set repeats.
+ * Reads that fail are skipped - they carry no card information - instead of
+ * being mistaken for an empty composer.
+ *
+ * `expectedAssets` must list every asset handed to the panel so far, in
+ * canonical order, so an asset's position is its global index in the run and a
+ * dropped reference is reported at the index a retry has to resume from.
  */
 export async function waitForCanvasV0Attachments(page, expectedAssets, phase, asset, index, options = {}) {
   const expected = Array.isArray(expectedAssets) ? expectedAssets : [];
   const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : CANVAS_V0_UPLOAD_TIMEOUT_MS;
   const deadline = Date.now() + timeoutMs;
-  const matchedOnce = new Set();
+  const attachedBefore = new Set();
   let observed = [];
-  let last = null;
+  let readErrors = 0;
+  let matchedFingerprint = null;
+  let matchedReads = 0;
+  let dropFingerprint = null;
   while (Date.now() < deadline) {
-    last = await readCanvasV0References(page)
-      .catch((error) => ({ count: 0, cards: [], alerts: [describeError(error)] }));
-    const cards = Array.isArray(last?.cards) ? last.cards : [];
+    let snapshot;
+    try {
+      snapshot = await readCanvasV0References(page);
+    } catch {
+      // A failed read proves nothing about the composer, so it neither confirms
+      // a match nor counts as the empty card set a dropped reference needs.
+      readErrors += 1;
+      matchedFingerprint = null;
+      matchedReads = 0;
+      dropFingerprint = null;
+      await page.sleep(0.4);
+      continue;
+    }
+    const cards = Array.isArray(snapshot?.cards) ? snapshot.cards : [];
     observed = describeCanvasV0Cards(cards);
-    const failure = (last.alerts || []).find((text) => /上传失败|上传出错|不支持|过大|超出|格式|失败/.test(text));
+    const cardsFingerprint = fingerprintCanvasV0Cards(cards);
+    const failure = (snapshot.alerts || []).find((text) => /上传失败|上传出错|不支持|过大|超出|格式|失败/.test(text));
     if (failure) {
       throw phaseError(
         phase,
@@ -1169,23 +1215,40 @@ export async function waitForCanvasV0Attachments(page, expectedAssets, phase, as
       );
     }
     const verdict = matchCanvasV0AttachmentSet(cards, expected);
-    if (verdict.ok) return { ...last, matched: verdict.matched };
-    const dropped = verdict.missing.find((label) => matchedOnce.has(label));
-    if (dropped) {
-      const droppedAsset = expected.find((entry) => entry?.label === dropped) || {};
-      throw phaseError(
-        phase,
-        `Legacy canvas dropped ${dropped} (${droppedAsset.filename ?? 'unknown'}) after ${asset.label} was attached: the 对话 panel keeps at most ${V0_MAX_REFERENCE_ATTACHMENTS} attachments (first + newest)`,
-        'No generation was submitted. Re-upload the dropped reference, or use canvas-video / video for drafts that need more references.',
-        index,
-      );
+    if (verdict.ok) {
+      matchedReads = cardsFingerprint === matchedFingerprint ? matchedReads + 1 : 1;
+      matchedFingerprint = cardsFingerprint;
+      dropFingerprint = null;
+      if (matchedReads >= CANVAS_V0_ATTACHMENT_STABLE_READS) return { ...snapshot, matched: verdict.matched };
+    } else {
+      matchedFingerprint = null;
+      matchedReads = 0;
+      const dropped = verdict.missing.find((label) => attachedBefore.has(label));
+      // A reduced card set is only a drop once the file that was just handed to
+      // the panel shows up in it; while the panel re-renders, the new upload can
+      // still be missing while the old one is briefly gone.
+      const currentAttached = cards.some((card) => matchCanvasV0Attachment(card, asset));
+      const candidate = dropped && currentAttached ? `${cardsFingerprint}|${verdict.missing.join(',')}` : null;
+      if (candidate !== null && candidate === dropFingerprint) {
+        const droppedIndex = expected.findIndex((entry) => String(entry?.label ?? '') === dropped);
+        const droppedAsset = droppedIndex < 0 ? {} : expected[droppedIndex];
+        throw phaseError(
+          phase,
+          `Legacy canvas dropped ${dropped} (${droppedAsset.filename ?? 'unknown'}) after ${asset.label} was attached: the 对话 panel keeps at most ${V0_MAX_REFERENCE_ATTACHMENTS} attachments (first + newest)`,
+          'No generation was submitted. Re-upload the dropped reference, or use canvas-video / video for drafts that need more references.',
+          // Resume at the reference that went missing, never at the upload that
+          // displaced it, or the retry would never re-upload the missing file.
+          droppedIndex < 0 ? 0 : droppedIndex,
+        );
+      }
+      dropFingerprint = candidate;
     }
-    for (const entry of verdict.matched) matchedOnce.add(entry.label);
+    for (const entry of verdict.matched) attachedBefore.add(entry.label);
     await page.sleep(0.4);
   }
   throw phaseError(
     phase,
-    `Legacy canvas reference did not appear for ${asset.label} (${asset.filename}); observed=[${observed}]`,
+    `Legacy canvas reference did not appear for ${asset.label} (${asset.filename}); observed=[${observed}]${readErrors > 0 ? `; readErrors=${readErrors}` : ''}`,
     'No generation was submitted. Confirm the legacy canvas accepts this reference type and retry.',
     index,
   );

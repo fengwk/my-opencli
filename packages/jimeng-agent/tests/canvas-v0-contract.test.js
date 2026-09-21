@@ -201,7 +201,7 @@ describe('jimeng-agent canvas-v0 attachment matching', () => {
     expect(matchCanvasV0Attachment(card('video'), { kind: 'audio', label: '音频1' })).toBe(false);
   });
 
-  it('matches a set greedily and injectively, in asset order', () => {
+  it('matches a set injectively, in asset order, and maximizes the bound assets', () => {
     const assets = [
       { kind: 'image', label: '图片1', filename: 'a.png' },
       { kind: 'audio', label: '音频1', filename: 'b.mp3' },
@@ -222,6 +222,49 @@ describe('jimeng-agent canvas-v0 attachment matching', () => {
     expect(duplicated.ok).toBe(false);
     expect(duplicated.missing).toEqual(['音频1']);
     expect(duplicated.matched).toHaveLength(1);
+  });
+
+  it('finds the perfect assignment regardless of how the ambiguous cards are ordered', () => {
+    // A video card satisfies any video asset, so a first-fit pass binds 视频1 to
+    // the bare card and strands 视频2 on 视频1's labelled card, reporting a valid
+    // upload as missing. Both card orders must resolve to the same binding.
+    const assets = [
+      { kind: 'video', label: '视频1', filename: 'a.mp4' },
+      { kind: 'video', label: '视频2', filename: 'b.mp4' },
+    ];
+    const cards = [card('video'), card('attachment', '视频1')];
+    const binding = (verdict) => verdict.matched
+      .map((entry) => [entry.label, entry.card.kind, entry.card.label]);
+
+    const forward = matchCanvasV0AttachmentSet(cards, assets);
+    expect(forward.ok).toBe(true);
+    expect(forward.missing).toEqual([]);
+    expect(binding(forward)).toEqual([['视频1', 'attachment', '视频1'], ['视频2', 'video', '']]);
+
+    const reversed = matchCanvasV0AttachmentSet([...cards].reverse(), assets);
+    expect(reversed.ok).toBe(true);
+    expect(reversed.missing).toEqual([]);
+    expect(binding(reversed)).toEqual(binding(forward));
+  });
+
+  it('recovers assets a first-fit pass would strand on an already consumed card', () => {
+    // 视频3 only fits the bare video card, which a first-fit pass hands to 视频1.
+    const assets = [
+      { kind: 'video', label: '视频1', filename: 'a.mp4' },
+      { kind: 'video', label: '视频2', filename: 'b.mp4' },
+      { kind: 'video', label: '视频3', filename: 'c.mp4' },
+    ];
+    const cards = [card('video'), card('attachment', '视频1'), card('attachment', '视频2')];
+    const verdict = matchCanvasV0AttachmentSet(cards, assets);
+
+    expect(verdict.ok).toBe(true);
+    expect(verdict.missing).toEqual([]);
+    expect(verdict.matched.map((entry) => [entry.label, entry.card.kind, entry.card.label])).toEqual([
+      ['视频1', 'attachment', '视频1'],
+      ['视频2', 'attachment', '视频2'],
+      ['视频3', 'video', ''],
+    ]);
+    expect(matchCanvasV0AttachmentSet([...cards].reverse(), assets).ok).toBe(true);
   });
 
   it('lists the labels that no observed card satisfies', () => {

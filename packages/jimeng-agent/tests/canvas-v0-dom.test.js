@@ -15,6 +15,7 @@ import {
   waitForCanvasV0Attachments,
   waitForCanvasV0Surface,
 } from '../src/canvas-v0-dom.js';
+import { chooseCanvasRetryPlan } from '../src/canvas-dom.js';
 import {
   JIMENG_CANVAS_V0_URL,
   buildCanvasV0CreateProjectBody,
@@ -485,10 +486,30 @@ describe('jimeng-agent canvas-v0 reference locator', () => {
 
 describe('jimeng-agent canvas-v0 attachment wait', () => {
   const readMarker = 'panelDocked: v0PanelReady()';
-  const imageCard = (index = '0') => ({ index, kind: 'image', label: '', durationText: '', imageSrc: 'blob:https://jimeng.jianying.com/x' });
+  const imageCard = (index = '0', imageSrc = 'blob:https://jimeng.jianying.com/x') => ({
+    index,
+    kind: 'image',
+    label: '',
+    durationText: '',
+    imageSrc,
+  });
   const audioCard = (label, index = '1') => ({ index, kind: 'attachment', label, durationText: '', imageSrc: '' });
 
-  it('succeeds as soon as every uploaded asset is attached, audio included', async () => {
+  /**
+   * Serve one card set per composer read, repeating the last entry once the list
+   * runs out. An `Error` entry makes that read fail like a crashed page.
+   */
+  function readSequence(steps) {
+    const state = { reads: 0 };
+    return [state, () => {
+      const step = steps[Math.min(state.reads, steps.length - 1)];
+      state.reads += 1;
+      if (step instanceof Error) throw step;
+      return { panelDocked: true, count: step.length, cards: step, alerts: [] };
+    }];
+  }
+
+  it('succeeds once every uploaded asset is attached, audio included', async () => {
     const assets = [
       { kind: 'image', label: '图片1', filename: 'a.png' },
       { kind: 'audio', label: '音频1', filename: 'b.mp3' },
@@ -502,8 +523,9 @@ describe('jimeng-agent canvas-v0 attachment wait', () => {
 
     expect(result.count).toBe(2);
     expect(result.matched.map((entry) => entry.label)).toEqual(['图片1', '音频1']);
-    // Presence-based: one poll is enough, no stability window to wait out.
-    expect(page.calls.evaluate).toHaveLength(1);
+    // One snapshot is a race: the identical card set must repeat before the
+    // upload counts as attached.
+    expect(page.calls.evaluate).toHaveLength(2);
   });
 
   it('keeps waiting and then reports the observed cards when the label never matches', async () => {
@@ -517,24 +539,163 @@ describe('jimeng-agent canvas-v0 attachment wait', () => {
     expect(page.calls.evaluate.length).toBeGreaterThan(1);
   });
 
-  it('fails fast when a previously matched reference is dropped for a newer upload', async () => {
+  it('skips a failed read instead of declining it as a dropped reference', async () => {
+    const assets = [
+      { kind: 'image', label: '图片1', filename: 'a.png' },
+      { kind: 'audio', label: '音频1', filename: 'b.mp3' },
+    ];
+    const [state, handler] = readSequence([
+      // 图片1 is attached, 音频1 is not visible yet: a partial match.
+      [imageCard('0')],
+      // A read that fails carries no card information and must be retried, not
+      // mistaken for an empty composer (which would look like a drop).
+      new Error('Page crashed'),
+      [imageCard('0'), audioCard('音频1', '1')],
+    ]);
+    const page = createMockPage([[readMarker, handler]]);
+
+    const result = await waitForCanvasV0Attachments(page, assets, 'upload', assets[1], 1, { timeoutMs: 5_000 });
+
+    expect(result.matched.map((entry) => entry.label)).toEqual(['图片1', '音频1']);
+    expect(state.reads).toBe(4);
+  });
+
+  it('does not decline the upload when one snapshot shows an empty composer', async () => {
+    const assets = [
+      { kind: 'image', label: '图片1', filename: 'a.png' },
+      { kind: 'audio', label: '音频1', filename: 'b.mp3' },
+    ];
+    const [state, handler] = readSequence([
+      [imageCard('0')],
+      // Re-render gap right after the 音频1 upload: the new file is not visible
+      // yet, so this is never a drop of the earlier reference.
+      [],
+      [imageCard('0'), audioCard('音频1', '1')],
+    ]);
+    const page = createMockPage([[readMarker, handler]]);
+
+    const result = await waitForCanvasV0Attachments(page, assets, 'upload', assets[1], 1, { timeoutMs: 5_000 });
+
+    expect(result.matched.map((entry) => entry.label)).toEqual(['图片1', '音频1']);
+    expect(state.reads).toBe(4);
+  });
+
+  it('does not confirm a reference on a single optimistic full match', async () => {
+    const asset = { kind: 'image', label: '图片1', filename: 'a.png' };
+    const [state, handler] = readSequence([
+      [imageCard('0')],
+      [],
+      [imageCard('0')],
+    ]);
+    const page = createMockPage([[readMarker, handler]]);
+
+    const result = await waitForCanvasV0Attachments(page, [asset], 'upload', asset, 0, { timeoutMs: 5_000 });
+
+    expect(result.count).toBe(1);
+    // The first match is optimistic, the gap resets it, and only reads 3 and 4
+    // are the two identical observations the wait requires.
+    expect(state.reads).toBe(4);
+  });
+
+  it('restarts confirmation when an in-place card identity changes', async () => {
+    const asset = { kind: 'image', label: '图片1', filename: 'a.png' };
+    const [state, handler] = readSequence([
+      [imageCard('0', 'blob:https://jimeng.jianying.com/old')],
+      [imageCard('0', 'blob:https://jimeng.jianying.com/new')],
+    ]);
+    const page = createMockPage([[readMarker, handler]]);
+
+    const result = await waitForCanvasV0Attachments(page, [asset], 'upload', asset, 0, { timeoutMs: 5_000 });
+
+    expect(result.count).toBe(1);
+    // Kind-only summaries are equal, but the blob identity changed. The new
+    // card therefore needs its own second observation before it is accepted.
+    expect(state.reads).toBe(3);
+  });
+
+  it('reports a dropped reference only after two identical observations, at its own index', async () => {
     const dropped = { kind: 'image', label: '图片1', filename: 'a.png' };
     const newest = { kind: 'audio', label: '音频1', filename: 'b.mp3' };
-    let read = 0;
-    const page = createMockPage([
-      [readMarker, () => {
-        read += 1;
-        // The panel still shows the first upload, then replaces it with the new
-        // one instead of keeping both cards.
-        return read === 1
-          ? { panelDocked: true, count: 1, cards: [imageCard('0')], alerts: [] }
-          : { panelDocked: true, count: 1, cards: [audioCard('音频1', '1')], alerts: [] };
-      }],
+    const [state, handler] = readSequence([
+      // The panel still shows the first upload, then replaces it with the new
+      // one instead of keeping both cards.
+      [imageCard('0')],
+      [audioCard('音频1', '1')],
     ]);
+    const page = createMockPage([[readMarker, handler]]);
 
-    await expect(waitForCanvasV0Attachments(page, [dropped, newest], 'upload', newest, 1, { timeoutMs: 5_000 }))
-      .rejects.toThrow(/Legacy canvas dropped 图片1 \(a\.png\) after 音频1 was attached: the 对话 panel keeps at most 2 attachments \(first \+ newest\)/);
-    expect(read).toBe(2);
+    const failure = await waitForCanvasV0Attachments(page, [dropped, newest], 'upload', newest, 1, { timeoutMs: 5_000 })
+      .then(() => null, (error) => error);
+
+    expect(failure?.message).toMatch(/Legacy canvas dropped 图片1 \(a\.png\) after 音频1 was attached: the 对话 panel keeps at most 2 attachments \(first \+ newest\)/);
+    // The first reduced snapshot can still be a swap in progress.
+    expect(state.reads).toBe(3);
+    // The dropped reference is asset 0, so the retry has to resume there and not
+    // at the upload that displaced it - and neither may be thrown away silently.
+    expect(failure?.failedAssetIndex).toBe(0);
+    expect(chooseCanvasRetryPlan({
+      retriesUsed: 0,
+      retryBudget: 1,
+      priorInPlaceRetry: false,
+      errorPhase: failure?.phase,
+      failedAssetIndex: failure?.failedAssetIndex,
+      surface: { editorReady: true },
+    })).toEqual({ kind: 'resume', startAssetIndex: 0 });
+  });
+
+  it('does not decline the upload while the new reference is not visible yet', async () => {
+    const dropped = { kind: 'image', label: '图片1', filename: 'a.png' };
+    const newest = { kind: 'audio', label: '音频1', filename: 'b.mp3' };
+    const [state, handler] = readSequence([
+      [imageCard('0')],
+      // 音频1 is still being read and 图片1's card is momentarily gone: repeated
+      // reads must not turn that into a drop while 音频1 itself never shows up.
+      [audioCard('音频9', '1')],
+    ]);
+    const page = createMockPage([[readMarker, handler]]);
+
+    await expect(waitForCanvasV0Attachments(page, [dropped, newest], 'upload', newest, 1, { timeoutMs: 40 }))
+      .rejects.toThrow(/Legacy canvas reference did not appear for 音频1 \(b\.mp3\); observed=\[attachment:音频9\]/);
+    expect(state.reads).toBeGreaterThan(3);
+  });
+
+  it('restarts the drop confirmation when the card set changes in between', async () => {
+    const dropped = { kind: 'image', label: '图片1', filename: 'a.png' };
+    const newest = { kind: 'audio', label: '音频1', filename: 'b.mp3' };
+    const [state, handler] = readSequence([
+      [imageCard('0')],
+      [audioCard('音频1', '1')],
+      // The reference came back, so the earlier reduced card set was a re-render:
+      // the next reduced card set needs its own second observation.
+      [imageCard('0'), audioCard('音频1', '1')],
+      [audioCard('音频1', '1')],
+    ]);
+    const page = createMockPage([[readMarker, handler]]);
+
+    const failure = await waitForCanvasV0Attachments(page, [dropped, newest], 'upload', newest, 1, { timeoutMs: 5_000 })
+      .then(() => null, (error) => error);
+
+    expect(failure?.message).toMatch(/Legacy canvas dropped 图片1 \(a\.png\)/);
+    expect(state.reads).toBe(5);
+  });
+
+  it('reports a dropped reference by its own index, not by the upload that displaced it', async () => {
+    const assets = [
+      { kind: 'image', label: '图片1', filename: 'a.png' },
+      { kind: 'audio', label: '音频1', filename: 'b.mp3' },
+      { kind: 'audio', label: '音频2', filename: 'c.mp3' },
+    ];
+    const [, handler] = readSequence([
+      [imageCard('0'), audioCard('音频1', '1')],
+      [imageCard('0'), audioCard('音频2', '1')],
+    ]);
+    const page = createMockPage([[readMarker, handler]]);
+
+    const failure = await waitForCanvasV0Attachments(page, assets, 'upload', assets[2], 2, { timeoutMs: 5_000 })
+      .then(() => null, (error) => error);
+
+    expect(failure?.message).toMatch(/Legacy canvas dropped 音频1 \(b\.mp3\)/);
+    expect(failure?.failedAssetIndex).toBe(1);
   });
 
   it('still rejects a file the legacy canvas reports as refused', async () => {

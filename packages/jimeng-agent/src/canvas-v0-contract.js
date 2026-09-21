@@ -349,28 +349,73 @@ export function matchCanvasV0Attachment(card, asset) {
 }
 
 /**
- * Greedy injective match between the observed cards and the expected assets:
- * each asset consumes one distinct card, assets are consumed in order, and a
- * card that already satisfied an earlier asset is never reused.
+ * Whether a card identifies one asset by its upload label, which is a stronger
+ * signal than the card's media shape (a video renders either as a video card or
+ * as a labelled attachment card).
+ *
+ * @param {{ kind?: string, label?: string }|null} card
+ * @param {{ kind?: string, label?: string }|null} asset
+ * @returns {boolean}
+ */
+function isLabelledCanvasV0Attachment(card, asset) {
+  const label = String(asset?.label ?? '');
+  return label !== '' && card?.kind === 'attachment' && card.label === label;
+}
+
+/**
+ * Injective (one distinct card per asset) match between the observed cards and
+ * the expected assets.
+ *
+ * The card set is ambiguous and its DOM order is not the upload order - a bare
+ * video card satisfies any video asset while a labelled attachment card
+ * satisfies only its own label - so a single first-fit pass can strand a later
+ * asset on a card an earlier asset already consumed and report a valid upload
+ * as missing. The match therefore maximizes the number of bound assets
+ * (Kuhn's augmenting paths; the reference set holds at most two assets), and an
+ * asset that can use both takes its exact labelled card before a generic one,
+ * which makes the verdict and the reported cards independent of card order.
  *
  * @param {Array<object>} cards
  * @param {Array<object>} assets
  * @returns {{ ok: boolean, missing: string[], matched: Array<{ label: string, card: object }> }}
  */
 export function matchCanvasV0AttachmentSet(cards, assets) {
-  const available = Array.isArray(cards) ? [...cards] : [];
+  const observed = Array.isArray(cards) ? cards : [];
   const expected = Array.isArray(assets) ? assets : [];
+  const candidates = expected.map((asset) => {
+    const all = [];
+    for (let index = 0; index < observed.length; index += 1) {
+      if (matchCanvasV0Attachment(observed[index], asset)) all.push(index);
+    }
+    const labelled = all.filter((index) => isLabelledCanvasV0Attachment(observed[index], asset));
+    return labelled.concat(all.filter((index) => !labelled.includes(index)));
+  });
+  const ownerOfCard = new Array(observed.length).fill(-1);
+  const cardOfAsset = new Array(expected.length).fill(-1);
+  const bind = (assetIndex, visited) => {
+    for (const cardIndex of candidates[assetIndex]) {
+      if (visited[cardIndex]) continue;
+      visited[cardIndex] = true;
+      if (ownerOfCard[cardIndex] < 0 || bind(ownerOfCard[cardIndex], visited)) {
+        ownerOfCard[cardIndex] = assetIndex;
+        cardOfAsset[assetIndex] = cardIndex;
+        return true;
+      }
+    }
+    return false;
+  };
+  for (let assetIndex = 0; assetIndex < expected.length; assetIndex += 1) {
+    bind(assetIndex, new Array(observed.length).fill(false));
+  }
   const missing = [];
   const matched = [];
-  for (const asset of expected) {
-    const index = available.findIndex((card) => matchCanvasV0Attachment(card, asset));
-    if (index < 0) {
+  expected.forEach((asset, assetIndex) => {
+    if (cardOfAsset[assetIndex] < 0) {
       missing.push(String(asset?.label ?? ''));
-      continue;
+      return;
     }
-    matched.push({ label: String(asset?.label ?? ''), card: available[index] });
-    available.splice(index, 1);
-  }
+    matched.push({ label: String(asset?.label ?? ''), card: observed[cardOfAsset[assetIndex]] });
+  });
   return { ok: missing.length === 0, missing, matched };
 }
 
