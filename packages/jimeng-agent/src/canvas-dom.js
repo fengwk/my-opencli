@@ -2042,7 +2042,7 @@ export async function runCanvasContentCheckpoint(page, canonical, assets, option
   const report = evaluateCanvasContentCheckpoint(snapshot, expectations);
   if (!report.ok) {
     const mismatch = report.anchorMismatch
-      ? `, anchor#${report.anchorMismatch.index}=${JSON.stringify(report.anchorMismatch.anchor)}, editor=${JSON.stringify(report.anchorMismatch.editorAtCursor)}`
+      ? `, anchor#${report.anchorMismatch.index}=${JSON.stringify(report.anchorMismatch.anchor)}, editor=${JSON.stringify(report.anchorMismatch.editorAtCursor)}, editorFull=${JSON.stringify(snapshot.editorTextNormalized || '')}`
       : '';
     throw phaseError(
       'checkpoint',
