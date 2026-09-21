@@ -96,11 +96,11 @@ const MAX_DURATION = MAX_REFERENCE_DURATION_SECONDS;
  * closing paren. Touching these requires a product decision, not a refactor.
  */
 const MODEL_PREFIXES = Object.freeze({
-  'seedance2.0': '(使用 Seedance2.0，**禁止使用 VIP**）',
-  'seedance2.0fast': '(使用 Seedance2.0 Fast，**禁止使用 VIP**）',
-  'seedance2.0_vip': '(使用 Seedance2.0 VIP）',
-  'seedance2.0fast_vip': '(使用 Seedance2.0 Fast VIP）',
-  'seedance2.0mini': '(使用 Seedance2.0 Mini）',
+  'seedance2.0': '(必须使用 Seedance2.0 模型，**禁止使用 VIP 模型**，**禁止使用 Fast 模型**）',
+  'seedance2.0fast': '(必须使用 Seedance2.0 Fast 模型，**禁止使用 VIP 模型**）',
+  'seedance2.0_vip': '(必须使用 Seedance2.0 VIP 模型）',
+  'seedance2.0fast_vip': '(必须使用 Seedance2.0 Fast VIP 模型）',
+  'seedance2.0mini': '(必须使用 Seedance2.0 Mini 模型）',
 });
 
 const AGENT_SUFFIX_TEMPLATE = '，你必须严格按照下面的提示词内容生成1个{ratio}的{duration}s视频';
@@ -172,7 +172,7 @@ export function normalizeAskArgs(kwargs = {}) {
 
   const workspace = requireNonBlankStringField(kwargs, 'workspace');
   const ratio = requireChoiceField(kwargs, 'ratio', RATIOS, '--ratio');
-  const modelVersion = requireChoiceField(kwargs, 'model_version', MODEL_VERSIONS, '--model_version');
+  const modelVersion = requireChoiceField(kwargs, 'model_version', MODEL_VERSIONS, '--model-version');
 
   const duration = normalizeDuration(kwargs.duration);
   const retry = normalizeRetry(kwargs.retry);
@@ -262,28 +262,29 @@ function requireNonBlankStringField(kwargs, key) {
 
 function requireChoiceField(kwargs, key, choices, flag) {
   const raw = kwargs[key];
+  const publicKey = toFlag(key).slice(2);
   if (raw === undefined || raw === null) {
     throw new ArgumentError(
-      `Missing required argument: '${key}'`,
+      `Missing required argument: '${publicKey}'`,
       `Pass one of: ${choices.join(', ')} via ${flag}.`,
     );
   }
   if (typeof raw !== 'string') {
     throw new ArgumentError(
-      `Invalid '${key}': expected string, got ${describeType(raw)}`,
+      `Invalid '${publicKey}': expected string, got ${describeType(raw)}`,
       `Pass ${flag} as a string.`,
     );
   }
   const trimmed = raw.trim();
   if (trimmed.length === 0) {
     throw new ArgumentError(
-      `Invalid '${key}': value is blank`,
+      `Invalid '${publicKey}': value is blank`,
       `Pass one of: ${choices.join(', ')} via ${flag}.`,
     );
   }
   if (!choices.includes(trimmed)) {
     throw new ArgumentError(
-      `Invalid '${key}': '${raw}' (must be one of ${choices.join(', ')})`,
+      `Invalid '${publicKey}': '${raw}' (must be one of ${choices.join(', ')})`,
       `Pass one of: ${choices.join(', ')} via ${flag}.`,
     );
   }

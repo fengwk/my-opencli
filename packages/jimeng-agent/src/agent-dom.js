@@ -52,6 +52,28 @@ export const JIMENG_GENERATE_URL = `https://${JIMENG_DOMAIN}/ai-tool/generate`;
 
 const EDITOR_SELECTOR = '.tiptap.ProseMirror[contenteditable="true"]';
 const FILE_INPUT_SELECTOR = 'input[type="file"]';
+/**
+ * Reference upload entry. Current Jimeng renders a composer "+" tile
+ * (`<div class="reference-upload-<hash>">`) that asks the site to open its file
+ * chooser; older builds kept a persistent hidden `<input type="file">` in the
+ * dock instead. The adapter accepts either contract.
+ */
+const UPLOAD_TILE_SELECTOR = '[class*="reference-upload-"]';
+/**
+ * Reference remove control. Legacy builds carry
+ * `[data-reference-remove-button="true"]`; current builds render
+ * `.remove-button-<hash>` nested inside `.remove-button-container-<hash>`.
+ */
+const REMOVE_CONTROL_SELECTOR = [
+  '[data-reference-remove-button="true"]',
+  '[class*="remove-button-"]:not([class*="remove-button-container"])',
+].join(', ');
+const UPLOAD_BRIDGE_KEY = '__opencliJimengUploadBridge';
+/**
+ * Budget for the on-demand upload input to appear after the composer "+" tile
+ * is clicked (current Jimeng creates it lazily; legacy builds already have it).
+ */
+const UPLOAD_INPUT_WAIT_MS = 20_000;
 const MENTION_NODE_SELECTOR = [
   '[contenteditable="false"]',
   '[data-type*="mention"]',
@@ -229,8 +251,9 @@ export function chooseRetryPlan({
     && !priorInPlaceRetry
     && Number.isInteger(failedAssetIndex)
     && failedAssetIndex >= 0
+    // `ready` already folds in the legacy file input and the current "+" tile
+    // contract, so no separate file-input check is needed here.
     && surface?.ready === true
-    && surface.fileInputCount > 0
   ) {
     return { kind: 'resume', startAssetIndex: failedAssetIndex };
   }
@@ -331,6 +354,7 @@ export async function prepareJimengAgentAsk(page, canonical, preparedAssets, opt
       const surface = await probeJimengAgentSurface(page).catch(() => ({
         ready: false,
         fileInputCount: 0,
+        uploadTileCount: 0,
       }));
 
       // Clear-path failures: always hard-reload (not soft same-URL skip).
@@ -456,8 +480,8 @@ async function collectDockReferenceSnapshot(page, alertBaselineMarker = '') {
             text: (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 80),
             hasSpin: !!el.querySelector('.spin, [class*="spin-"]'),
             hasMask: !!el.querySelector('[class*="mask-"]'),
-            hasRemoveBtn: !!el.querySelector('[data-reference-remove-button="true"]'),
-            hasUploadSlot: !!el.querySelector('[class*="reference-upload-"]'),
+            hasRemoveBtn: !!el.querySelector(${JSON.stringify(REMOVE_CONTROL_SELECTOR)}),
+            hasUploadSlot: !!el.querySelector(${JSON.stringify(UPLOAD_TILE_SELECTOR)}),
             hasMoreEntry: !!el.querySelector('[class*="collapsed-more-entry-"]'),
             mediaSrc: media
               ? media.getAttribute('src') || media.getAttribute('poster') || null
@@ -555,6 +579,11 @@ export async function probeJimengAgentSurface(page) {
     const editors = [...document.querySelectorAll(${JSON.stringify(EDITOR_SELECTOR)})].filter(visible);
     const editor = findPromptEditor();
     const fileInputs = [...document.querySelectorAll(${JSON.stringify(FILE_INPUT_SELECTOR)})];
+    // Current Jimeng keeps no file input in the DOM; the composer "+" tile
+    // (reference-upload-*) asks the site to open a chooser on demand. Older
+    // builds instead keep a hidden file input permanently available, so either
+    // contract satisfies an "upload entry exists" readiness check.
+    const uploadTiles = [...document.querySelectorAll(${JSON.stringify(UPLOAD_TILE_SELECTOR)})].filter(visible);
     const comboboxes = [...document.querySelectorAll('[role="combobox"]')].filter(visible);
     const modeText = comboboxes.map(readable).join(' | ');
 
@@ -615,6 +644,7 @@ export async function probeJimengAgentSurface(page) {
         multiple: !!input.multiple,
         index,
       })),
+      uploadTileCount: uploadTiles.length,
       modeText,
       dockText,
       agentSelected: /Agent\\s*模式/i.test(modeText) || /Agent\\s*模式/i.test(dockText),
@@ -628,7 +658,10 @@ export async function probeJimengAgentSurface(page) {
       autoFromDock,
       mentionCount: mentionNodes.length,
       alerts: alertTexts,
-      ready: !!editor && fileInputs.length > 0,
+      // An upload entry is ready when the composer exposes either contract:
+      // the legacy persistent file input, or the current "+" tile that asks
+      // the site to open a chooser on demand.
+      ready: !!editor && (fileInputs.length > 0 || uploadTiles.length > 0),
     };
   })()`);
 
@@ -926,10 +959,13 @@ async function clearInitialDraftState(page) {
 /**
  * Remove removable reference cards from the dock strip.
  *
- * Jimeng renders the remove button (`[data-reference-remove-button="true"]`)
- * only after the reference group has been hovered, and it becomes clickable
- * while the specific card is hovered. We first hover the group area so the
- * buttons render, then hover the card itself, then click its remove button.
+ * Jimeng renders the remove button only after the reference group has been
+ * hovered, and it becomes clickable while the specific card is hovered. We
+ * first hover the group area so the buttons render, then hover the card
+ * itself, then click its remove button. The control is matched through
+ * {@link REMOVE_CONTROL_SELECTOR} so both the legacy
+ * `[data-reference-remove-button="true"]` attribute and the current
+ * `.remove-button-<hash>` element resolve.
  *
  * Empty upload slots (draft references whose media is gone) expose no remove
  * control and cannot be cleared; they are kept and reported as `keptSlots` so
@@ -943,7 +979,7 @@ async function markReferenceRemoveControl(page, marker) {
     // The button may still be opacity-0 / zero-sized until the hover CSS
     // transition finishes; synthetic clicks do not need hit-testing, so only
     // exclude buttons that are not rendered at all (display:none / hidden).
-    const candidates = [...document.querySelectorAll('[data-reference-remove-button="true"]')]
+    const candidates = [...document.querySelectorAll(${JSON.stringify(REMOVE_CONTROL_SELECTOR)})]
       .filter((el) => {
         if (!(el instanceof HTMLElement)) return false;
         const style = window.getComputedStyle(el);
@@ -1180,14 +1216,15 @@ async function uploadReferenceAssets(page, assets, uploads, startAssetIndex, bas
       );
     }
 
-    // Do NOT click the dock "+" before setFileInput — that opens a native file
-    // chooser and blocks CDP assignment. The hidden input accepts multi files.
-
-    const slot = await markCurrentUploadSlot(page, nextMarker(`upload-${index}`));
+    // The upload entry is resolved lazily: current Jimeng has no file input in
+    // the DOM until its composer "+" tile is clicked, and the bridge keeps that
+    // click free of a blocking native chooser.
+    const slot = await acquireUploadSlot(page, nextMarker(`upload-${index}`));
     if (!slot.ok) {
       throw phaseError(
         'upload',
-        `Could not locate an active Jimeng reference file input before ${asset.label}`,
+        `Could not locate an active Jimeng reference file input before ${asset.label}`
+        + ` (reason=${slot.reason || 'unknown'}, attempts=${slot.attempts ?? 0})`,
         'Reload the visible Jimeng workspace manually and retry.',
         index,
       );
@@ -1231,7 +1268,14 @@ async function uploadReferenceAssets(page, assets, uploads, startAssetIndex, bas
   }
 }
 
-async function markCurrentUploadSlot(page, marker) {
+/**
+ * Mark an already-present Jimeng reference file input.
+ *
+ * Legacy builds keep a hidden `<input type="file">` in the dock; current builds
+ * append an equivalent input only while an upload is being negotiated, so the
+ * same marker contract is reused for both.
+ */
+async function markUploadFileInput(page, marker) {
   return page.evaluate(`(() => {
     const inputs = [...document.querySelectorAll(${JSON.stringify(FILE_INPUT_SELECTOR)})];
     const preferred = inputs.filter((input) => /reference-upload/i.test(input.id || ''));
@@ -1250,6 +1294,171 @@ async function markCurrentUploadSlot(page, marker) {
       selector: '[${UPLOAD_SLOT_ATTR}="${marker}"]',
     };
   })()`);
+}
+
+/**
+ * Prepare the browser page for a current-Jimeng on-demand upload.
+ *
+ * Current Jimeng asks the site to open a file chooser when the composer "+"
+ * tile is clicked: it calls `window.showOpenFilePicker` (File System Access
+ * API), which CDP cannot feed, and falls back to a real `<input type="file">`
+ * when that API is unavailable. Removing the API therefore routes the site
+ * through its own fallback, which produces the input `DOM.setFileInputFiles`
+ * can fill.
+ *
+ * The fallback then tries to open the native chooser (`showPicker` / `click`).
+ * A native dialog cannot be fed from CDP and would stay open across the next
+ * upload, so file-input picker calls are made silent; assigning files through
+ * CDP still fires the `change` event the site waits for.
+ *
+ * Idempotent: repeated calls reuse the same page-side patch. Fails closed when
+ * the chooser cannot be suppressed, so a click never opens a blocking dialog.
+ */
+async function installUploadBridge(page) {
+  const result = await page.evaluate(`(() => {
+    const key = ${JSON.stringify(UPLOAD_BRIDGE_KEY)};
+    const bridge = window[key] || (window[key] = { fsaDisabled: false, pickerSuppressed: false });
+    if (typeof window.showOpenFilePicker === 'function') {
+      try {
+        delete window.showOpenFilePicker;
+        bridge.fsaDisabled = true;
+      } catch (_) {
+        // Fall through to the capability check below.
+      }
+    }
+    if (typeof window.showOpenFilePicker === 'function') {
+      return { ok: false, reason: 'file-system-access-not-suppressed', fsaDisabled: false };
+    }
+    const proto = HTMLInputElement.prototype;
+    if (!proto.__opencliJimengFilePickerSuppressed) {
+      const originalShowPicker = typeof proto.showPicker === 'function' ? proto.showPicker : null;
+      const originalClick = proto.click;
+      Object.defineProperty(proto, '__opencliJimengFilePickerSuppressed', { value: true, configurable: true });
+      proto.showPicker = function (...args) {
+        if (this instanceof HTMLInputElement && String(this.type).toLowerCase() === 'file') return undefined;
+        return originalShowPicker ? originalShowPicker.apply(this, args) : undefined;
+      };
+      proto.click = function (...args) {
+        if (this instanceof HTMLInputElement && String(this.type).toLowerCase() === 'file') return undefined;
+        return originalClick.apply(this, args);
+      };
+      bridge.pickerSuppressed = true;
+    }
+    return { ok: true, fsaDisabled: bridge.fsaDisabled, pickerSuppressed: bridge.pickerSuppressed };
+  })()`).catch((err) => ({ ok: false, reason: describeError(err) }));
+  if (!result?.ok) {
+    throw phaseError(
+      'upload',
+      `Jimeng upload bridge could not suppress the site file chooser (${result?.reason || 'unknown'})`,
+      'No generation was submitted. The visible Jimeng composer changed; verify the reference upload entry before retrying.',
+    );
+  }
+  return result;
+}
+
+/** Mark the newest visible composer "+" upload tile. */
+async function markUploadTile(page, marker) {
+  return page.evaluate(`(() => {
+    ${buildPromptEditorLocatorScript()}
+    const tiles = [...document.querySelectorAll(${JSON.stringify(UPLOAD_TILE_SELECTOR)})].filter(visible);
+    if (tiles.length === 0) return { ok: false, count: 0 };
+    const tile = tiles[tiles.length - 1];
+    tile.setAttribute(${JSON.stringify(TARGET_ATTR)}, ${JSON.stringify(marker)});
+    return { ok: true, count: tiles.length, selector: '[${TARGET_ATTR}="${marker}"]' };
+  })()`);
+}
+
+/**
+ * Replay a full pointer/mouse sequence on a marked upload tile.
+ *
+ * CDP clicks land on the tile but the site drops them while its lazy composer
+ * chunks are still settling; React's delegated listeners do accept the bubbled
+ * sequence below, so it acts as the retry path inside the acquisition loop.
+ */
+async function dispatchUploadTileSequence(page, selector) {
+  return page.evaluate(`(() => {
+    const tile = document.querySelector(${JSON.stringify(selector)});
+    if (!tile) return { ok: false, reason: 'tile-missing' };
+    const rect = tile.getBoundingClientRect();
+    const x = Math.round(rect.left + rect.width / 2);
+    const y = Math.round(rect.top + rect.height / 2);
+    const init = {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      clientX: x,
+      clientY: y,
+      button: 0,
+      pointerId: 1,
+      isPrimary: true,
+      pointerType: 'mouse',
+    };
+    const fire = (type, Ctor, extra) => {
+      try { tile.dispatchEvent(new Ctor(type, { ...init, ...(extra || {}) })); } catch (_) {}
+    };
+    fire('pointerover', PointerEvent);
+    fire('pointerenter', PointerEvent);
+    fire('mousedown', MouseEvent, { buttons: 1 });
+    fire('pointerdown', PointerEvent, { buttons: 1 });
+    fire('pointerup', PointerEvent, { buttons: 0 });
+    fire('mouseup', MouseEvent, { buttons: 0 });
+    fire('click', MouseEvent, { buttons: 0 });
+    return { ok: true, x, y };
+  })()`);
+}
+
+/**
+ * Poll until a reference file input exists and is marked.
+ */
+async function waitForUploadFileInput(page, marker, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const marked = await markUploadFileInput(page, marker);
+    if (marked?.ok) return marked;
+    if (Date.now() >= deadline) return marked || { ok: false, count: 0 };
+    await page.sleep(0.2);
+  }
+}
+
+/**
+ * Resolve a usable file input for the next reference upload.
+ *
+ * Legacy builds keep the input permanently available. Current builds create it
+ * only after the composer "+" tile is clicked, so acquisition clicks the tile
+ * (with a synthetic-event retry) until the input appears. The upload bridge is
+ * installed first, which keeps that click free of a blocking native dialog.
+ */
+async function acquireUploadSlot(page, marker) {
+  const existing = await markUploadFileInput(page, marker);
+  if (existing?.ok) {
+    return { ...existing, via: 'existing-input', attempts: 0 };
+  }
+
+  await installUploadBridge(page);
+  const deadline = Date.now() + UPLOAD_INPUT_WAIT_MS;
+  let attempts = 0;
+  let lastReason = 'upload-tile-not-found';
+  while (Date.now() < deadline) {
+    attempts += 1;
+    const tile = await markUploadTile(page, `${marker}-tile-${attempts}`);
+    if (!tile?.ok) {
+      lastReason = 'upload-tile-not-found';
+      await page.sleep(0.4);
+      continue;
+    }
+    await page.click(tile.selector).catch(() => null);
+    const afterClick = await waitForUploadFileInput(page, marker, 1_500);
+    if (afterClick?.ok) {
+      return { ...afterClick, via: 'tile-click', attempts };
+    }
+    await dispatchUploadTileSequence(page, tile.selector);
+    const afterSequence = await waitForUploadFileInput(page, marker, 1_500);
+    if (afterSequence?.ok) {
+      return { ...afterSequence, via: 'tile-synthetic', attempts };
+    }
+    lastReason = 'upload-input-missing';
+  }
+  return { ok: false, count: 0, attempts, reason: lastReason };
 }
 
 async function markVisibleUploadAlertBaseline(page, marker) {
@@ -2264,7 +2473,12 @@ function buildPromptEditorLocatorScript() {
         let value = document.activeElement === editor ? 20 : 0;
         let node = editor;
         for (let depth = 0; node && depth < 9; depth += 1, node = node.parentElement) {
-          if (node.querySelector(${JSON.stringify(FILE_INPUT_SELECTOR)})) {
+          // The composer dock is the subtree that owns the reference upload
+          // entry — either the current "+" tile or the legacy file input.
+          if (
+            node.querySelector(${JSON.stringify(FILE_INPUT_SELECTOR)})
+            || node.querySelector(${JSON.stringify(UPLOAD_TILE_SELECTOR)})
+          ) {
             value += 120 - depth * 8;
             break;
           }
@@ -2909,7 +3123,8 @@ async function stripLeftoverRawMentionQuery(page, asset) {
 export async function runPreInputControlsCheck(page) {
   const surface = await probeJimengAgentSurface(page);
   const snapshot = {
-    surfaceReady: surface.ready === true || (surface.editorReady === true && surface.fileInputCount > 0),
+    surfaceReady: surface.ready === true || (surface.editorReady === true
+      && (surface.fileInputCount > 0 || surface.uploadTileCount > 0)),
     agentSelected: surface.agentSelected === true,
     // probe already folds dock "自动" button into autoEnabled/videoSelected
     // when the preference tooltip is closed.
@@ -2975,8 +3190,13 @@ async function collectContentCheckpointSnapshot(page) {
   return page.evaluate(`(() => {
     ${buildPromptEditorLocatorScript()}
     const editor = findPromptEditor();
+    // The composer is usable with either upload contract: the current "+" tile
+    // or the legacy persistent file input.
     const surfaceReady = !!editor
-      && document.querySelectorAll(${JSON.stringify(FILE_INPUT_SELECTOR)}).length > 0;
+      && (
+        document.querySelectorAll(${JSON.stringify(FILE_INPUT_SELECTOR)}).length > 0
+        || [...document.querySelectorAll(${JSON.stringify(UPLOAD_TILE_SELECTOR)})].some(visible)
+      );
     const editorText = editor
       ? (editor.innerText || editor.textContent || '').replace(/\\u00a0/g, ' ')
       : '';

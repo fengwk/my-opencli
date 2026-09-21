@@ -9,11 +9,21 @@
 export const FILE_REF_STATUS_IN_PROGRESS = 'in_progress';
 export const FILE_REF_STATUS_READY = ['finished_successfully', 'finished_partial_completion'];
 
+const MAX_BUFFERED_ENVELOPES = 500;
+const MAX_UNASSOCIATED_EVENTS = 100;
+const MAX_TURN_MAP_ENTRIES = 100;
+
 export class StreamCollector {
-  constructor() {
+  constructor(opts = {}) {
+    const options = typeof opts === 'string'
+      ? { conversationId: opts, guarded: true }
+      : (opts || {});
+    this.guarded = options.guarded === true || Boolean(options.conversationId);
+    this.expectedConversationId = options.conversationId ? String(options.conversationId).trim() : null;
+
     this.rawText = '';
     this.text = '';
-    this.conversationId = null;
+    this.conversationId = this.expectedConversationId;
     this.activeTurnId = null;
     this.activeTopicId = null;
     this.frameCount = 0;
@@ -39,6 +49,125 @@ export class StreamCollector {
     /** Async image_gen placeholder seen; final assets arrive via conversation-update. */
     this.pendingImageGen = false;
     this.imageGenFinalSeen = false;
+
+    /** Buffered items received in guarded mode before binding conversationId */
+    this.bufferedEnvelopes = [];
+    /** Map of turnId -> conversationId (bounded) */
+    this.turnConversationMap = new Map();
+    /** Global bounded FIFO array of pending events before turn association is learned */
+    this.bufferedUnassociatedEvents = [];
+  }
+
+  /**
+   * Bind an authoritative expected conversation ID.
+   * Replays matching buffered events in original order and discards foreign events.
+   * Once bound, binding to a conflicting second ID fails closed.
+   */
+  bindConversationId(conversationId) {
+    if (!conversationId || typeof conversationId !== 'string') {
+      throw new Error('bindConversationId requires a non-empty conversationId string');
+    }
+    const id = String(conversationId).trim();
+    if (!id) {
+      throw new Error('bindConversationId requires a non-empty conversationId string');
+    }
+    if (this.expectedConversationId && this.expectedConversationId !== id) {
+      throw new Error(
+        `Conflicting conversationId binding: already bound to ${this.expectedConversationId}, cannot bind to ${id}`,
+      );
+    }
+    if (this.expectedConversationId === id) {
+      return;
+    }
+    this.expectedConversationId = id;
+    this.conversationId = id;
+
+    const buffered = this.bufferedEnvelopes;
+    this.bufferedEnvelopes = [];
+    for (const entry of buffered) {
+      try {
+        this._ingestGuardedEnvelope(entry.envelope, entry.now);
+      } catch {
+        // ignore per-item errors
+      }
+    }
+  }
+
+  _recordProgress(now) {
+    this.frameCount += 1;
+    if (this.firstProgressAt === null) this.firstProgressAt = now;
+    this.lastProgressAt = now;
+  }
+
+  _associateTurn(turnId, cid) {
+    if (!turnId || !cid) return;
+    if (cid !== this.expectedConversationId) {
+      this._discardUnassociatedEventsForTurn(turnId);
+      return;
+    }
+    const existing = this.turnConversationMap.get(turnId);
+    if (existing === this.expectedConversationId) {
+      this._replayUnassociatedEventsForTurn(turnId);
+      return;
+    }
+    if (this.turnConversationMap.size >= MAX_TURN_MAP_ENTRIES && !this.turnConversationMap.has(turnId)) {
+      const firstKey = this.turnConversationMap.keys().next().value;
+      this.turnConversationMap.delete(firstKey);
+    }
+    this.turnConversationMap.set(turnId, cid);
+    this._replayUnassociatedEventsForTurn(turnId);
+  }
+
+  _bufferEnvelope(envelope, now) {
+    if (this.bufferedEnvelopes.length >= MAX_BUFFERED_ENVELOPES) {
+      this.bufferedEnvelopes.shift();
+    }
+    this.bufferedEnvelopes.push({ envelope, now });
+  }
+
+  _bufferUnassociatedEvent(entry) {
+    if (this.bufferedUnassociatedEvents.length >= MAX_UNASSOCIATED_EVENTS) {
+      this.bufferedUnassociatedEvents.shift();
+    }
+    this.bufferedUnassociatedEvents.push(entry);
+  }
+
+  _replayUnassociatedEventsForTurn(turnId) {
+    const remaining = [];
+    const toReplay = [];
+    for (const entry of this.bufferedUnassociatedEvents) {
+      if (entry.turnId === turnId) {
+        toReplay.push(entry);
+      } else {
+        remaining.push(entry);
+      }
+    }
+    this.bufferedUnassociatedEvents = remaining;
+    for (const entry of toReplay) {
+      this._applyGuardedTurnEvent(entry);
+    }
+  }
+
+  _discardUnassociatedEventsForTurn(turnId) {
+    this.bufferedUnassociatedEvents = this.bufferedUnassociatedEvents.filter(
+      (entry) => entry.turnId !== turnId,
+    );
+  }
+
+  _applyGuardedTurnEvent(entry) {
+    const { type, inner, topicId, sseFrames, now } = entry;
+    if (type === 'stream-frame') {
+      this._applyMatchingStreamFrame(inner, topicId, sseFrames, now);
+    } else if (type === 'turn-complete') {
+      this._recordProgress(now);
+      this.ingestTurnComplete(topicId, inner);
+    } else if (type === 'server_ste_metadata') {
+      this._recordProgress(now);
+      const ti = typeof inner?.tool_invoked === 'boolean'
+        ? inner.tool_invoked
+        : (typeof inner?.metadata?.tool_invoked === 'boolean' ? inner.metadata.tool_invoked : null);
+      if (typeof ti === 'boolean') this.toolInvoked = ti;
+    }
   }
 
   /** Ingest one received WS text payload (array of items or a single envelope). */
@@ -54,37 +183,62 @@ export class StreamCollector {
       return;
     }
 
-    this.frameCount += 1;
     const now = Date.now();
-    if (this.firstProgressAt === null) this.firstProgressAt = now;
-    this.lastProgressAt = now;
 
-    if (Array.isArray(parsed)) {
-      for (const item of parsed) {
+    if (!this.guarded) {
+      this.frameCount += 1;
+      if (this.firstProgressAt === null) this.firstProgressAt = now;
+      this.lastProgressAt = now;
+
+      if (Array.isArray(parsed)) {
+        for (const item of parsed) {
+          try {
+            this.ingestEnvelope(item, now);
+          } catch {
+            // ignore per-item errors
+          }
+        }
+        return;
+      }
+
+      if (parsed && typeof parsed === 'object') {
         try {
-          this.ingestEnvelope(item, now);
+          this.ingestEnvelope(parsed, now);
         } catch {
-          // ignore per-item errors
+          // ignore
         }
       }
       return;
     }
 
-    if (parsed && typeof parsed === 'object') {
-      try {
-        this.ingestEnvelope(parsed, now);
-      } catch {
-        // ignore
+    const items = Array.isArray(parsed) ? parsed : (parsed && typeof parsed === 'object' ? [parsed] : []);
+    for (const item of items) {
+      if (!item || typeof item !== 'object') continue;
+      if (!this.expectedConversationId) {
+        this._bufferEnvelope(item, now);
+      } else {
+        try {
+          this._ingestGuardedEnvelope(item, now);
+        } catch {
+          // ignore per-item errors
+        }
       }
     }
   }
 
-  /**
-   * Outer WS envelope: { type: message|conversation-update|reply, payload, ... }
-   * Stateless — every frame is classified by type only.
-   */
+  /** Outer WS envelope: { type: message|conversation-update|reply, payload, ... } */
   ingestEnvelope(item, now = Date.now()) {
     if (!item || typeof item !== 'object') return;
+
+    if (this.guarded) {
+      if (!this.expectedConversationId) {
+        this._bufferEnvelope(item, now);
+      } else {
+        this._ingestGuardedEnvelope(item, now);
+      }
+      return;
+    }
+
     const type = String(item.type || '');
 
     if (type === 'conversation-update') {
@@ -106,6 +260,218 @@ export class StreamCollector {
         ? inner.tool_invoked
         : (typeof inner?.metadata?.tool_invoked === 'boolean' ? inner.metadata.tool_invoked : null);
       if (typeof ti === 'boolean') this.toolInvoked = ti;
+    }
+  }
+
+  _ingestGuardedEnvelope(item, now) {
+    if (!item || typeof item !== 'object') return;
+    const type = String(item.type || '');
+
+    if (type === 'conversation-update') {
+      this._ingestGuardedConversationUpdate(item, now);
+      return;
+    }
+
+    if (type !== 'message') return;
+
+    const topicId = String(item.topic_id || '');
+    const payloadType = String((item.payload && item.payload.type) || '');
+    const inner = (item.payload && item.payload.payload) || {};
+
+    if (payloadType === 'conversation-turn-stream') {
+      this._ingestGuardedStreamFrame(item, inner, topicId, now);
+    } else if (payloadType === 'conversation-turn-complete') {
+      this._ingestGuardedTurnComplete(item, inner, topicId, now);
+    } else if (payloadType === 'server_ste_metadata') {
+      this._ingestGuardedServerSteMetadata(item, inner, topicId, now);
+    } else if (payloadType === 'conversation-created') {
+      const cid = extractConversationIdFromEnvelope(item);
+      if (cid === this.expectedConversationId) {
+        this._recordProgress(now);
+      }
+    }
+  }
+
+  _ingestGuardedConversationUpdate(item, now) {
+    const payload = item.payload || item;
+    const topCid = extractConversationIdFromEnvelope(item)
+      || (payload && payload.conversation_id ? String(payload.conversation_id) : null);
+
+    const messages = Array.isArray(payload.update_content?.messages) ? payload.update_content.messages : [];
+
+    if (topCid) {
+      if (topCid !== this.expectedConversationId) return;
+      for (const m of messages) {
+        if (m && m.conversation_id && String(m.conversation_id) !== this.expectedConversationId) {
+          return; // mixed/conflict -> fail closed
+        }
+      }
+      this._recordProgress(now);
+      this.ingestConversationUpdate(payload, now);
+      return;
+    }
+
+    // Without a top-level CID: accept only if messages are non-empty and EVERY message has an explicit conversation_id equal to expected
+    const allExplicitExpected = messages.length > 0 && messages.every(
+      (m) => m && typeof m === 'object' && String(m.conversation_id || '') === this.expectedConversationId,
+    );
+
+    if (allExplicitExpected) {
+      this._recordProgress(now);
+      this.ingestConversationUpdate(payload, now);
+    }
+  }
+
+  _ingestGuardedStreamFrame(item, inner, topicId, now) {
+    if (!inner || typeof inner.encoded_item !== 'string') return;
+    const turnId = inner.turn_id || extractTurnIdFromTopic(topicId);
+    const outerCid = extractConversationIdFromEnvelope(item);
+
+    const sseFrames = parseSseFrames(inner.encoded_item);
+    const explicitCids = new Set();
+    if (outerCid) explicitCids.add(outerCid);
+
+    const parsedSseList = [];
+    for (const frame of sseFrames) {
+      let parsed = null;
+      let cid = null;
+      if (frame.data && frame.data.trim() !== '[DONE]') {
+        try {
+          parsed = JSON.parse(frame.data);
+          cid = extractConversationIdFromSseParsed(parsed);
+          if (cid) explicitCids.add(cid);
+        } catch {
+          // ignore
+        }
+      }
+      parsedSseList.push({ frame, parsed, cid });
+    }
+
+    // Rule 1: If stream frame contains one or more explicit CIDs and none matches expected, drop whole frame
+    if (explicitCids.size > 0 && !explicitCids.has(this.expectedConversationId)) {
+      if (turnId) this._discardUnassociatedEventsForTurn(turnId);
+      return;
+    }
+
+    // Rule 2: If stream frame contains expected (possibly also foreign), accept only expected items and no-cid items
+    if (explicitCids.has(this.expectedConversationId)) {
+      if (turnId) {
+        this._associateTurn(turnId, this.expectedConversationId);
+      }
+      const validFrames = [];
+      for (const { frame, cid } of parsedSseList) {
+        if (!cid || cid === this.expectedConversationId) {
+          validFrames.push(frame);
+        }
+      }
+      if (validFrames.length > 0) {
+        this._applyMatchingStreamFrame(inner, topicId, validFrames, now);
+      }
+      return;
+    }
+
+    // Rule 3: If stream frame contains no explicit CID, rely solely on stable turn association/buffering
+    const associatedCid = turnId ? this.turnConversationMap.get(turnId) : null;
+
+    if (associatedCid === this.expectedConversationId) {
+      this._applyMatchingStreamFrame(inner, topicId, sseFrames, now);
+      return;
+    }
+
+    if (associatedCid && associatedCid !== this.expectedConversationId) {
+      return;
+    }
+
+    if (turnId) {
+      this._bufferUnassociatedEvent({
+        type: 'stream-frame',
+        turnId,
+        inner,
+        topicId,
+        sseFrames,
+        now,
+      });
+    }
+  }
+
+  _ingestGuardedTurnComplete(item, inner, topicId, now) {
+    const turnId = inner.turn_id || extractTurnIdFromTopic(topicId);
+    const cid = extractConversationIdFromEnvelope(item);
+
+    if (turnId && cid) {
+      if (cid !== this.expectedConversationId) {
+        this._discardUnassociatedEventsForTurn(turnId);
+        return;
+      }
+      this._associateTurn(turnId, cid);
+    }
+
+    const associatedCid = turnId ? this.turnConversationMap.get(turnId) : cid;
+
+    if (associatedCid === this.expectedConversationId) {
+      this._recordProgress(now);
+      this.ingestTurnComplete(topicId, inner);
+      return;
+    }
+
+    if (turnId) {
+      this._bufferUnassociatedEvent({
+        type: 'turn-complete',
+        turnId,
+        inner,
+        topicId,
+        now,
+      });
+    }
+  }
+
+  _ingestGuardedServerSteMetadata(item, inner, topicId, now) {
+    const turnId = inner.turn_id || extractTurnIdFromTopic(topicId);
+    const cid = extractConversationIdFromEnvelope(item);
+
+    if (turnId && cid) {
+      if (cid !== this.expectedConversationId) {
+        this._discardUnassociatedEventsForTurn(turnId);
+        return;
+      }
+      this._associateTurn(turnId, cid);
+    }
+
+    const associatedCid = turnId ? this.turnConversationMap.get(turnId) : cid;
+
+    if (associatedCid === this.expectedConversationId) {
+      this._recordProgress(now);
+      const ti = typeof inner?.tool_invoked === 'boolean'
+        ? inner.tool_invoked
+        : (typeof inner?.metadata?.tool_invoked === 'boolean' ? inner.metadata.tool_invoked : null);
+      if (typeof ti === 'boolean') this.toolInvoked = ti;
+      return;
+    }
+
+    if (turnId) {
+      this._bufferUnassociatedEvent({
+        type: 'server_ste_metadata',
+        turnId,
+        inner,
+        topicId,
+        now,
+      });
+    }
+  }
+
+  _applyMatchingStreamFrame(inner, topicId, sseFrames, now) {
+    if (!inner) return;
+    const turnId = inner.turn_id || extractTurnIdFromTopic(topicId);
+    if (!this.activeTurnId && turnId) {
+      this.activeTurnId = turnId;
+      this.activeTopicId = topicId;
+    }
+
+    this._recordProgress(now);
+
+    const frames = sseFrames || parseSseFrames(inner.encoded_item);
+    for (const sseEvent of frames) {
+      this.ingestSseEvent(sseEvent, now);
     }
   }
 
@@ -177,6 +543,14 @@ export class StreamCollector {
       return;
     }
     if (!parsed || typeof parsed !== 'object') return;
+
+    if (this.guarded) {
+      const explicitCid = extractConversationIdFromSseParsed(parsed);
+      if (explicitCid && explicitCid !== this.expectedConversationId) {
+        return;
+      }
+    }
+
     this.eventCount += 1;
 
     if (parsed.status === 'finished_successfully' || parsed.status === 'finished_partial_completion') {
@@ -338,10 +712,36 @@ export function sanitizeOutputText(text) {
   return text;
 }
 
-function extractTurnIdFromTopic(topicId) {
+export function extractTurnIdFromTopic(topicId) {
   if (typeof topicId !== 'string') return null;
   const m = topicId.match(/^conversation-turn-(.+)$/);
   return m ? m[1] : null;
+}
+
+export function extractConversationIdFromEnvelope(item) {
+  if (!item || typeof item !== 'object') return null;
+  if (item.conversation_id) return String(item.conversation_id);
+  if (item.payload && typeof item.payload === 'object') {
+    if (item.payload.conversation_id) return String(item.payload.conversation_id);
+    const inner = item.payload.payload;
+    if (inner && typeof inner === 'object') {
+      if (inner.conversation_id) return String(inner.conversation_id);
+      if (inner.conversation && inner.conversation.id) return String(inner.conversation.id);
+    }
+  }
+  return null;
+}
+
+export function extractConversationIdFromSseParsed(parsed) {
+  if (!parsed || typeof parsed !== 'object') return null;
+  if (parsed.conversation_id) return String(parsed.conversation_id);
+  if (parsed.v && typeof parsed.v === 'object') {
+    if (parsed.v.conversation_id) return String(parsed.v.conversation_id);
+    if (parsed.v.message && parsed.v.message.conversation_id) return String(parsed.v.message.conversation_id);
+  }
+  if (parsed.message && parsed.message.conversation_id) return String(parsed.message.conversation_id);
+  if (parsed.metadata && parsed.metadata.conversation_id) return String(parsed.metadata.conversation_id);
+  return null;
 }
 
 function applyProtocolTextState(collector, event, now) {

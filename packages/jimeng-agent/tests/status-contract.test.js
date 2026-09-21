@@ -19,6 +19,7 @@ import {
   findExactDomMatch,
   findTaskRecords,
   isCurrentJimengRecordRootToken,
+  isJimengEmptyStateText,
   isJimengTaskListReady,
   mergeExactSearchApiMetadata,
   parseSearchNetworkEntries,
@@ -168,6 +169,22 @@ describe('jimeng-agent/status-contract', () => {
     })).toThrow(ArgumentError);
   });
 
+  it('uses public kebab-case flags in validation errors', () => {
+    for (const args of [
+      { workspace: '1', search_key: '' },
+      { workspace: '1', search_key: 'abc', max_pages: 0 },
+    ]) {
+      try {
+        normalizeStatusArgs(args);
+        throw new Error('expected normalizeStatusArgs to fail');
+      } catch (error) {
+        expect(error).toBeInstanceOf(ArgumentError);
+        expect(error.hint).not.toMatch(/--(?:search_key|max_pages)/);
+        expect(error.hint).toMatch(/--(?:search-key|max-pages)/);
+      }
+    }
+  });
+
   it('classifies generating / cancelled / ready statuses from card text', () => {
     expect(classifyTaskStatus('认真思考中...')).toBe('generating');
     expect(classifyTaskStatus('排队加速中')).toBe('generating');
@@ -241,6 +258,74 @@ describe('jimeng-agent/status-contract', () => {
       recordListVisible: false,
       skeletonVisible: false,
     })).toBe(false);
+  });
+
+  it('accepts the redesigned filtered empty-state copy as empty', () => {
+    expect(isJimengEmptyStateText('暂未找到相关内容')).toBe(true);
+    expect(isJimengEmptyStateText('当前已开启筛选，暂未找到相关内容')).toBe(true);
+    expect(isJimengEmptyStateText('暂未找到相关内容清空')).toBe(true);
+    expect(isJimengEmptyStateText('')).toBe(false);
+    expect(isJimengEmptyStateText('已完成')).toBe(false);
+    expect(isJimengEmptyStateText(`prompt 暂未找到相关内容 ${'x'.repeat(40)}`)).toBe(false);
+  });
+
+  it('pairs a portaled history search input with the unique feed container', () => {
+    class HTMLElement {}
+    const historyRoot = new HTMLElement();
+    historyRoot.className = 'record-list-container-PR5UbM';
+    historyRoot.getAttribute = (name) => (
+      name === 'data-record-list-container' ? 'true' : null
+    );
+    historyRoot.getBoundingClientRect = () => ({ width: 900, height: 700 });
+    historyRoot.querySelectorAll = () => [];
+    const card = new HTMLElement();
+    card.className = 'video-card-container-YvtXmd';
+    card.getBoundingClientRect = () => ({ width: 300, height: 180 });
+    const record = new HTMLElement();
+    record.className = 'record-5JpNAj agentic-SFmZ8x';
+    record.innerText = '资产编号：2a755b1ed916172a 已完成';
+    record.textContent = record.innerText;
+    record.parentElement = null;
+    record.matches = () => false;
+    record.querySelector = (selector) => (
+      selector.includes('video-card') || selector.includes('agentic-video')
+        ? card
+        : null
+    );
+    record.getAttribute = () => null;
+    record.setAttribute = () => {};
+    record.getBoundingClientRect = () => ({ left: 0, top: 0, width: 800, height: 600 });
+    historyRoot.querySelectorAll = (selector) => (
+      selector === '[class*="record-"]' ? [record] : []
+    );
+    const input = new HTMLElement();
+    input.className = 'lv-input';
+    input.getBoundingClientRect = () => ({ width: 4, height: 20 });
+    input.closest = () => null;
+    const marker = 'portal-marker';
+    const document = {
+      querySelectorAll: (selector) => {
+        if (selector === `[data-opencli-jimeng-search="${marker}"]`) return [input];
+        if (selector === `[data-opencli-jimeng-history="${marker}"]`) return [historyRoot];
+        if (selector.includes('data-record-list-container') || selector.includes('record-list-container')) {
+          return [historyRoot];
+        }
+        return [];
+      },
+    };
+    const window = {
+      __opencliJimengRecordSeq: 0,
+      getComputedStyle: () => ({ display: 'block', visibility: 'visible' }),
+    };
+    const scanned = Function(
+      'document',
+      'window',
+      'HTMLElement',
+      `return ${buildRecordScanExpression(marker)}`,
+    )(document, window, HTMLElement);
+    expect(scanned.ok).toBe(true);
+    expect(scanned.items).toHaveLength(1);
+    expect(scanned.items[0].text).toContain('2a755b1ed916172a');
   });
 
   it('classifies query settle states and requires two stable observations', async () => {

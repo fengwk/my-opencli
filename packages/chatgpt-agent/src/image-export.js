@@ -270,6 +270,24 @@ export function makeInspectPlaceholder(page) {
 // --- Per-attempt pipeline (testable, no host-import side effects) -----------------
 
 /**
+ * Strict predicate evaluator for budget gates (canContinue / canRetry).
+ * Fail-closed: returns true only when predicate is omitted or explicitly evaluates to true.
+ * Returns false on undefined, falsy, non-boolean return values, or thrown exceptions.
+ *
+ * @param {(() => boolean) | null | undefined} predicate
+ * @returns {boolean}
+ */
+export function isContinueAllowed(predicate) {
+  if (predicate == null) return true;
+  if (typeof predicate !== 'function') return false;
+  try {
+    return predicate() === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Run the export pipeline once: settle → poll → fetch assets → save / reject.
  *
  * Errors from `fetchAssets` propagate to the caller (do not swallow them here).
@@ -287,6 +305,7 @@ export function makeInspectPlaceholder(page) {
  *   settleMs: number,
  *   pollIterations?: number,
  *   pollStableIndex?: number,
+ *   canContinue?: () => boolean,
  * }} deps
  * @returns {Promise<{ results: object[], hasValidDownload: boolean }>}
  */
@@ -303,12 +322,14 @@ export async function runImageExportAttempt(deps) {
     settleMs,
     pollIterations = DEFAULT_POLL_ITERATIONS,
     pollStableIndex = DEFAULT_POLL_STABLE_INDEX,
+    canContinue,
   } = deps;
 
   await sleep(settleMs / 1000);
 
   let urls = [];
   for (let i = 0; i < pollIterations; i += 1) {
+    if (!isContinueAllowed(canContinue)) break;
     let all = [];
     try {
       all = await snapshotUrls();
@@ -318,7 +339,10 @@ export async function runImageExportAttempt(deps) {
     urls = (Array.isArray(all) ? all : []).filter((u) => u && !beforeSet.has(u));
     if (urls.length >= expectedCount) break;
     if (urls.length > 0 && i >= pollStableIndex) break;
-    await sleep(1);
+    if (i < pollIterations - 1) {
+      if (!isContinueAllowed(canContinue)) break;
+      await sleep(1);
+    }
   }
 
   if (!urls.length) {
@@ -428,6 +452,9 @@ export async function runImageExportAttempt(deps) {
  *   expectedCount?: number,
  *   outputDir?: string,
  *   settleMs?: number,
+ *   pollIterations?: number,
+ *   pollStableIndex?: number,
+ *   canContinue?: () => boolean,
  *   reloadConversation?: () => Promise<void>,
  *   canRetry?: () => boolean,
  * }} opts
@@ -437,6 +464,9 @@ export async function exportNewImagesLikeOfficial(page, opts = {}) {
   const expectedCount = Math.max(1, opts.expectedCount || 1);
   const outputDir = resolveImageOutputDir(opts.outputDir);
   const settleMs = opts.settleMs ?? 1500;
+  const pollIterations = opts.pollIterations ?? DEFAULT_POLL_ITERATIONS;
+  const pollStableIndex = opts.pollStableIndex ?? DEFAULT_POLL_STABLE_INDEX;
+  const canContinue = typeof opts.canContinue === 'function' ? opts.canContinue : null;
   const reloadConversation = typeof opts.reloadConversation === 'function'
     ? opts.reloadConversation
     : null;
@@ -456,22 +486,14 @@ export async function exportNewImagesLikeOfficial(page, opts = {}) {
     expectedCount,
     outputDir,
     settleMs,
+    pollIterations,
+    pollStableIndex,
+    canContinue,
   };
 
   const first = await runImageExportAttempt(baseDeps);
 
-  // canRetry is treated as a strict predicate. A throwing gate means the
-  // caller misbehaved; rather than propagate the unrelated error we treat
-  // it as "no retry" and fall back to the first-attempt results.
-  let canRetryResult = true;
-  if (typeof canRetry === 'function') {
-    try {
-      canRetryResult = canRetry() === true;
-    } catch {
-      canRetryResult = false;
-    }
-  }
-  const retryAllowed = !!reloadConversation && canRetryResult;
+  const retryAllowed = !!reloadConversation && isContinueAllowed(canRetry);
   if (first.hasValidDownload || !retryAllowed) {
     return first.results;
   }
