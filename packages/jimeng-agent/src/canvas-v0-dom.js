@@ -364,6 +364,29 @@ export async function waitForCanvasV0Surface(page, timeoutMs = 60_000) {
   );
 }
 
+/**
+ * Some legacy widgets only run their handler for a complete pointer/mouse
+ * sequence — the 生成偏好 trigger ignores a bare `click()` — so every in-page
+ * activation goes through this instead of `node.click()`.
+ */
+const V0_MOUSE_SEQUENCE = `
+  for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+    const Ctor = type.startsWith('pointer') && typeof window.PointerEvent === 'function'
+      ? window.PointerEvent
+      : window.MouseEvent;
+    target.dispatchEvent(new Ctor(type, {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      button: 0,
+      buttons: type.endsWith('down') ? 1 : 0,
+      pointerId: 1,
+      pointerType: 'mouse',
+      isPrimary: true,
+    }));
+  }
+`;
+
 const V0_SIDECAR_LAUNCHER_MARKER = 'sidecar-launcher';
 
 const V0_SIDECAR_LAUNCHER_LOCATE = `
@@ -390,9 +413,9 @@ async function collapseStalledCanvasV0Sidecar(page) {
     const panel = [...document.querySelectorAll('aside[class*="right-panel"]')][0];
     if (!panel) return false;
     const buttons = [...panel.querySelectorAll('[class*="operation-button"]')].filter(v0Visible);
-    const collapse = buttons[buttons.length - 1];
-    if (!collapse) return false;
-    collapse.click();
+    const target = buttons[buttons.length - 1];
+    if (!target) return false;
+    ${V0_MOUSE_SEQUENCE}
     return true;
   })()`).catch(() => false);
 }
@@ -456,9 +479,10 @@ export async function ensureCanvasV0SidecarOpen(page, timeoutMs = 45_000) {
     if (located?.ok) {
       // Same document as the marker, so a toolbar re-render cannot invalidate it.
       const clicked = await page.evaluate(`(() => {
-        const node = document.querySelector(${JSON.stringify(located.selector)});
-        if (!node) return false;
-        node.click();
+        ${buildCanvasV0LocatorScript()}
+        ${V0_SIDECAR_LAUNCHER_LOCATE}
+        if (!target) return false;
+        ${V0_MOUSE_SEQUENCE}
         return true;
       })()`).catch(() => false);
       if (clicked) state.clicks += 1;
@@ -528,7 +552,7 @@ async function clickCanvasV0Control(page, locateSource, probeSource, options = {
       ${buildCanvasV0LocatorScript()}
       ${source}
       if (!target) return false;
-      target.click();
+      ${V0_MOUSE_SEQUENCE}
       return true;
     })()`),
     async (selector) => page.click(selector),
@@ -708,26 +732,27 @@ async function openCanvasV0GenerationSettings(page) {
   // The popover may already be open (a previous run or the operator left it that
   // way), and clicking its trigger would only close it again.
   const existing = await probeCanvasV0(page, V0_POPOVER_PROBE);
-  if (existing?.ok) {
-    const marked = await markCanvasV0Control(page, 'generation-settings', 'const target = v0SettingsTrigger();');
-    return { ...existing, triggerSelector: marked?.ok ? marked.selector : '' };
-  }
-  const opened = await clickCanvasV0Control(page, 'const target = v0SettingsTrigger();', V0_POPOVER_PROBE, {
+  if (existing?.ok) return existing;
+  return clickCanvasV0Control(page, 'const target = v0SettingsTrigger();', V0_POPOVER_PROBE, {
     label: '生成偏好 trigger',
     marker: 'generation-settings',
   });
-  return { ...opened, triggerSelector: opened.selector };
 }
 
-async function closeCanvasV0GenerationSettings(page, triggerSelector) {
+async function closeCanvasV0GenerationSettings(page) {
   await page.nativeKeyPress('Escape').catch(() => null);
   let probe = await probeCanvasV0(page, V0_POPOVER_PROBE);
-  if (probe?.ok && triggerSelector) {
+  if (probe?.ok) {
+    // Escape does not always dismiss the popover, and the trigger is re-rendered
+    // between marking it and a CDP click, so locate and click in one round-trip.
     await page.evaluate(`(() => {
-      const node = document.querySelector(${JSON.stringify(triggerSelector)});
-      if (node) node.click();
+      ${buildCanvasV0LocatorScript()}
+      const target = v0SettingsTrigger();
+      if (!target) return false;
+      ${V0_MOUSE_SEQUENCE}
+      return true;
     })()`).catch(() => null);
-    await page.sleep(0.3);
+    await page.sleep(0.4);
     probe = await probeCanvasV0(page, V0_POPOVER_PROBE);
   }
   return probe;
@@ -850,7 +875,7 @@ export async function configureCanvasV0Generation(page, canonical = {}) {
   // 自动 last: the video/ratio clicks above drop the trigger to 自定义.
   const auto = await ensureCanvasV0AutoPreference(page);
 
-  await closeCanvasV0GenerationSettings(page, settings.triggerSelector);
+  await closeCanvasV0GenerationSettings(page);
   return {
     creationType: creation.creationType,
     videoMode: true,

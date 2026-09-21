@@ -283,7 +283,7 @@ describe('jimeng-agent canvas-v0 对话 panel docking', () => {
   const sidecarMarkHandler = () => ['setAttribute', (text) => (text.includes('sidecar-launcher')
     ? { ok: true, selector: '[data-opencli-jimeng-v0-target="sidecar-launcher"]' }
     : undefined)];
-  const inPageClickHandler = () => ['node.click()', (text) => (text.includes('sidecar-launcher') ? true : undefined)];
+  const inPageClickHandler = () => ['pointerdown', (text) => (text.includes('/^对话$/') ? true : undefined)];
 
   it('activates the tab and clicks the 对话 launcher in-page when the panel is closed', async () => {
     let probeCount = 0;
@@ -306,7 +306,7 @@ describe('jimeng-agent canvas-v0 对话 panel docking', () => {
     // The launcher is clicked inside the page: a marked selector round-trip goes
     // stale because the toolbar re-renders between mark and click.
     expect(page.calls.keys).toEqual([]);
-    expect(page.calls.evaluate.filter((text) => text.includes('node.click()'))).toHaveLength(1);
+    expect(page.calls.evaluate.filter((text) => text.includes('pointerdown') && text.includes('/^对话$/'))).toHaveLength(1);
   });
 
   it('does not click anything when the panel is already docked', async () => {
@@ -327,7 +327,7 @@ describe('jimeng-agent canvas-v0 对话 panel docking', () => {
   it('collapses a stalled slide-in instead of clicking the missing launcher', async () => {
     let probeCount = 0;
     const page = createMockPage([
-      ['operation-button', (text) => (text.includes('collapse.click()') ? true : undefined)],
+      ['operation-button', (text) => (text.includes('pointerdown') ? true : undefined)],
       inPageClickHandler(),
       sidecarMarkHandler(),
       ['surfaceReady:', () => {
@@ -343,8 +343,9 @@ describe('jimeng-agent canvas-v0 对话 panel docking', () => {
     expect(state.panelReady).toBe(true);
     // The panel was already reported open, so this run did not open it itself.
     expect(state.opened).toBe(false);
-    expect(page.calls.evaluate.filter((text) => text.includes('collapse.click()'))).toHaveLength(1);
-    expect(page.calls.evaluate.filter((text) => text.includes('node.click()'))).toEqual([]);
+    expect(page.calls.evaluate.filter((text) => text.includes('operation-button') && text.includes('pointerdown'))).toHaveLength(1);
+    // No launcher click: the panel reported itself open, so there was none to click.
+    expect(page.calls.evaluate.filter((text) => text.includes('/^对话$/') && text.includes('pointerdown'))).toEqual([]);
   });
 
   it('reloads the project once before failing on a stalled panel', async () => {
@@ -358,29 +359,32 @@ describe('jimeng-agent canvas-v0 对话 panel docking', () => {
     await expect(ensureCanvasV0SidecarOpen(page, 17_000))
       .rejects.toThrow(/reloads=1/);
     expect(page.calls.evaluate.filter((text) => text === 'location.reload()')).toHaveLength(1);
-    expect(page.calls.evaluate.filter((text) => text.includes('collapse.click()'))).toHaveLength(1);
+    expect(page.calls.evaluate.filter((text) => text.includes('operation-button') && text.includes('pointerdown'))).toHaveLength(1);
   });
 
   const generationHandlers = ({ autoInitiallyOn, autoMirror }) => {
     let autoEnabled = autoInitiallyOn;
-    let popoverProbes = 0;
+    // The phase starts with 生成偏好 already open; the trigger click closes it.
+    let popoverOpen = true;
     return [
       ['const read = v0CreationTypeRead();',
         () => ({ text: 'Agent 模式', hasTarget: true, options: 0, selected: 'Agent 模式' })],
-      ['const target = v0SettingsTrigger();',
-        () => ({ ok: true, selector: '[data-opencli-jimeng-v0-target="generation-settings"]' })],
+      ['v0SettingsTrigger()', (text) => {
+        if (text.includes('pointerdown')) {
+          popoverOpen = false;
+          return true;
+        }
+        return { ok: true, selector: '[data-opencli-jimeng-v0-target="generation-settings"]' };
+      }],
       ["detail: 'settings-panel-open'",
-        () => {
-          popoverProbes += 1;
-          return popoverProbes === 1 ? { ok: true, detail: 'settings-panel-open' } : { ok: false, detail: 'popover-missing' };
-        }],
+        () => (popoverOpen ? { ok: true, detail: 'settings-panel-open' } : { ok: false, detail: 'popover-missing' })],
       ['const label = "视频";', () => ({ ok: true, detail: 'radio-selected' })],
       ['autoEnabled: v0AutoPreference()', () => ({ autoEnabled: autoMirror })],
       ['[role="switch"]', (text) => {
         if (text.includes('setAttribute')) {
           return { ok: true, selector: '[data-opencli-jimeng-v0-target="auto-switch"]' };
         }
-        if (text.includes('target.click();')) {
+        if (text.includes('pointerdown')) {
           autoEnabled = true;
           return true;
         }
@@ -409,7 +413,7 @@ describe('jimeng-agent canvas-v0 对话 panel docking', () => {
     const state = await configureCanvasV0Generation(page, {});
 
     expect(state.autoEnabled).toBe(true);
-    expect(page.calls.evaluate.filter((text) => text.includes('.click();'))).toEqual([]);
+    expect(page.calls.evaluate.filter((text) => text.includes('v0SettingsTrigger()') && text.includes('pointerdown'))).toEqual([]);
   });
 
   it('turns the 自动 preference on after the video preference, like generate', async () => {
@@ -420,7 +424,9 @@ describe('jimeng-agent canvas-v0 对话 panel docking', () => {
     expect(state.autoEnabled).toBe(true);
     expect(state.autoToggled).toBe(true);
     expect(state.creationType).toBe('Agent 模式');
-    expect(page.calls.evaluate.filter((text) => text.includes('target.click();') && text.includes('switch'))).toHaveLength(1);
+    expect(page.calls.evaluate.filter((text) => text.includes('pointerdown') && text.includes('switch'))).toHaveLength(1);
+    // The popover is dismissed through its own trigger, located in-page.
+    expect(page.calls.evaluate.filter((text) => text.includes('v0SettingsTrigger()') && text.includes('pointerdown'))).toHaveLength(1);
     // The video radio was already selected, so it is only read, never clicked.
     expect(page.calls.evaluate.filter((text) => text.includes('video-radio'))).toEqual([]);
   });
@@ -432,7 +438,8 @@ describe('jimeng-agent canvas-v0 对话 panel docking', () => {
 
     expect(state.autoEnabled).toBe(true);
     expect(state.autoToggled).toBe(false);
-    expect(page.calls.evaluate.filter((text) => text.includes('target.click();'))).toEqual([]);
+    expect(page.calls.evaluate.filter((text) => text.includes('pointerdown') && text.includes('switch'))).toEqual([]);
+    expect(page.calls.evaluate.filter((text) => text.includes('v0SettingsTrigger()') && text.includes('pointerdown'))).toHaveLength(1);
   });
 
   it('fails closed when the 生成偏好 panel exposes no 自动 switch', async () => {

@@ -187,6 +187,9 @@ Legacy canvas flow:
    parks the panel's slide-in animation off-screen while the app already reports
    it open. Such a stalled panel is repaired by collapsing it through its own
    header control, or by one project reload, before the phase is allowed to fail.
+   Every in-page activation fires a full `pointerdown → mousedown → pointerup →
+   mouseup → click` sequence: some legacy widgets (the 生成偏好 trigger) ignore a
+   bare `click()`.
 3. Applies 创作类型 = Agent 模式. The docked panel renders that selector as an
    icon without a label, so the command opens its option list, reads the
    `aria-selected` option, closes the list again when it already matches, and
