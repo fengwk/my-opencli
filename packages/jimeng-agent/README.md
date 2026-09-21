@@ -23,6 +23,8 @@ opencli jimeng-agent canvas-create --help
 opencli jimeng-agent canvas-video --help
 opencli jimeng-agent canvas-v0-create --help
 opencli jimeng-agent canvas-v0-video --help
+opencli jimeng-agent canvas-v0-status --help
+opencli jimeng-agent canvas-v0-download --help
 opencli jimeng-agent canvas-status --help
 opencli jimeng-agent status --help
 ```
@@ -36,6 +38,8 @@ opencli jimeng-agent status --help
 | `canvas-video` | AI Canvas | `https://jimeng.jianying.com/ai-tool/ai-canvas` (`--canvas new` or `--canvas <project-id>`) |
 | `canvas-v0-create` | Legacy canvas | Create a blank 初代画布 (`/ai-tool/canvas`) and return its numeric `project-id` |
 | `canvas-v0-video` | Legacy canvas | `https://jimeng.jianying.com/ai-tool/canvas` (`--canvas new` or `--canvas <project-id>`) |
+| `canvas-v0-status` | Legacy canvas | List legacy canvas generations with state, video definitions and asset ids |
+| `canvas-v0-download` | Legacy canvas | Download one legacy canvas generation (md5 verified) |
 | `canvas-status` | AI Canvas | List every current/historical resource, optionally correlated to one `asset-id` |
 | `status` | History | Search and official download by `asset-id` |
 
@@ -131,7 +135,7 @@ Canvas video flow:
 `ui_confirmed` when the exact sent-message transition is observed, and `none`
 for prepare-only runs.
 
-## Legacy canvas (`canvas-v0-create` / `canvas-v0-video`)
+## Legacy canvas (`canvas-v0-create` / `canvas-v0-video` / `canvas-v0-status` / `canvas-v0-download`)
 
 The 初代画布 surface (`/ai-tool/canvas/<project-id>`) is a different editor
 from the current AI Canvas: projects are created through
@@ -172,31 +176,92 @@ Legacy canvas flow:
    opens `<canvas-url>?enter_from=create_new&from_page=assets` and waits for the
    composer to mount. Nothing else is changed and nothing is submitted.
 2. `canvas-v0-video` opens `--canvas new` (creating the project first) or an
-   existing `/ai-tool/canvas/<project-id>` project, expands the right-hand
-   「对话」 sidecar and verifies the composer, launcher and upload control.
-3. Applies `--ratio` in the 「生成偏好」 panel: switches to video mode and selects
-   the requested aspect ratio, then closes the popover.
-4. Clears leftover composer text **and leftover reference attachments** so
+   existing `/ai-tool/canvas/<project-id>` project and docks the right-hand
+   「对话」 sidecar through its top-right button. A closed sidecar is still
+   mounted (off-screen at `left == window.innerWidth`), so the panel is only
+   accepted once ≥60% of it is inside the viewport; every later phase re-asserts
+   that dock and the run fails closed instead of falling back to the canvas
+   bottom composer.
+3. Applies 创作类型 = Agent 模式. The docked panel renders that selector as an
+   icon without a label, so the command opens its option list, reads the
+   `aria-selected` option, closes the list again when it already matches, and
+   re-reads it to confirm a switch.
+4. Applies `--ratio` in the 「生成偏好」 panel: switches to video mode and selects
+   the requested aspect ratio, then closes the popover. The panel also renders
+   that trigger as an icon, so it is located by the icon it shares with the
+   composer variant that still renders the 自动/自定义 label.
+5. Clears leftover composer text **and leftover reference attachments** so
    repeated runs stay idempotent instead of stacking stale references.
-5. Uploads every `--image` reference through the file input and waits for each
+6. Uploads every `--image` reference through the file input and waits for each
    reference card to finish.
-6. Composes the prompt (including `资产编号：<asset-id>`) into the shared
-   TipTap composer and verifies the visible text.
-7. Content checkpoint: surface ready, expected reference count, prompt anchors in
+7. Composes the prompt (including `资产编号：<asset-id>`) into the panel TipTap
+   composer and verifies the visible text.
+8. Content checkpoint: docked panel, expected reference count, prompt anchors in
    order, `资产编号：<asset-id>` present, no generation already running.
-8. With `--submit 1`, arms a network capture on the legacy send path, then
+9. With `--submit 1`, arms a network capture on the legacy send path, then
    requires either a correlated ACK or the exact `资产编号：<asset-id>` marker
    moving out of the composer into the sent area. Any ambiguity fails closed.
-9. With `--submit 0` (default), leaves the verified draft in place and never
-   clicks send.
-10. Returns `project-id`, `canvas-url`, `references`, `asset-id`, `submitted`,
-    `checkpoint-ok`, `confirmation`.
+10. With `--submit 0` (default), leaves the verified draft in place and never
+    clicks send.
+11. Returns `project-id`, `canvas-url`, `references`, `asset-id`, `submitted`,
+    `checkpoint-ok`, `panel-open`, `confirmation`.
+
+### Reading a legacy canvas back (`canvas-v0-status` / `canvas-v0-download`)
+
+`canvas-status` cannot inspect legacy canvases: it reads the AI Canvas
+`/octo_api/v1/project/draft/get` store and answers `project not found` for a
+legacy `project-id`. Legacy canvases are read through their own endpoints
+instead, all of them read-only:
+
+| Call | Purpose |
+|---|---|
+| `POST /mweb/v1/infinite_canvas/project_detail` | Canvas draft: `aiGeneratorReference` maps every node to `{recordId, itemId, turnId}` |
+| `POST /mweb/v1/get_history_by_ids` | History records: `status`, prompt, `fail_starling_message`, video definitions |
+
+```bash
+# Every generation of the canvas, newest first
+OPENCLI_BROWSER_COMMAND_TIMEOUT=240 opencli jimeng-agent canvas-v0-status \
+  --canvas 17883546906892 \
+  --limit 5 \
+  -f json
+
+# One run of canvas-v0-video, correlated by its asset-id
+OPENCLI_BROWSER_COMMAND_TIMEOUT=240 opencli jimeng-agent canvas-v0-status \
+  --canvas 17883546906892 \
+  --asset-id 58674724fb245869
+
+# Download one generation (the md5 published by the API is verified)
+OPENCLI_BROWSER_COMMAND_TIMEOUT=240 opencli jimeng-agent canvas-v0-download \
+  --canvas 17883546906892 \
+  --record-id 39441026984460 \
+  --definition 720p \
+  --output ~/Downloads/jimeng-agent
+```
+
+`canvas-v0-status` rows carry the generation state plus every fact it was derived
+from, so nothing has to be guessed:
+
+- `status` is `ready` (a downloadable video exists), `failed`
+  (`fail_starling_message` / `fail_starling_key` is set) or `pending` (no video
+  yet: never submitted, still running, or a non-video task).
+- `status-code` / `status-name` / `item-status-code` are the raw API codes;
+  only the codes observed live are named (`50` → `finished`).
+- `no-generations` is reported as an explicit row for a canvas whose
+  `aiGeneratorReference` is still empty, and `no-matching-generation` when a
+  filter matched nothing.
+- `asset-id` comes from `资产编号：…` inside the stored prompt, so a legacy
+  generation is reachable exactly like a `canvas-video` one.
+
+`canvas-v0-download` picks the newest ready generation unless `--record-id` or
+`--asset-id` narrows it, falls back to the best published definition (reporting
+`definition-fallback`) when the requested one is missing, verifies the md5 of
+the bytes it received, and writes nothing when the checksum does not match.
 
 Differences from `canvas-video` worth knowing:
 
-- `canvas-status` cannot inspect legacy canvases: it reads the AI Canvas
-  `/octo_api/v1/project/draft/get` store and answers `project not found` for a
-  legacy `project-id`. Legacy resources are only visible in the canvas UI today.
+- Videos are downloaded from the signed CDN definitions returned by
+  `get_history_by_ids` (`origin` / `720p` / `480p` / `360p`), so they need a
+  fresh `canvas-v0-download` run once a URL has expired.
 - References are uploaded as files; `--prompt` must be plain text without
   `@图片N`-style mentions (the legacy composer has no rich-reference picker).
 - Titles are capped at 20 characters and, as with `canvas-video`, `--title` is

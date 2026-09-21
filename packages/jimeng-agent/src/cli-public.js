@@ -6,6 +6,7 @@
 const CLI_ARG_ALIASES = Object.freeze({
   'model-version': 'model_version',
   'asset-id': 'asset_id',
+  'record-id': 'record_id',
   'search-key': 'search_key',
   'max-pages': 'max_pages',
 });

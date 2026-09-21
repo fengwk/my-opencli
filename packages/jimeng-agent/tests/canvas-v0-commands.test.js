@@ -3,6 +3,8 @@ import { ArgumentError } from '@jackwener/opencli/errors';
 import { Strategy } from '@jackwener/opencli/registry';
 
 import { canvasV0CreateCommand } from '../canvas-v0-create.js';
+import { canvasV0DownloadCommand } from '../canvas-v0-download.js';
+import { canvasV0StatusCommand } from '../canvas-v0-status.js';
 import { canvasV0VideoCommand } from '../canvas-v0-video.js';
 
 function validAskArgs(overrides = {}) {
@@ -107,5 +109,66 @@ describe('jimeng-agent/canvas-v0-video command registration', () => {
       title: 'unexpected rename',
     }))).toThrow(ArgumentError);
     expect(() => canvasV0VideoCommand.validateArgs(validAskArgs({ typo: 1 }))).toThrow(ArgumentError);
+  });
+});
+
+describe('jimeng-agent canvas-v0-status command registration', () => {
+  it('reads an existing legacy canvas without touching the persistent draft tab', () => {
+    expect(canvasV0StatusCommand.site).toBe('jimeng-agent');
+    expect(canvasV0StatusCommand.name).toBe('canvas-v0-status');
+    expect(canvasV0StatusCommand.strategy).toBe(Strategy.COOKIE);
+    expect(canvasV0StatusCommand.browser).toBe(true);
+    expect(canvasV0StatusCommand.access).toBe('read');
+    expect(canvasV0StatusCommand.siteSession).toBe('ephemeral');
+    expect(canvasV0StatusCommand.navigateBefore).toBe(false);
+  });
+
+  it('exposes canvas, asset-id, record-id and limit', () => {
+    expect(canvasV0StatusCommand.args.map((arg) => arg.name))
+      .toEqual(['canvas', 'asset-id', 'record-id', 'limit']);
+    expect(canvasV0StatusCommand.args.find((arg) => arg.name === 'canvas').required).toBe(true);
+  });
+
+  it('declares the read-back output columns', () => {
+    for (const column of ['status', 'record-id', 'asset-id', 'definitions', 'download-url', 'prompt']) {
+      expect(canvasV0StatusCommand.columns).toContain(column);
+    }
+  });
+
+  it('validates args through pure contract validation', () => {
+    expect(() => canvasV0StatusCommand.validateArgs({ canvas: '17883546906892' })).not.toThrow();
+    expect(() => canvasV0StatusCommand.validateArgs({ canvas: 'new' })).toThrow(ArgumentError);
+    expect(() => canvasV0StatusCommand.validateArgs({ canvas: '17883546906892', 'asset-id': 'nope' }))
+      .toThrow(ArgumentError);
+    expect(() => canvasV0StatusCommand.validateArgs({ canvas: '17883546906892', typo: 1 })).toThrow(ArgumentError);
+  });
+});
+
+describe('jimeng-agent canvas-v0-download command registration', () => {
+  it('downloads through the signed CDN urls of an existing legacy canvas', () => {
+    expect(canvasV0DownloadCommand.site).toBe('jimeng-agent');
+    expect(canvasV0DownloadCommand.name).toBe('canvas-v0-download');
+    expect(canvasV0DownloadCommand.strategy).toBe(Strategy.COOKIE);
+    expect(canvasV0DownloadCommand.browser).toBe(true);
+    expect(canvasV0DownloadCommand.access).toBe('write');
+    expect(canvasV0DownloadCommand.siteSession).toBe('ephemeral');
+  });
+
+  it('exposes canvas, record-id, asset-id, definition and output', () => {
+    expect(canvasV0DownloadCommand.args.map((arg) => arg.name))
+      .toEqual(['canvas', 'record-id', 'asset-id', 'definition', 'output']);
+    expect(canvasV0DownloadCommand.args.find((arg) => arg.name === 'definition').choices)
+      .toEqual(['origin', '720p', '480p', '360p']);
+  });
+
+  it('validates args through pure contract validation', () => {
+    expect(() => canvasV0DownloadCommand.validateArgs({ canvas: '17883546906892' })).not.toThrow();
+    expect(() => canvasV0DownloadCommand.validateArgs({
+      canvas: '17883546906892',
+      'record-id': '39441026984460',
+      'asset-id': '58674724fb245869',
+    })).toThrow(ArgumentError);
+    expect(() => canvasV0DownloadCommand.validateArgs({ canvas: '17883546906892', definition: '4k' }))
+      .toThrow(ArgumentError);
   });
 });
