@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -10,6 +12,7 @@ import {
   runCanvasV0ContentCheckpoint,
   runJimengCanvasV0Create,
   submitCanvasV0PreparedGeneration,
+  waitForCanvasV0Attachments,
   waitForCanvasV0Surface,
 } from '../src/canvas-v0-dom.js';
 import {
@@ -287,10 +290,14 @@ describe('jimeng-agent canvas-v0 create flow', () => {
 });
 
 describe('jimeng-agent canvas-v0 reference hygiene', () => {
+  // The reference read locator returns attachment *cards* (images, videos and
+  // non-image attachments such as audio), not `<img>`-only items.
+  const readMarker = 'panelDocked: v0PanelReady()';
+
   it('removes leftover references until the composer is empty', async () => {
     let remaining = 2;
     const page = createMockPage([
-      ['states: items.map', () => ({ count: remaining, alerts: [], states: [] })],
+      [readMarker, () => ({ panelDocked: true, count: remaining, cards: [], alerts: [] })],
       ['remove-button', () => {
         remaining -= 1;
         return { ok: true };
@@ -303,14 +310,241 @@ describe('jimeng-agent canvas-v0 reference hygiene', () => {
     expect(remaining).toBe(0);
   });
 
+  it('removes a non-image attachment card (audio) as well', async () => {
+    // An audio card carries no <img>, so an <img>-only locator would leave it
+    // behind and the next run would submit the stale reference.
+    const cards = [{ index: '0', kind: 'attachment', label: '音频1', durationText: '', imageSrc: '' }];
+    const page = createMockPage([
+      [readMarker, () => ({ panelDocked: true, count: cards.length, cards: [...cards], alerts: [] })],
+      ['remove-button', (text) => {
+        expect(text).toContain('v0ReferenceCardElements(composer)');
+        cards.pop();
+        return { ok: true };
+      }],
+    ]);
+
+    const result = await clearCanvasV0References(page);
+
+    expect(result).toEqual({ references: 0 });
+    expect(cards).toEqual([]);
+  });
+
   it('fails loudly when a reference cannot be removed', async () => {
     const page = createMockPage([
-      ['states: items.map', () => ({ count: 1, alerts: [], states: [] })],
+      [readMarker, () => ({ panelDocked: true, count: 1, cards: [], alerts: [] })],
       ['remove-button', () => ({ ok: false, reason: 'remove-control-missing' })],
     ]);
 
     await expect(clearCanvasV0References(page))
       .rejects.toThrow(/remove-control-missing/);
+  });
+});
+
+describe('jimeng-agent canvas-v0 reference locator', () => {
+  // The locator is a template literal in the module, so the text between these
+  // markers is exactly what the browser evaluates (that range holds no
+  // interpolations), and it can be run against a DOM stand-in.
+  const domSource = readFileSync(new URL('../src/canvas-v0-dom.js', import.meta.url), 'utf8');
+  const locatorSource = (() => {
+    const start = domSource.indexOf('const v0Styled =');
+    const end = domSource.indexOf('const v0UploadControl =', start + 1);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    return domSource.slice(start, end);
+  })();
+
+  /** Only the selectors the reference locator actually uses are implemented. */
+  const matches = (node, selector) => {
+    if (selector === 'img') return node.tagName === 'IMG';
+    const classMatch = selector.match(/^\[class\*="(.+)"\]$/);
+    if (classMatch) return node.classes.some((name) => name.includes(classMatch[1]));
+    const attrMatch = selector.match(/^\[([a-z-]+)\]$/);
+    if (attrMatch) return Object.prototype.hasOwnProperty.call(node.attrs, attrMatch[1]);
+    throw new Error(`unsupported selector: ${selector}`);
+  };
+
+  const node = (tag, {
+    classes = [], attrs = {}, text = '', children = [],
+    rect = { width: 20, height: 20, left: 5, top: 5, right: 25, bottom: 25 },
+  } = {}) => ({
+    tagName: tag.toUpperCase(),
+    classes,
+    attrs,
+    children,
+    src: attrs.src || '',
+    getAttribute: (name) => (name === 'class' ? classes.join(' ') : (attrs[name] ?? null)),
+    getBoundingClientRect: () => rect,
+    get innerText() { return text; },
+    get textContent() { return text; },
+    querySelectorAll(selector) {
+      const found = [];
+      const walk = (parent) => {
+        for (const child of parent.children) {
+          if (matches(child, selector)) found.push(child);
+          walk(child);
+        }
+      };
+      walk(this);
+      return found;
+    },
+    querySelector(selector) {
+      return this.querySelectorAll(selector)[0] || null;
+    },
+  });
+
+  const buildReferenceCards = () => {
+    const browserWindow = {
+      getComputedStyle: () => ({ display: 'block', visibility: 'visible' }),
+      innerWidth: 1280,
+      innerHeight: 800,
+    };
+    return Function(
+      'document',
+      'window',
+      `${locatorSource}; return v0ReferenceCards;`,
+    )({ querySelectorAll: () => [] }, browserWindow);
+  };
+
+  const uploadTile = (index = '2') => node('div', {
+    classes: ['reference-item-XrDz6P'],
+    attrs: { 'data-index': index },
+    children: [node('div', { classes: ['reference-upload-rPIsu_', 'mini-qZdmlb'], children: [node('svg')] })],
+  });
+  const imageCard = (index = '0') => node('div', {
+    classes: ['reference-item-Aa1'],
+    attrs: { 'data-index': index },
+    children: [
+      node('img', { classes: ['image-XCBKz6'], attrs: { src: 'blob:https://jimeng.jianying.com/1' } }),
+      node('div', { classes: ['remove-button-Qq'] }),
+    ],
+  });
+  const videoCard = (index = '1') => node('div', {
+    classes: ['reference-item-Bb2'],
+    attrs: { 'data-index': index },
+    children: [
+      node('img', { classes: ['image-bGnRhM'], attrs: { src: 'blob:https://jimeng.jianying.com/2' } }),
+      node('span', {
+        classes: ['duration-YXzCne', 'visible-Ks3_NG'],
+        attrs: { 'data-reference-video-duration': 'true' },
+        text: '00:05',
+      }),
+    ],
+  });
+  const audioCard = (label, index = '1') => node('div', {
+    classes: ['reference-item-Cc3'],
+    attrs: { 'data-index': index },
+    children: [
+      node('div', { classes: ['reference-attachment-Dd4'] }),
+      node('div', { classes: ['overlay-label-IWzvAP'], text: label }),
+    ],
+  });
+  const stack = (...items) => node('div', { classes: ['references-Ee5'], children: items });
+
+  it('keeps every attachment kind and drops the upload tile', () => {
+    const cards = buildReferenceCards()(stack(uploadTile(), imageCard('0'), videoCard('1'), audioCard('音频1')));
+
+    expect(cards.map((card) => [card.index, card.kind, card.label, card.durationText])).toEqual([
+      ['0', 'image', '', ''],
+      ['1', 'video', '', '00:05'],
+      ['1', 'attachment', '音频1', ''],
+    ]);
+    expect(cards[0].imageSrc).toBe('blob:https://jimeng.jianying.com/1');
+    expect(cards[2].imageSrc).toBe('');
+  });
+
+  it('reports an unrecognized card as unknown and skips hidden ones', () => {
+    const sizedOff = node('div', {
+      classes: ['reference-item-Ee6'],
+      attrs: { 'data-index': '0' },
+      rect: { width: 0, height: 0, left: 0, top: 0, right: 0, bottom: 0 },
+      children: [node('img', { attrs: { src: 'blob:x' } })],
+    });
+    const parkedOffScreen = node('div', {
+      classes: ['reference-item-Ff7'],
+      attrs: { 'data-index': '1' },
+      rect: { width: 20, height: 20, left: 2000, top: 5, right: 2020, bottom: 25 },
+      children: [node('img', { attrs: { src: 'blob:y' } })],
+    });
+    const bare = node('div', {
+      classes: ['reference-item-Gg8'],
+      attrs: { 'data-index': '1' },
+      children: [node('div', { classes: ['remove-button-Qq'] })],
+    });
+
+    const cards = buildReferenceCards()(stack(sizedOff, parkedOffScreen, bare));
+
+    expect(cards).toEqual([{
+      index: '1',
+      kind: 'unknown',
+      label: '',
+      durationText: '',
+      imageSrc: '',
+    }]);
+  });
+});
+
+describe('jimeng-agent canvas-v0 attachment wait', () => {
+  const readMarker = 'panelDocked: v0PanelReady()';
+  const imageCard = (index = '0') => ({ index, kind: 'image', label: '', durationText: '', imageSrc: 'blob:https://jimeng.jianying.com/x' });
+  const audioCard = (label, index = '1') => ({ index, kind: 'attachment', label, durationText: '', imageSrc: '' });
+
+  it('succeeds as soon as every uploaded asset is attached, audio included', async () => {
+    const assets = [
+      { kind: 'image', label: '图片1', filename: 'a.png' },
+      { kind: 'audio', label: '音频1', filename: 'b.mp3' },
+    ];
+    const cards = [imageCard('0'), audioCard('音频1', '1')];
+    const page = createMockPage([
+      [readMarker, () => ({ panelDocked: true, count: cards.length, cards, alerts: [] })],
+    ]);
+
+    const result = await waitForCanvasV0Attachments(page, assets, 'upload', assets[1], 1, { timeoutMs: 5_000 });
+
+    expect(result.count).toBe(2);
+    expect(result.matched.map((entry) => entry.label)).toEqual(['图片1', '音频1']);
+    // Presence-based: one poll is enough, no stability window to wait out.
+    expect(page.calls.evaluate).toHaveLength(1);
+  });
+
+  it('keeps waiting and then reports the observed cards when the label never matches', async () => {
+    const asset = { kind: 'audio', label: '音频1', filename: 'b.mp3' };
+    const page = createMockPage([
+      [readMarker, () => ({ panelDocked: true, count: 1, cards: [audioCard('音频9')], alerts: [] })],
+    ]);
+
+    await expect(waitForCanvasV0Attachments(page, [asset], 'upload', asset, 0, { timeoutMs: 30 }))
+      .rejects.toThrow(/Legacy canvas reference did not appear for 音频1 \(b\.mp3\); observed=\[attachment:音频9\]/);
+    expect(page.calls.evaluate.length).toBeGreaterThan(1);
+  });
+
+  it('fails fast when a previously matched reference is dropped for a newer upload', async () => {
+    const dropped = { kind: 'image', label: '图片1', filename: 'a.png' };
+    const newest = { kind: 'audio', label: '音频1', filename: 'b.mp3' };
+    let read = 0;
+    const page = createMockPage([
+      [readMarker, () => {
+        read += 1;
+        // The panel still shows the first upload, then replaces it with the new
+        // one instead of keeping both cards.
+        return read === 1
+          ? { panelDocked: true, count: 1, cards: [imageCard('0')], alerts: [] }
+          : { panelDocked: true, count: 1, cards: [audioCard('音频1', '1')], alerts: [] };
+      }],
+    ]);
+
+    await expect(waitForCanvasV0Attachments(page, [dropped, newest], 'upload', newest, 1, { timeoutMs: 5_000 }))
+      .rejects.toThrow(/Legacy canvas dropped 图片1 \(a\.png\) after 音频1 was attached: the 对话 panel keeps at most 2 attachments \(first \+ newest\)/);
+    expect(read).toBe(2);
+  });
+
+  it('still rejects a file the legacy canvas reports as refused', async () => {
+    const asset = { kind: 'video', label: '视频1', filename: 'c.mp4' };
+    const page = createMockPage([
+      [readMarker, () => ({ panelDocked: true, count: 0, cards: [], alerts: ['视频格式不支持'] })],
+    ]);
+
+    await expect(waitForCanvasV0Attachments(page, [asset], 'upload', asset, 0, { timeoutMs: 5_000 }))
+      .rejects.toThrow(/Legacy canvas rejected 视频1 \(c\.mp4\): 视频格式不支持/);
   });
 });
 
@@ -617,6 +851,23 @@ describe('jimeng-agent canvas-v0 checkpoint and submit safety', () => {
     const page = createMockPage([snapshotHandler({ assetIdPresent: false })]);
     await expect(runCanvasV0ContentCheckpoint(page, canonical, [{ name: 'ref.png' }]))
       .rejects.toThrow(/checkpoint failed: assetIdPresent/);
+  });
+
+  it('counts attachment cards (audio included) in the checkpoint snapshot', async () => {
+    const assets = [
+      { kind: 'image', label: '图片1', filename: 'a.png' },
+      { kind: 'audio', label: '音频1', filename: 'b.mp3' },
+    ];
+    const page = createMockPage([snapshotHandler({ referenceCount: assets.length })]);
+
+    const verdict = await runCanvasV0ContentCheckpoint(page, canonical, assets);
+
+    expect(verdict.ok).toBe(true);
+    expect(verdict.checks.referenceCount).toBe(true);
+    // The snapshot counts composer attachment cards, so an audio card without an
+    // <img> is included instead of being filtered away.
+    const snapshotScript = page.calls.evaluate.find((text) => text.includes('editorTextNormalized,'));
+    expect(snapshotScript).toContain('v0ReferenceCards(composer)');
   });
 
   it('rejects the checkpoint when the prompt sits outside the docked panel', async () => {

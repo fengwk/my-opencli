@@ -41,6 +41,15 @@ export const V0_MAX_TITLE_LENGTH = 20;
 /** Legacy canvas project ids are numeric (for example 22104635995404). */
 export const V0_PROJECT_ID_PATTERN = /^\d{6,}$/;
 
+/**
+ * Attachment capacity of the legacy 对话 panel (verified live): its composer
+ * reference stack renders the oldest surviving attachment plus the newest one
+ * and silently drops everything in between, so uploading a third file makes the
+ * previous "newest" disappear. The command therefore rejects more references up
+ * front instead of letting the site discard them.
+ */
+export const V0_MAX_REFERENCE_ATTACHMENTS = 2;
+
 const CANONICAL_CREATE_KEYS = Object.freeze(['canvas', 'canvasMode', 'title']);
 /** CLI input keys accepted by `canvas-v0-create` (canvas is implied to be new). */
 const V0_CREATE_INPUT_KEYS = Object.freeze(['title']);
@@ -277,6 +286,12 @@ export function normalizeCanvasV0AskArgs(kwargs = {}) {
     ...kwargs,
     workspace: identity.mode === 'new' ? 'canvas-v0-new' : identity.projectId,
   });
+  if (shared.assets.length > V0_MAX_REFERENCE_ATTACHMENTS) {
+    throw new ArgumentError(
+      `Invalid reference set: canvas-v0-video accepts at most ${V0_MAX_REFERENCE_ATTACHMENTS} references, got ${shared.assets.length}`,
+      `The legacy 对话 panel keeps only the first and the newest attachment and silently drops the rest, so at most ${V0_MAX_REFERENCE_ATTACHMENTS} references can be attached. Use canvas-video or video for drafts that need more references.`,
+    );
+  }
   const result = {
     canvas: identity.value,
     canvasMode: identity.mode,
@@ -298,6 +313,65 @@ export function normalizeCanvasV0AskArgs(kwargs = {}) {
   };
   assertCanonicalShape(result);
   return result;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Composer attachment matching (canvas-v0 reference verification)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Decide whether one observed composer card satisfies one expected reference.
+ *
+ * The legacy 对话 panel renders three attachment card shapes:
+ *   - image card: `<img>` only
+ *   - video card: `<img>` plus `[data-reference-video-duration]`
+ *   - attachment card: `[class*="reference-attachment"]` plus an
+ *     `[class*="overlay-label"]` carrying the upload filename stem (e.g. 音频1),
+ *     and no `<img>`
+ * Audio uploads use the third shape, so their card binds through its label; a
+ * video may land in either shape, which is why the video rule accepts both.
+ *
+ * @param {{ kind?: string, label?: string }|null} card
+ * @param {{ kind?: string, label?: string }|null} asset
+ * @returns {boolean}
+ */
+export function matchCanvasV0Attachment(card, asset) {
+  if (!card || !asset) return false;
+  if (asset.kind === 'image') return card.kind === 'image';
+  if (asset.kind === 'video') {
+    return card.kind === 'video'
+      || (card.kind === 'attachment' && card.label === asset.label);
+  }
+  if (asset.kind === 'audio') {
+    return card.kind === 'attachment' && card.label === asset.label;
+  }
+  return false;
+}
+
+/**
+ * Greedy injective match between the observed cards and the expected assets:
+ * each asset consumes one distinct card, assets are consumed in order, and a
+ * card that already satisfied an earlier asset is never reused.
+ *
+ * @param {Array<object>} cards
+ * @param {Array<object>} assets
+ * @returns {{ ok: boolean, missing: string[], matched: Array<{ label: string, card: object }> }}
+ */
+export function matchCanvasV0AttachmentSet(cards, assets) {
+  const available = Array.isArray(cards) ? [...cards] : [];
+  const expected = Array.isArray(assets) ? assets : [];
+  const missing = [];
+  const matched = [];
+  for (const asset of expected) {
+    const index = available.findIndex((card) => matchCanvasV0Attachment(card, asset));
+    if (index < 0) {
+      missing.push(String(asset?.label ?? ''));
+      continue;
+    }
+    matched.push({ label: String(asset?.label ?? ''), card: available[index] });
+    available.splice(index, 1);
+  }
+  return { ok: missing.length === 0, missing, matched };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -45,19 +45,19 @@ export const canvasV0VideoCommand = cli({
       name: 'image',
       valueRequired: true,
       repeatable: true,
-      help: 'Image reference path (repeatable; comma-separated values also accepted)',
+      help: 'Reference image path (repeatable; comma-separated values also accepted). The legacy 对话 panel keeps at most 2 references in total across --image/--video/--audio',
     },
     {
       name: 'video',
       valueRequired: true,
       repeatable: true,
-      help: 'Video reference path (repeatable; maximum 3)',
+      help: 'Reference video path (repeatable). Counts against the legacy panel limit of 2 references in total',
     },
     {
       name: 'audio',
       valueRequired: true,
       repeatable: true,
-      help: 'Audio reference path (repeatable; maximum 3)',
+      help: 'Reference audio path (repeatable). Counts against the legacy panel limit of 2 references in total',
     },
     {
       name: 'prompt',

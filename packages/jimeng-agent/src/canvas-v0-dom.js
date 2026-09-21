@@ -5,7 +5,10 @@
  * Verified surface contract (recon on the live legacy canvas):
  *   - composer root      : [class*="content-generator"]  (panel + canvas share one document)
  *   - prompt editor      : .tiptap.ProseMirror[contenteditable="true"]
- *   - references         : [class*="reference-item"] with an <img>; upload input is input[type=file]
+ *   - references         : attachment cards in the 对话 composer reference stack
+ *                          (image / video / non-image attachment such as audio;
+ *                          the upload tile is not an attachment); upload input
+ *                          is input[type=file]
  *   - creation type      : [role="combobox"] in the composer toolbar (Agent 模式 / 图片生成 / 视频生成)
  *   - generation prefs   : toolbar button 自动 / 自定义 opens a 生成偏好 popover (图片|视频 + 选择比例)
  *   - send               : primary button inside [class*="toolbar-actions"]
@@ -20,11 +23,13 @@ import { chooseCanvasRetryPlan } from './canvas-dom.js';
 import { classifyCanvasSubmitAck } from './canvas-submit-ack.js';
 import {
   JIMENG_CANVAS_V0_ASSET_URL as CANVAS_V0_ASSET_URL,
+  V0_MAX_REFERENCE_ATTACHMENTS,
   buildCanvasV0Url,
   buildCanvasV0CreateProjectBody,
   evaluateCanvasV0Checkpoint,
   evaluateCanvasV0PreInputControls,
   evaluateCanvasV0SubmitReadiness,
+  matchCanvasV0AttachmentSet,
   normalizeV0EditorText,
   readCanvasV0CreatedProject,
   V0_CANVAS_CREATE_QUERY,
@@ -228,12 +233,39 @@ function buildCanvasV0LocatorScript() {
         .find((button) => v0IconKey(button) === key) || reference;
     };
     const v0UploadInput = (scope) => [...(scope || document).querySelectorAll('input[type="file"]')][0] || null;
-    const v0ReferenceItems = (root) => {
+    /**
+     * Attachment-card elements of the composer reference stack. The stack also
+     * renders one upload tile (the empty slot that opens the file picker), which
+     * is never an attachment and carries [class*="reference-upload"] instead.
+     */
+    const v0ReferenceCardElements = (root) => {
       const scope = root || document;
       return [...scope.querySelectorAll('[class*="reference-item"]')]
         .filter(v0Visible)
-        .filter((item) => item.querySelector('img'));
+        .filter((item) => !item.querySelector('[class*="reference-upload"]'));
     };
+    /**
+     * Describe every attachment card. Image cards hold an <img>; video cards add
+     * [data-reference-video-duration]; audio cards hold no <img> at all and are
+     * only identifiable through [class*="reference-attachment"] plus the
+     * overlay label carrying the upload filename stem (for example 音频1).
+     */
+    const v0ReferenceCards = (root) => v0ReferenceCardElements(root).map((item) => {
+      const image = item.querySelector('img');
+      const duration = item.querySelector('[data-reference-video-duration]');
+      const overlay = item.querySelector('[class*="overlay-label"]');
+      let kind = 'unknown';
+      if (duration && image) kind = 'video';
+      else if (item.querySelector('[class*="reference-attachment"]')) kind = 'attachment';
+      else if (image) kind = 'image';
+      return {
+        index: (item.getAttribute('data-index') || '') + '',
+        kind,
+        label: overlay ? (overlay.innerText || overlay.textContent || '').trim() : '',
+        durationText: duration ? (duration.innerText || duration.textContent || '').trim() : '',
+        imageSrc: image ? String(image.src || '') : '',
+      };
+    });
     const v0UploadControl = (root) => {
       const scope = root || document;
       return [...scope.querySelectorAll('[class*="reference-upload"]')].filter(v0Visible)[0] || null;
@@ -275,7 +307,7 @@ export async function probeJimengCanvasV0Surface(page) {
     const send = composer ? v0SendButton(composer) : null;
     const input = v0UploadInput(sidecar || document);
     const creationType = v0CreationTypeRead();
-    const references = composer ? v0ReferenceItems(composer).length : 0;
+    const references = composer ? v0ReferenceCards(composer).length : 0;
     return {
       href: location.href,
       surfaceReady: !!anyComposer,
@@ -951,7 +983,7 @@ export async function readCanvasV0ComposerState(page) {
       textLength: text.length,
       text,
       empty: text.length === 0,
-      references: composer ? v0ReferenceItems(composer).length : 0,
+      references: composer ? v0ReferenceCards(composer).length : 0,
     };
   })()`);
 }
@@ -1032,7 +1064,7 @@ export async function clearCanvasV0References(page, phase = 'clear-references') 
     const removed = await page.evaluate(`(() => {
       ${buildCanvasV0LocatorScript()}
       const composer = v0SidecarComposer();
-      const items = composer ? v0ReferenceItems(composer) : [];
+      const items = composer ? v0ReferenceCardElements(composer) : [];
       const item = items[0];
       if (!item) return { ok: false, reason: 'reference-item-missing' };
       item.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
@@ -1075,31 +1107,59 @@ async function markCanvasV0UploadInput(page, marker) {
   })()`);
 }
 
+/**
+ * Read the composer reference stack as attachment cards.
+ *
+ * `cards` describes every attachment card (images, videos and non-image
+ * attachments such as audio), so callers can bind them to the expected assets
+ * instead of counting media elements.
+ */
 async function readCanvasV0References(page) {
   return page.evaluate(`(() => {
     ${buildCanvasV0LocatorScript()}
     const composer = v0SidecarComposer();
-    const items = composer ? v0ReferenceItems(composer) : [];
+    const cards = composer ? v0ReferenceCards(composer) : [];
     return {
       panelDocked: v0PanelReady(),
-      count: items.length,
+      count: cards.length,
+      cards,
       alerts: v0Alerts(),
-      states: items.map((item) => ({
-        label: (item.getAttribute('data-index') || '') + '',
-        pending: /upload|loading|progress|pending/i.test(String(item.className || '')),
-        failed: /fail|error/i.test(String(item.className || '')),
-      })),
     };
   })()`);
 }
 
-async function waitForCanvasV0Reference(page, expectedCount, phase, asset, index) {
-  const deadline = Date.now() + CANVAS_V0_UPLOAD_TIMEOUT_MS;
+/** One-line card summary for diagnostics, e.g. `image,attachment:音频1`. */
+function describeCanvasV0Cards(cards) {
+  return (Array.isArray(cards) ? cards : [])
+    .map((card) => (card?.kind === 'attachment' && card.label
+      ? `attachment:${card.label}`
+      : String(card?.kind || 'unknown')))
+    .join(',');
+}
+
+/**
+ * Wait until every asset uploaded so far is visibly attached.
+ *
+ * Presence-based instead of count-based: the panel replaces the newest slot in
+ * place (a fresh `blob:` source for images/videos, a new overlay label for
+ * attachments), so an already-attached file stays matched after a re-upload and
+ * the card count never exceeds the two the panel keeps. A previously matched
+ * asset that stops matching means the site dropped it for a newer upload, which
+ * fails fast instead of polling until the timeout.
+ */
+export async function waitForCanvasV0Attachments(page, expectedAssets, phase, asset, index, options = {}) {
+  const expected = Array.isArray(expectedAssets) ? expectedAssets : [];
+  const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : CANVAS_V0_UPLOAD_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
+  const matchedOnce = new Set();
+  let observed = [];
   let last = null;
-  let stableSince = 0;
   while (Date.now() < deadline) {
-    last = await readCanvasV0References(page).catch((error) => ({ count: 0, alerts: [describeError(error)], states: [] }));
-    const failure = (last.alerts || []).find((text) => /上传失败|上传出错|不支持|过大|超出|格式|失败|失败，请/.test(text));
+    last = await readCanvasV0References(page)
+      .catch((error) => ({ count: 0, cards: [], alerts: [describeError(error)] }));
+    const cards = Array.isArray(last?.cards) ? last.cards : [];
+    observed = describeCanvasV0Cards(cards);
+    const failure = (last.alerts || []).find((text) => /上传失败|上传出错|不支持|过大|超出|格式|失败/.test(text));
     if (failure) {
       throw phaseError(
         phase,
@@ -1108,17 +1168,24 @@ async function waitForCanvasV0Reference(page, expectedCount, phase, asset, index
         index,
       );
     }
-    if (Number(last.count) >= expectedCount) {
-      if (!stableSince) stableSince = Date.now();
-      if (Date.now() - stableSince >= 1_000) return last;
-    } else {
-      stableSince = 0;
+    const verdict = matchCanvasV0AttachmentSet(cards, expected);
+    if (verdict.ok) return { ...last, matched: verdict.matched };
+    const dropped = verdict.missing.find((label) => matchedOnce.has(label));
+    if (dropped) {
+      const droppedAsset = expected.find((entry) => entry?.label === dropped) || {};
+      throw phaseError(
+        phase,
+        `Legacy canvas dropped ${dropped} (${droppedAsset.filename ?? 'unknown'}) after ${asset.label} was attached: the 对话 panel keeps at most ${V0_MAX_REFERENCE_ATTACHMENTS} attachments (first + newest)`,
+        'No generation was submitted. Re-upload the dropped reference, or use canvas-video / video for drafts that need more references.',
+        index,
+      );
     }
+    for (const entry of verdict.matched) matchedOnce.add(entry.label);
     await page.sleep(0.4);
   }
   throw phaseError(
     phase,
-    `Legacy canvas reference did not appear for ${asset.label} (${asset.filename}); references=${last?.count ?? 'unknown'} expected=${expectedCount}`,
+    `Legacy canvas reference did not appear for ${asset.label} (${asset.filename}); observed=[${observed}]`,
     'No generation was submitted. Confirm the legacy canvas accepts this reference type and retry.',
     index,
   );
@@ -1147,7 +1214,9 @@ export async function uploadCanvasV0ReferenceAssets(page, assets, uploads, start
         index,
       );
     }
-    await waitForCanvasV0Reference(page, uploads.length + 1, 'upload', asset, index);
+    // The panel replaces slots in place, so every asset uploaded so far must
+    // still be attached, not just the one that was just handed to the input.
+    await waitForCanvasV0Attachments(page, [...uploads, asset], 'upload', asset, index);
     uploads.push(asset);
   }
   return uploads;
@@ -1222,7 +1291,7 @@ export async function collectCanvasV0CheckpointSnapshot(page, canonical, assets 
       composerInSidecar: !!sidecar && !!composer && sidecar.contains(composer),
       editorTextNormalized,
       autoEnabled: v0AutoPreference(),
-      referenceCount: composer ? v0ReferenceItems(composer).length : 0,
+      referenceCount: composer ? v0ReferenceCards(composer).length : 0,
       assetIdPresent: marker ? editorTextNormalized.includes(marker) : true,
       processingCount: stop ? 1 : 0,
       submitEnabled: send ? !(send.disabled === true || send.getAttribute('aria-disabled') === 'true') : false,

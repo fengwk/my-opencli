@@ -143,6 +143,13 @@ from the current AI Canvas: projects are created through
 title is limited to **20 characters**, and references are attached as files
 instead of `@图片N` mention chips.
 
+The 对话 panel keeps **at most 2 reference attachments**: the oldest surviving
+one plus the newest. Uploading a third file silently drops the previous
+"newest" (and only those two survive a page reload), so `canvas-v0-video`
+rejects more than two `--image` / `--video` / `--audio` references up front
+instead of letting the site discard them. Drafts that need more references
+belong to `canvas-video` or `video`.
+
 ```bash
 # 1. Create a blank legacy canvas and read its numeric project id
 OPENCLI_BROWSER_COMMAND_TIMEOUT=300 opencli jimeng-agent canvas-v0-create \
@@ -205,10 +212,16 @@ Legacy canvas flow:
    picking 视频 or a ratio drops the trigger back to 自定义. The content
    checkpoint then re-asserts it, so a draft is never reported prepared while
    生成偏好 was observed off.
-6. Clears leftover composer text **and leftover reference attachments** so
-   repeated runs stay idempotent instead of stacking stale references.
-7. Uploads every `--image` reference through the file input and waits for each
-   reference card to finish.
+6. Clears leftover composer text **and leftover reference attachments** of any
+   kind, audio included, so repeated runs stay idempotent instead of stacking
+   stale references.
+7. Uploads every reference through the panel's file input and verifies it by
+   presence rather than by counting media elements: each expected reference must
+   be visible as an attachment card — an image, a video, or a non-image
+   attachment such as audio, which carries no `<img>` and is recognized by its
+   overlay label. Re-uploading a file that is already attached stays idempotent,
+   and a previously attached reference that disappears fails the run immediately
+   instead of polling until the timeout.
 8. Composes the prompt (including `资产编号：<asset-id>`) into the panel TipTap
    composer and verifies the visible text.
 9. Content checkpoint: docked panel, expected reference count, prompt anchors in

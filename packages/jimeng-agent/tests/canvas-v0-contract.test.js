@@ -5,6 +5,7 @@ import {
   JIMENG_CANVAS_V0_URL,
   V0_CREATE_PROJECT_DRAFT,
   V0_DEFAULT_PROJECT_NAME,
+  V0_MAX_REFERENCE_ATTACHMENTS,
   V0_MAX_TITLE_LENGTH,
   buildCanvasV0CreateProjectBody,
   buildCanvasV0Url,
@@ -13,6 +14,8 @@ import {
   evaluateCanvasV0PreInputControls,
   evaluateCanvasV0RecordState,
   evaluateCanvasV0SubmitReadiness,
+  matchCanvasV0Attachment,
+  matchCanvasV0AttachmentSet,
   normalizeCanvasV0AskArgs,
   normalizeCanvasV0CreateArgs,
   normalizeCanvasV0DownloadArgs,
@@ -136,6 +139,18 @@ describe('jimeng-agent canvas-v0 ask contract', () => {
     expect(() => normalizeCanvasV0AskArgs({ ...base, unknownKey: 1 })).toThrow();
   });
 
+  it('rejects more references than the legacy 对话 panel can keep', () => {
+    // The panel keeps only the first and the newest attachment, so a third
+    // reference would be dropped silently instead of attached.
+    const three = { ...base, image: ['a.png', 'b.png', 'c.png'] };
+    expect(() => normalizeCanvasV0AskArgs(three)).toThrow(ArgumentError);
+    expect(() => normalizeCanvasV0AskArgs(three))
+      .toThrow(`accepts at most ${V0_MAX_REFERENCE_ATTACHMENTS} references, got 3`);
+
+    const two = normalizeCanvasV0AskArgs({ ...base, image: ['a.png', 'b.png'] });
+    expect(two.assets).toHaveLength(V0_MAX_REFERENCE_ATTACHMENTS);
+  });
+
   it('keeps the canonical key set frozen', () => {
     const canonical = normalizeCanvasV0AskArgs(base);
     expect(Object.keys(canonical).sort()).toEqual([
@@ -157,6 +172,65 @@ describe('jimeng-agent canvas-v0 ask contract', () => {
       'title',
       'videoPaths',
     ]);
+  });
+});
+
+describe('jimeng-agent canvas-v0 attachment matching', () => {
+  const card = (kind, label = '') => ({ kind, label });
+
+  it('binds image assets to image cards only', () => {
+    expect(matchCanvasV0Attachment(card('image'), { kind: 'image', label: '图片1' })).toBe(true);
+    expect(matchCanvasV0Attachment(card('attachment', '音频1'), { kind: 'image', label: '图片1' })).toBe(false);
+    expect(matchCanvasV0Attachment(card('video'), { kind: 'image', label: '图片1' })).toBe(false);
+    expect(matchCanvasV0Attachment(null, { kind: 'image' })).toBe(false);
+    expect(matchCanvasV0Attachment(card('image'), null)).toBe(false);
+  });
+
+  it('binds video assets to a video card or to their labelled attachment card', () => {
+    expect(matchCanvasV0Attachment(card('video'), { kind: 'video', label: '视频1' })).toBe(true);
+    expect(matchCanvasV0Attachment(card('attachment', '视频1'), { kind: 'video', label: '视频1' })).toBe(true);
+    expect(matchCanvasV0Attachment(card('attachment', '音频1'), { kind: 'video', label: '视频1' })).toBe(false);
+    expect(matchCanvasV0Attachment(card('unknown'), { kind: 'video', label: '视频1' })).toBe(false);
+  });
+
+  it('binds audio assets to their labelled attachment card, which carries no <img>', () => {
+    expect(matchCanvasV0Attachment(card('attachment', '音频1'), { kind: 'audio', label: '音频1' })).toBe(true);
+    expect(matchCanvasV0Attachment(card('attachment', '音频2'), { kind: 'audio', label: '音频1' })).toBe(false);
+    expect(matchCanvasV0Attachment(card('attachment'), { kind: 'audio', label: '音频1' })).toBe(false);
+    expect(matchCanvasV0Attachment(card('image'), { kind: 'audio', label: '音频1' })).toBe(false);
+    expect(matchCanvasV0Attachment(card('video'), { kind: 'audio', label: '音频1' })).toBe(false);
+  });
+
+  it('matches a set greedily and injectively, in asset order', () => {
+    const assets = [
+      { kind: 'image', label: '图片1', filename: 'a.png' },
+      { kind: 'audio', label: '音频1', filename: 'b.mp3' },
+    ];
+    const verdict = matchCanvasV0AttachmentSet([card('image'), card('attachment', '音频1')], assets);
+    expect(verdict.ok).toBe(true);
+    expect(verdict.missing).toEqual([]);
+    expect(verdict.matched.map((entry) => entry.label)).toEqual(['图片1', '音频1']);
+
+    // Cards may sit in any DOM order: the asset list drives which card is consumed.
+    expect(matchCanvasV0AttachmentSet([card('attachment', '音频1'), card('image')], assets).ok).toBe(true);
+
+    // One card can never satisfy two assets, even when both assets look identical.
+    const duplicated = matchCanvasV0AttachmentSet([card('attachment', '音频1')], [
+      { kind: 'audio', label: '音频1', filename: 'b.mp3' },
+      { kind: 'audio', label: '音频1', filename: 'c.mp3' },
+    ]);
+    expect(duplicated.ok).toBe(false);
+    expect(duplicated.missing).toEqual(['音频1']);
+    expect(duplicated.matched).toHaveLength(1);
+  });
+
+  it('lists the labels that no observed card satisfies', () => {
+    const verdict = matchCanvasV0AttachmentSet([card('image')], [
+      { kind: 'image', label: '图片1' },
+      { kind: 'audio', label: '音频1' },
+    ]);
+    expect(verdict.ok).toBe(false);
+    expect(verdict.missing).toEqual(['音频1']);
   });
 });
 
