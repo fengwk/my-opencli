@@ -145,6 +145,119 @@ export function isNewUploadCard(card, baselineIdentities, baselineSlotIdentities
 }
 
 /**
+ * Normalized visible text of a card summary (or of a raw text string).
+ * Whitespace is collapsed because the same label can be re-rendered with
+ * different line breaks while the card is updated in place.
+ */
+export function normalizeCardText(value) {
+  const raw = typeof value === 'string' ? value : value?.text;
+  return String(raw || '').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * True when the visible card text carries the exact asset label.
+ *
+ * The upload alias keeps the label as the filename stem (e.g. `音频2.mp3`),
+ * so the label may be followed by a file extension, but never by a digit:
+ * `音频2` must not match the different label `音频20`.
+ */
+function cardTextShowsLabel(text, label) {
+  const name = String(label || '').trim();
+  if (!name) return false;
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`${escaped}(?:\\.[A-Za-z0-9]{1,8})?(?!\\d)`).test(String(text || ''));
+}
+
+/**
+ * Fallback upload acknowledgement for a collapsed reference strip.
+ *
+ * A long strip is collapsed to a fixed set of visible cards and the visible
+ * tail card is reused for the newly uploaded resource: its `data-index`
+ * stays the same, and because audio cards carry no blob media source, its
+ * whole identity stays the same while its visible text switches to the new
+ * asset. Such an in-place update is only accepted when
+ * - the strip is (or was) collapsed, and
+ * - the identity already existed in the pre-upload baseline, and
+ * - the visible text changed away from every pre-upload text of that
+ *   identity, so an unchanged stale card is never accepted, and
+ * - the new text carries the exact expected asset label.
+ */
+export function isCollapsedTailUploadCard(card, {
+  baselineCards = [],
+  collapsed = false,
+  expectedLabel = '',
+} = {}) {
+  if (!collapsed) return false;
+  if (!card || !card.identity || isUploadSlotEntry(card)) return false;
+  const text = normalizeCardText(card);
+  if (!text) return false;
+  const baselineTexts = (baselineCards || [])
+    .filter((entry) => entry?.identity === card.identity)
+    .map((entry) => normalizeCardText(entry));
+  if (baselineTexts.length === 0) return false;
+  if (baselineTexts.includes(text)) return false;
+  return cardTextShowsLabel(text, expectedLabel);
+}
+
+/**
+ * Decide whether one polling snapshot of the reference strip acknowledges the
+ * upload that was just fired.
+ *
+ * A candidate is a card accepted by {@link isNewUploadCard} (new identity, or
+ * a baseline upload slot filled in place) or by the collapsed-strip fallback
+ * {@link isCollapsedTailUploadCard}.
+ *
+ * `confirmed` is the fail-closed contract the upload wait relies on:
+ * - exactly one candidate exists (a duplicate would shift @图片N numbering);
+ * - the candidate is neither processing (spinner/mask) nor showing busy text;
+ * - the same candidate fingerprints were already observed in the previous
+ *   poll. The fingerprint includes the visible text for a collapsed tail
+ *   update, which keeps its identity while its text changes.
+ */
+export function evaluateUploadPoll(cards, {
+  baselineCards = [],
+  collapsed = false,
+  expectedLabel = '',
+  previousKeys = null,
+} = {}) {
+  const baselineIdentities = new Set(
+    (baselineCards || []).filter((card) => card?.identity).map((card) => card.identity),
+  );
+  const baselineSlotIdentities = new Set(
+    (baselineCards || [])
+      .filter((card) => isUploadSlotEntry(card) && card.identity)
+      .map((card) => card.identity),
+  );
+  const candidates = [];
+  const keys = new Set();
+  for (const card of Array.isArray(cards) ? cards : []) {
+    const fresh = isNewUploadCard(card, baselineIdentities, baselineSlotIdentities);
+    const tailUpdate = !fresh && isCollapsedTailUploadCard(card, {
+      baselineCards,
+      collapsed,
+      expectedLabel,
+    });
+    if (!fresh && !tailUpdate) continue;
+    candidates.push(card);
+    keys.add(tailUpdate ? `${card.identity}|${normalizeCardText(card)}` : card.identity);
+  }
+  const ready = candidates.length > 0
+    && !candidates.some((card) => isProcessingCard(card))
+    && !hasUploadBusyText(candidates.map((card) => normalizeCardText(card)).join(' '));
+  const single = candidates.length === 1;
+  const sameSet = previousKeys !== null
+    && previousKeys.size === keys.size
+    && [...keys].every((key) => previousKeys.has(key));
+  return {
+    candidates,
+    keys,
+    ready,
+    single,
+    confirmed: ready && single && sameSet,
+  };
+}
+
+/**
  * True when the body text shows an active upload/processing state.
  */
 export function hasUploadBusyText(bodyText) {

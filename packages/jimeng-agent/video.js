@@ -20,6 +20,11 @@ export const videoCommand = cli({
   browser: true,
   siteSession: 'persistent',
   navigateBefore: false,
+  // Jimeng decodes a video/audio reference's local metadata before uploading it,
+  // and Chrome stops media loading in hidden documents. Adapter runs default to
+  // a background window, so this command opts into a foreground window; users can
+  // still pass `--window background` for image-only drafts.
+  defaultWindowMode: 'foreground',
   args: [
     {
       name: 'workspace',

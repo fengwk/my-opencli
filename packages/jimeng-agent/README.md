@@ -386,6 +386,22 @@ visible UI, and no file chooser is intercepted at the browser-protocol level.
 The reference card remove control is likewise resolved through both contracts
 (`[data-reference-remove-button="true"]` or `.remove-button-*`).
 
+### Window visibility (video/audio references)
+
+Jimeng resolves a video/audio reference from **local** media metadata before it
+uploads it: it creates a `blob:` URL for the assigned file and waits for a
+hidden `<video>` element to report duration/size. Chrome stops media loading in
+a hidden document, so in a background tab the site stalls right after the local
+preview URL — no card appears, no request leaves the page, and the run would
+otherwise report a misleading "no reference card" timeout. Images only need a
+bitmap decode and upload fine either way.
+
+`video` therefore requests a **foreground** window (`defaultWindowMode:
+'foreground'`). An explicit `--window background` still wins for image-only
+drafts. `uploadReferenceAssets` refuses a video/audio upload while the document
+reports `hidden` (fail-fast, before any file is assigned) instead of waiting out
+the upload budget.
+
 Each `video` run auto-generates a 16-char hex `asset-id`, embeds `资产编号：<id>` into
 the agent prompt, and returns it in the CLI result for later `status --search-key`.
 

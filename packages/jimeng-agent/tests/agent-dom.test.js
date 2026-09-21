@@ -17,6 +17,7 @@ import {
   isStrictMentionCommit,
   mentionTextMatchesVariant,
   normalizePromptValidationLines,
+  openWorkspace,
   prepareJimengAgentAsk,
   resolveMentionDebugOptions,
   submitPreparedGeneration,
@@ -499,6 +500,23 @@ describe('jimeng-agent/agent-dom — mention input safety', () => {
     expect(clear).toContain('after.count < before.count || !identityStillVisible');
     expect(clear).toContain('reference identity remained');
   });
+
+  it('acknowledges an upload through a collapsed tail card whose text changed', () => {
+    const wait = sourceBetween(
+      'async function waitForUploadCompletion(',
+      'async function fillPromptWithRichMentions(',
+    );
+    // The collapsed-strip fallback needs the pre-upload card texts, the
+    // expected asset label and both collapse signals ("is" and "was").
+    expect(wait).toContain('evaluateUploadPoll(snap.cards, {');
+    expect(wait).toContain('baselineCards,');
+    expect(wait).toContain('expectedLabel: asset.label');
+    expect(wait).toContain('hasCollapsedReferenceMore(baselineCards)');
+    expect(wait).toContain('snap.hasCollapsedMoreEntry === true || collapsedBaseline');
+    // The same candidate set (fingerprint) must repeat before confirming.
+    expect(wait).toContain('stablePolls = poll.confirmed ? stablePolls + 1 : 0');
+    expect(wait).not.toContain('isNewUploadCard');
+  });
 });
 
 describe('jimeng-agent/agent-dom — current Jimeng upload contract', () => {
@@ -522,7 +540,7 @@ describe('jimeng-agent/agent-dom — current Jimeng upload contract', () => {
     expect(probe).not.toContain('ready: !!editor && fileInputs.length > 0');
   });
 
-  it('suppresses the site file chooser and routes the tile click through the real file input', () => {
+  it('intercepts the native chooser while preserving the site click lifecycle, with a legacy suppression fallback', () => {
     const bridge = sourceBetween(
       'async function installUploadBridge(',
       '/** Mark the newest visible composer "+" upload tile. */',
@@ -530,7 +548,11 @@ describe('jimeng-agent/agent-dom — current Jimeng upload contract', () => {
     // File System Access API must be removed so the site falls back to a file input.
     expect(bridge).toContain('delete window.showOpenFilePicker');
     expect(bridge).toContain('file-system-access-not-suppressed');
-    // The native picker must be silenced so the CDP assignment can fill the input.
+    // Prefer native CDP interception so input.click() and the site's own
+    // lifecycle still run without opening an operating-system dialog.
+    expect(bridge).toContain("'Page.setInterceptFileChooserDialog'");
+    expect(bridge).toContain('chooserIntercepted');
+    // Older bridges retain the prior in-page suppression as a bounded fallback.
     expect(bridge).toContain('__opencliJimengFilePickerSuppressed');
     expect(bridge).toContain('proto.showPicker = function');
     expect(bridge).toContain('proto.click = function');
@@ -1266,9 +1288,11 @@ describe('jimeng-agent/agent-dom — prepareJimengAgentAsk submit orchestration'
 
   function createOrchestrationPageMock({
     networkEntries = [],
+    visibilityState = null,
   } = {}) {
     let submitAttempts = 0;
     let captureReadCount = 0;
+    let visibilityProbes = 0;
     const clicks = [];
     const openWorkspaceCalls = [];
     let simulatedTime = 1_000_000;
@@ -1304,6 +1328,11 @@ describe('jimeng-agent/agent-dom — prepareJimengAgentAsk submit orchestration'
         return networkEntries;
       }),
       evaluate: vi.fn(async (expr) => {
+        // Reference-kind visibility gate (only media references probe this).
+        if (expr === 'document.visibilityState') {
+          visibilityProbes += 1;
+          return visibilityState;
+        }
         // Surface probe
         if (expr.includes('FILE_INPUT_SELECTOR') || expr.includes('dockScope') || (expr.includes('editors') && expr.includes('fileInputs'))) {
           return {
@@ -1361,8 +1390,28 @@ describe('jimeng-agent/agent-dom — prepareJimengAgentAsk submit orchestration'
       get clicks() { return clicks; },
       get openWorkspaceCalls() { return openWorkspaceCalls; },
       get submitAttempts() { return submitAttempts; },
+      get visibilityProbes() { return visibilityProbes; },
     };
     return page;
+  }
+
+  function mediaAssets() {
+    return [
+      {
+        kind: 'image',
+        label: '图片1',
+        filename: 'hero.png',
+        mentionName: 'hero',
+        browserPath: 'C:\\assets\\hero.png',
+      },
+      {
+        kind: 'video',
+        label: '视频1',
+        filename: 'move.mp4',
+        mentionName: 'move',
+        browserPath: 'C:\\assets\\move.mp4',
+      },
+    ];
   }
 
   const SUCCESS_ENTRY = {
@@ -1399,6 +1448,30 @@ describe('jimeng-agent/agent-dom — prepareJimengAgentAsk submit orchestration'
       submitRequestCount: 0,
     });
     expect(page.clicks.some((c) => c.includes('submit'))).toBe(false);
+  });
+
+  it('recovers from a transient navigation rejection before preparing', async () => {
+    const page = createOrchestrationPageMock();
+    const gotoOnce = page.goto;
+    let navigations = 0;
+    page.goto = vi.fn(async (url) => {
+      navigations += 1;
+      // The first navigation of a run can be rejected while the previous one is
+      // still settling; the run must continue without a second invocation.
+      if (navigations === 1) throw new Error('Navigation rejected.');
+      return gotoOnce(url);
+    });
+
+    const result = await prepareJimengAgentAsk(page, {
+      workspace: '11718040705548',
+      assetId: ASSET_ID,
+      agentPrompt: `prompt text 资产编号：${ASSET_ID}`,
+      submit: false,
+      retry: 0,
+    }, []);
+
+    expect(result).toMatchObject({ status: 'prepared', submitted: false, retryUsed: 0 });
+    expect(navigations).toBe(2);
   });
 
   it('runs --submit 1 with valid ACK and returns confirmed diagnostics', async () => {
@@ -1508,5 +1581,160 @@ describe('jimeng-agent/agent-dom — prepareJimengAgentAsk submit orchestration'
       retryUsed: 1,
     });
     expect(page.openWorkspaceCalls.length).toBeGreaterThan(1);
+  });
+
+  it('refuses video/audio references when the tab is hidden, before any file is assigned', async () => {
+    const page = createOrchestrationPageMock({ visibilityState: 'hidden' });
+
+    try {
+      await prepareJimengAgentAsk(page, {
+        workspace: '11718040705548',
+        assetId: ASSET_ID,
+        agentPrompt: `prompt text 资产编号：${ASSET_ID}`,
+        submit: false,
+        retry: 0,
+      }, mediaAssets());
+      expect.unreachable('Should have thrown CommandExecutionError');
+    } catch (err) {
+      expect(err).toBeInstanceOf(CommandExecutionError);
+      expect(err.code).toBe('COMMAND_EXEC');
+      // Names the pending media reference and explains the hidden-tab decode stall.
+      expect(err.message).toContain('JIMENG_PREPARE_FAILED');
+      expect(err.message).toContain('视频1');
+      expect(err.message).toContain('hidden');
+      expect(err.message).not.toContain('图片1');
+      // The fix is a foreground window, not a blind retry.
+      expect(err.hint).toContain('--window foreground');
+      expect(err.hint).toContain('No generation was submitted');
+    }
+    expect(page.visibilityProbes).toBe(1);
+    // A hidden tab can never acknowledge the reference, so no file is offered.
+    expect(page.setFileInput).not.toHaveBeenCalled();
+  });
+
+  it('keeps hidden image-only drafts on the normal upload path', async () => {
+    const page = createOrchestrationPageMock({ visibilityState: 'hidden' });
+    const [image] = mediaAssets();
+
+    let message = '';
+    try {
+      await prepareJimengAgentAsk(page, {
+        workspace: '11718040705548',
+        assetId: ASSET_ID,
+        agentPrompt: `prompt text 资产编号：${ASSET_ID}`,
+        submit: false,
+        retry: 0,
+      }, [image]);
+    } catch (err) {
+      message = String(err?.message || '');
+    }
+
+    expect(message).not.toContain('hidden');
+    // Image uploads never depend on media decoding, so no probe is needed.
+    expect(page.visibilityProbes).toBe(0);
+  });
+
+  it('leaves visible tabs on the normal upload path for media references', async () => {
+    const page = createOrchestrationPageMock({ visibilityState: 'visible' });
+
+    let message = '';
+    try {
+      await prepareJimengAgentAsk(page, {
+        workspace: '11718040705548',
+        assetId: ASSET_ID,
+        agentPrompt: `prompt text 资产编号：${ASSET_ID}`,
+        submit: false,
+        retry: 0,
+      }, mediaAssets());
+    } catch (err) {
+      message = String(err?.message || '');
+    }
+
+    expect(page.visibilityProbes).toBe(1);
+    expect(message).not.toContain('while the browser tab is hidden');
+  });
+});
+
+describe('jimeng-agent/agent-dom — workspace navigation retry', () => {
+  const WORKSPACE_URL = 'https://jimeng.jianying.com/ai-tool/generate?workspace=11718040705548';
+
+  // `failures[i]` is thrown by the i-th `goto`; `null` means that attempt
+  // navigates successfully. Attempts and requested backoff are recorded so the
+  // bounded budget is asserted without a browser.
+  function navigationPage(failures) {
+    const attempts = [];
+    const sleeps = [];
+    const newTab = vi.fn(async () => 'second-tab');
+    const page = {
+      async goto(url) {
+        attempts.push(url);
+        const failure = failures[attempts.length - 1];
+        if (failure) throw failure;
+      },
+      async sleep(seconds) {
+        sleeps.push(seconds);
+      },
+      newTab,
+    };
+    return { page, attempts, sleeps, newTab };
+  }
+
+  it('retries the transient "Navigation rejected" answer once and stays in the current tab', async () => {
+    const { page, attempts, sleeps, newTab } = navigationPage([new Error('Navigation rejected.'), null]);
+    await expect(openWorkspace(page, WORKSPACE_URL)).resolves.toBeUndefined();
+    expect(attempts).toEqual([WORKSPACE_URL, WORKSPACE_URL]);
+    expect(sleeps).toEqual([0.5]);
+    // The retry keeps the existing contract: fresh reload in the current tab.
+    expect(newTab).not.toHaveBeenCalled();
+  });
+
+  it('survives repeated transients within the bounded ~5s budget', async () => {
+    const { page, attempts, sleeps } = navigationPage([
+      new Error('Navigation rejected.'),
+      new Error('Navigation rejected.'),
+      new Error('Navigation rejected.'),
+      null,
+    ]);
+    await expect(openWorkspace(page, WORKSPACE_URL)).resolves.toBeUndefined();
+    expect(attempts).toHaveLength(4);
+    // Backoff covers the observed ~2s in-flight navigation and stops near 5s.
+    expect(sleeps).toEqual([0.5, 1.5, 3]);
+    expect(sleeps.reduce((total, seconds) => total + seconds, 0)).toBe(5);
+  });
+
+  it('throws an unrelated navigation failure immediately without retrying', async () => {
+    const refused = new Error('net::ERR_CONNECTION_REFUSED');
+    const refusedRun = navigationPage([refused]);
+    await expect(openWorkspace(refusedRun.page, WORKSPACE_URL)).rejects.toBe(refused);
+    expect(refusedRun.attempts).toHaveLength(1);
+    expect(refusedRun.sleeps).toEqual([]);
+
+    // A near-miss message must not be treated as the transient class either.
+    const aborted = new Error('Navigation aborted.');
+    const abortedRun = navigationPage([aborted]);
+    await expect(openWorkspace(abortedRun.page, WORKSPACE_URL)).rejects.toBe(aborted);
+    expect(abortedRun.attempts).toHaveLength(1);
+    expect(abortedRun.sleeps).toEqual([]);
+  });
+
+  it('reports an exhausted retry budget as a COMMAND_EXEC error stating nothing was submitted', async () => {
+    const { page, attempts, sleeps } = navigationPage([
+      new Error('Navigation rejected.'),
+      new Error('Navigation rejected.'),
+      new Error('Navigation rejected.'),
+      new Error('Navigation rejected.'),
+    ]);
+    try {
+      await openWorkspace(page, WORKSPACE_URL);
+      expect.unreachable('Should have thrown CommandExecutionError');
+    } catch (err) {
+      expect(err).toBeInstanceOf(CommandExecutionError);
+      expect(err.code).toBe('COMMAND_EXEC');
+      expect(err.message).toContain('JIMENG_NAVIGATION_FAILED');
+      expect(err.message).toContain('Navigation rejected.');
+      expect(err.hint).toContain('No generation was submitted');
+    }
+    expect(attempts).toHaveLength(4);
+    expect(sleeps).toEqual([0.5, 1.5, 3]);
   });
 });

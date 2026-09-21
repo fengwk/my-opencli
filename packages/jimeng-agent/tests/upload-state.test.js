@@ -8,13 +8,16 @@ import {
   classifyReferenceItemClass,
   countVisibleMediaReferences,
   countStripCards,
+  evaluateUploadPoll,
   hasCollapsedReferenceMore,
   hasUploadBusyText,
   hasUploadFailureText,
+  isCollapsedTailUploadCard,
   isNewUploadCard,
   isProcessingCard,
   isReferenceStripClasses,
   isUploadSlotEntry,
+  normalizeCardText,
   observeCurrentUploadFailure,
   parseReferenceCountStyle,
 } from '../src/upload-state.js';
@@ -109,6 +112,12 @@ describe('jimeng-agent/upload-state — card signals', () => {
     expect(cardIdentity(descendant(['reference-item-V8Tkbi']))).toBe('cls:reference-item-V8Tkbi');
     expect(cardIdentity(null)).toBe(null);
   });
+
+  it('normalizes card text so a re-rendered label keeps one fingerprint', () => {
+    expect(normalizeCardText('  音频2\n.mp3 ')).toBe('音频2 .mp3');
+    expect(normalizeCardText(descendant(['reference-item-V8Tkbi'], { text: '音频2.mp3' }))).toBe('音频2.mp3');
+    expect(normalizeCardText(null)).toBe('');
+  });
 });
 
 describe('jimeng-agent/upload-state — new-card decision', () => {
@@ -136,6 +145,178 @@ describe('jimeng-agent/upload-state — new-card decision', () => {
     expect(isNewUploadCard(slotCard('index:0'), baseline, baselineSlots)).toBe(false);
     expect(isNewUploadCard(null, baseline, baselineSlots)).toBe(false);
     expect(isNewUploadCard(descendant(['reference-item-V8Tkbi']), baseline, baselineSlots)).toBe(false);
+  });
+});
+
+describe('jimeng-agent/upload-state — collapsed strip tail update', () => {
+  // Long mixed reference strip (4 images + 3 videos + 2 audios): the strip is
+  // collapsed to a few visible cards and the visible tail card keeps its
+  // identity (`data-index="1"`, audio has no blob media source) while its
+  // visible text switches from the previous asset to the new one.
+  const tailCard = (text, overrides = {}) => descendant(['reference-item-V8Tkbi'], {
+    dataIndex: '1',
+    identity: 'index:1',
+    text,
+    ...overrides,
+  });
+  const baselineCards = [tailCard('音频1.mp3')];
+
+  it('accepts a collapsed tail card once its text switches to the expected label', () => {
+    expect(isCollapsedTailUploadCard(tailCard('音频2.mp3'), {
+      baselineCards,
+      collapsed: true,
+      expectedLabel: '音频2',
+    })).toBe(true);
+    expect(isCollapsedTailUploadCard(tailCard('音频2'), {
+      baselineCards,
+      collapsed: true,
+      expectedLabel: '音频2',
+    })).toBe(true);
+  });
+
+  it('rejects an unchanged same-index card even when its text carries the label', () => {
+    // Text did not change: a stale card must never acknowledge an upload.
+    expect(isCollapsedTailUploadCard(tailCard('音频1.mp3'), {
+      baselineCards,
+      collapsed: true,
+      expectedLabel: '音频2',
+    })).toBe(false);
+    // The label was already visible before this upload, so nothing changed.
+    expect(isCollapsedTailUploadCard(tailCard('音频2.mp3'), {
+      baselineCards: [tailCard('音频2.mp3')],
+      collapsed: true,
+      expectedLabel: '音频2',
+    })).toBe(false);
+  });
+
+  it('rejects a same-index text change while the strip is not collapsed', () => {
+    expect(isCollapsedTailUploadCard(tailCard('音频2.mp3'), {
+      baselineCards,
+      collapsed: false,
+      expectedLabel: '音频2',
+    })).toBe(false);
+  });
+
+  it('rejects other labels, longer numeric labels, unknown identities and slots', () => {
+    const options = { baselineCards, collapsed: true, expectedLabel: '音频2' };
+    expect(isCollapsedTailUploadCard(tailCard('音频3.mp3'), options)).toBe(false);
+    // 音频2 must not match the different label 音频20.
+    expect(isCollapsedTailUploadCard(tailCard('音频20.mp3'), options)).toBe(false);
+    // Changed text without the expected label is not evidence of this upload.
+    expect(isCollapsedTailUploadCard(tailCard('上传完成'), options)).toBe(false);
+    expect(isCollapsedTailUploadCard(tailCard(''), options)).toBe(false);
+    expect(isCollapsedTailUploadCard(tailCard('音频2.mp3', { hasUploadSlot: true }), options)).toBe(false);
+    expect(isCollapsedTailUploadCard(tailCard('音频2.mp3', { identity: 'index:7', dataIndex: '7' }), options)).toBe(false);
+    expect(isCollapsedTailUploadCard(null, options)).toBe(false);
+    expect(isCollapsedTailUploadCard(tailCard('音频2.mp3'), { ...options, expectedLabel: '' })).toBe(false);
+  });
+});
+
+describe('jimeng-agent/upload-state — upload poll evaluation', () => {
+  const mediaCard = (identity, text = '', overrides = {}) => descendant(['reference-item-V8Tkbi'], {
+    dataIndex: identity.startsWith('index:') ? identity.slice('index:'.length) : null,
+    identity,
+    text,
+    ...overrides,
+  });
+  const slotCard = (identity) => descendant(['reference-item-V8Tkbi'], {
+    dataIndex: identity.slice('index:'.length),
+    identity,
+    hasUploadSlot: true,
+    text: '',
+  });
+  // Pre-upload baseline of the collapsed 9-reference strip: one visible blob
+  // media card, the collapsed tail card of the previous audio, one empty slot.
+  const blobCard = mediaCard('blob:https://x/a');
+  const tailBefore = mediaCard('index:1', '音频1.mp3');
+  const baselineCards = [blobCard, tailBefore, slotCard('index:2')];
+  const tailAfter = mediaCard('index:1', '音频2.mp3');
+  const options = { baselineCards, collapsed: true, expectedLabel: '音频2' };
+
+  it('accepts a new identity and confirms it only on two consecutive polls', () => {
+    const cards = [...baselineCards, mediaCard('index:3', '视频3.mp4')];
+    const first = evaluateUploadPoll(cards, { ...options, expectedLabel: '视频3' });
+    expect(first.candidates.map((card) => card.identity)).toEqual(['index:3']);
+    expect(first.ready).toBe(true);
+    expect(first.single).toBe(true);
+    expect(first.confirmed).toBe(false);
+    const second = evaluateUploadPoll(cards, {
+      ...options,
+      expectedLabel: '视频3',
+      previousKeys: first.keys,
+    });
+    expect(second.confirmed).toBe(true);
+  });
+
+  it('still accepts a baseline upload slot filled in place', () => {
+    const poll = evaluateUploadPoll([blobCard, tailBefore, mediaCard('index:2', '音频2.mp3')], options);
+    expect(poll.candidates.map((card) => card.identity)).toEqual(['index:2']);
+    expect(poll.single).toBe(true);
+    expect(poll.ready).toBe(true);
+  });
+
+  it('accepts the collapsed tail update end to end and fingerprints its text', () => {
+    const cards = [blobCard, tailAfter, slotCard('index:2')];
+    const first = evaluateUploadPoll(cards, { ...options, previousKeys: new Set(['index:1|音频2.mp3']) });
+    expect(first.candidates.map((card) => card.identity)).toEqual(['index:1']);
+    expect(first.keys).toEqual(new Set(['index:1|音频2.mp3']));
+    expect(first.single).toBe(true);
+    expect(first.ready).toBe(true);
+    expect(first.confirmed).toBe(true);
+    // A first observation (no previous poll) is never a confirmation.
+    expect(evaluateUploadPoll(cards, options).confirmed).toBe(false);
+    // While the text is still settling the fingerprint differs, so the poll is
+    // not stable yet.
+    expect(evaluateUploadPoll([blobCard, mediaCard('index:1', '音频2.mp3 00:05'), slotCard('index:2')], {
+      ...options,
+      previousKeys: first.keys,
+    }).confirmed).toBe(false);
+  });
+
+  it('rejects a same-index text change in a non-collapsed strip', () => {
+    const poll = evaluateUploadPoll([blobCard, tailAfter, slotCard('index:2')], {
+      ...options,
+      collapsed: false,
+      previousKeys: new Set(['index:1|音频2.mp3']),
+    });
+    expect(poll.candidates).toEqual([]);
+    expect(poll.confirmed).toBe(false);
+  });
+
+  it('stays fail-closed on an unchanged card, duplicates, processing and busy text', () => {
+    // Nothing changed: no candidate, no confirmation.
+    const unchanged = evaluateUploadPoll([blobCard, tailBefore, slotCard('index:2')], {
+      ...options,
+      previousKeys: new Set(['index:1|音频2.mp3']),
+    });
+    expect(unchanged.candidates).toEqual([]);
+    expect(unchanged.confirmed).toBe(false);
+
+    // A duplicate card (tail update + fresh card) must never confirm.
+    const duplicate = evaluateUploadPoll([blobCard, tailAfter, mediaCard('index:3', '视频3.mp4')], {
+      ...options,
+      previousKeys: new Set(['index:1|音频2.mp3', 'index:3']),
+    });
+    expect(duplicate.candidates).toHaveLength(2);
+    expect(duplicate.single).toBe(false);
+    expect(duplicate.confirmed).toBe(false);
+
+    // A card that is still processing is not ready.
+    const processing = evaluateUploadPoll([blobCard, mediaCard('index:1', '音频2.mp3', { hasSpin: true }), slotCard('index:2')], {
+      ...options,
+      previousKeys: new Set(['index:1|音频2.mp3']),
+    });
+    expect(processing.candidates).toHaveLength(1);
+    expect(processing.ready).toBe(false);
+    expect(processing.confirmed).toBe(false);
+
+    // Busy text on the candidate is not ready either.
+    const busy = evaluateUploadPoll([blobCard, mediaCard('index:1', '音频2.mp3 上传中'), slotCard('index:2')], {
+      ...options,
+      previousKeys: new Set(['index:1|音频2.mp3 上传中']),
+    });
+    expect(busy.ready).toBe(false);
+    expect(busy.confirmed).toBe(false);
   });
 });
 

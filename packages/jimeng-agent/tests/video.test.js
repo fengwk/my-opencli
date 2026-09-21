@@ -34,6 +34,14 @@ describe('jimeng-agent/video command registration', () => {
     expect(byName.get('retry')).toMatchObject({ type: 'int', default: 0 });
   });
 
+  it('defaults to a foreground window so Jimeng can decode media references', () => {
+    // Chrome stops media loading while the document is hidden, and Jimeng reads
+    // local video/audio metadata before uploading. Adapter windows default to
+    // background, so this command must ask for a visible window; an explicit
+    // `--window background` still overrides it.
+    expect(videoCommand.defaultWindowMode).toBe('foreground');
+  });
+
   it('performs pure contract validation before a browser session is used', () => {
     expect(() => videoCommand.validateArgs(validArgs())).not.toThrow();
     expect(() => videoCommand.validateArgs(validArgs({ retry: -1 }))).toThrow(ArgumentError);

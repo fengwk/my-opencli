@@ -38,9 +38,8 @@ import {
 import {
   cardIdentity,
   countVisibleMediaReferences,
-  hasUploadBusyText,
+  evaluateUploadPoll,
   hasCollapsedReferenceMore,
-  isNewUploadCard,
   isProcessingCard,
   isUploadSlotEntry,
   observeCurrentUploadFailure,
@@ -679,14 +678,49 @@ export async function probeJimengAgentSurface(page) {
 }
 
 /**
+ * Bounded retry budget for the transient "Navigation rejected" answer of the
+ * browser bridge. Four attempts with 0.5s + 1.5s + 3s of backoff cover the
+ * observed ~2s in-flight navigation and stay near a ~5s worst case.
+ */
+const WORKSPACE_NAVIGATION_ATTEMPTS = 4;
+const WORKSPACE_NAVIGATION_BACKOFF_MS = [500, 1_500, 3_000];
+
+/**
  * Open the Jimeng workspace in the current tab.
  *
  * Every prepare path reloads (`fresh`) so Jimeng's server-side draft
  * (reference cards + composer text) is re-rendered deterministically before
  * clear/upload. Never opens a new tab.
+ *
+ * The browser bridge intermittently answers a navigation with
+ * "Navigation rejected" while the previous navigation of the same target is
+ * still settling; retrying a few seconds later is the same recovery the canvas
+ * navigation paths use. Only that exact transient class is retried (the lease
+ * may still be in flight), so any other navigation failure is thrown as-is and
+ * is never masked by extra attempts. Exhausting the budget raises a structured
+ * COMMAND_EXEC error instead of leaking an UNKNOWN bridge error.
  */
-async function openWorkspace(page, workspaceUrl) {
-  await page.goto(workspaceUrl);
+export async function openWorkspace(page, workspaceUrl) {
+  let lastError = null;
+  for (let attempt = 0; attempt < WORKSPACE_NAVIGATION_ATTEMPTS; attempt += 1) {
+    if (attempt > 0) {
+      const backoffMs = WORKSPACE_NAVIGATION_BACKOFF_MS[
+        Math.min(attempt - 1, WORKSPACE_NAVIGATION_BACKOFF_MS.length - 1)
+      ];
+      await page.sleep(backoffMs / 1000);
+    }
+    try {
+      await page.goto(workspaceUrl);
+      return;
+    } catch (error) {
+      if (!/Navigation rejected/i.test(describeError(error))) throw error;
+      lastError = error;
+    }
+  }
+  throw new CommandExecutionError(
+    `JIMENG_NAVIGATION_FAILED: ${describeError(lastError)}`,
+    `No generation was submitted. The automation tab rejected the Jimeng workspace navigation ${WORKSPACE_NAVIGATION_ATTEMPTS} times in a row; reload the visible Jimeng workspace manually, then retry.`,
+  );
 }
 
 async function waitForAgentSurface(page, timeoutMs = 25_000) {
@@ -1186,7 +1220,47 @@ async function parkMouseAtComposer(page) {
   await page.cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: rect.x, y: rect.y }).catch(() => null);
 }
 
+/**
+ * Reference kinds whose upload depends on local media decoding.
+ *
+ * Jimeng reads duration/poster metadata from a `blob:` URL in a hidden media
+ * element before it uploads a video/audio reference. Chrome suspends media
+ * loading while the document is hidden, so the site's pipeline stops after the
+ * local preview URL and never creates a card. Images only need a bitmap decode
+ * and are unaffected.
+ */
+const MEDIA_DECODE_REFERENCE_KINDS = new Set(['video', 'audio']);
+
+/**
+ * Refuse media reference uploads the hidden tab cannot complete.
+ *
+ * A hidden document can never produce the card for a video/audio reference:
+ * the site waits for local media metadata that Chrome will not load in the
+ * background, so the upload would burn its whole wait budget and then report a
+ * misleading "no card" timeout. Failing here keeps the message actionable.
+ *
+ * Silent unless the document explicitly reports `hidden`, so an unsupported or
+ * failed probe (and every image-only request) falls back to the normal wait.
+ */
+async function assertMediaReferenceVisibility(page, assets, startAssetIndex) {
+  const pending = assets
+    .slice(startAssetIndex)
+    .filter((asset) => MEDIA_DECODE_REFERENCE_KINDS.has(asset?.kind));
+  if (pending.length === 0) return;
+  const visibilityState = await page.evaluate('document.visibilityState').catch(() => null);
+  if (visibilityState !== 'hidden') return;
+  const labels = pending.map((asset) => asset.label || asset.filename || asset.kind).join(', ');
+  const err = phaseError(
+    'upload',
+    `Jimeng cannot upload ${labels} while the browser tab is hidden: the site decodes local media metadata before uploading, and Chrome stops media loading in hidden tabs, so no reference card can appear.`,
+    'Retry with a foreground browser window (opencli jimeng-agent video ... --window foreground) or keep the automation window visible and unminimized. Image references are unaffected by window visibility.',
+  );
+  err.nonRetryable = true;
+  throw err;
+}
+
 async function uploadReferenceAssets(page, assets, uploads, startAssetIndex, baselineSlots) {
+  await assertMediaReferenceVisibility(page, assets, startAssetIndex);
   for (let index = startAssetIndex; index < assets.length; index += 1) {
     const asset = assets[index];
     const before = await collectDockReferenceSnapshot(page);
@@ -1315,9 +1389,25 @@ async function markUploadFileInput(page, marker) {
  * the chooser cannot be suppressed, so a click never opens a blocking dialog.
  */
 async function installUploadBridge(page) {
+  // Prefer CDP's native chooser interception: the site's input.click() still
+  // runs, so its own file-selection lifecycle stays intact, while Chrome does
+  // not open a blocking operating-system dialog. The shipped Browser Bridge
+  // (verified v1.0.32) rejects this probe with "CDP method not permitted:
+  // Page.setInterceptFileChooserDialog", so the in-page suppression below is
+  // what actually runs today; the probe stays for bridges that permit it.
+  const chooserIntercepted = typeof page?.cdp === 'function'
+    ? await page.cdp('Page.setInterceptFileChooserDialog', { enabled: true })
+      .then(() => true)
+      .catch(() => false)
+    : false;
   const result = await page.evaluate(`(() => {
     const key = ${JSON.stringify(UPLOAD_BRIDGE_KEY)};
-    const bridge = window[key] || (window[key] = { fsaDisabled: false, pickerSuppressed: false });
+    const chooserIntercepted = ${JSON.stringify(chooserIntercepted)};
+    const bridge = window[key] || (window[key] = {
+      fsaDisabled: false,
+      chooserIntercepted: false,
+      pickerSuppressed: false,
+    });
     if (typeof window.showOpenFilePicker === 'function') {
       try {
         delete window.showOpenFilePicker;
@@ -1328,6 +1418,15 @@ async function installUploadBridge(page) {
     }
     if (typeof window.showOpenFilePicker === 'function') {
       return { ok: false, reason: 'file-system-access-not-suppressed', fsaDisabled: false };
+    }
+    bridge.chooserIntercepted = chooserIntercepted;
+    if (chooserIntercepted) {
+      return {
+        ok: true,
+        fsaDisabled: bridge.fsaDisabled,
+        chooserIntercepted: true,
+        pickerSuppressed: false,
+      };
     }
     const proto = HTMLInputElement.prototype;
     if (!proto.__opencliJimengFilePickerSuppressed) {
@@ -1344,7 +1443,12 @@ async function installUploadBridge(page) {
       };
       bridge.pickerSuppressed = true;
     }
-    return { ok: true, fsaDisabled: bridge.fsaDisabled, pickerSuppressed: bridge.pickerSuppressed };
+    return {
+      ok: true,
+      fsaDisabled: bridge.fsaDisabled,
+      chooserIntercepted: false,
+      pickerSuppressed: bridge.pickerSuppressed,
+    };
   })()`).catch((err) => ({ ok: false, reason: describeError(err) }));
   if (!result?.ok) {
     throw phaseError(
@@ -1509,30 +1613,32 @@ async function waitForUploadCompletion(
   // the processing state for a while; video/audio often need longer anyway.
   const timeoutMs = asset.kind === 'image' ? 45_000 : 60_000;
   const deadline = Date.now() + timeoutMs;
-  const baseline = new Set((baselineCards || []).filter((card) => card?.identity).map((card) => card.identity));
-  // Empty upload slots can be filled in place by an upload (audio cards carry
-  // no blob src, so their identity stays `index:N`); treat such a slot→card
-  // transition as a new card too.
-  const baselineSlotIdentities = new Set(
-    (baselineCards || [])
-      .filter((card) => isUploadSlotEntry(card) && card.identity)
-      .map((card) => card.identity),
-  );
+  // A long reference strip collapses to a fixed set of visible cards, and the
+  // collapsed tail card is reused for the newly uploaded asset: its identity
+  // (data-index for audio, which has no blob source) stays the same while its
+  // visible text switches to the new label. `collapsed` is therefore read from
+  // the pre-upload baseline as well, because a tail update can briefly report
+  // no collapsed entry after the swap.
+  const collapsedBaseline = hasCollapsedReferenceMore(baselineCards);
   let activeBaselineAlertIds = baselineAlerts.map((alert) => alert.id);
   let stablePolls = 0;
-  let lastCards = null;
+  let lastKeys = null;
   while (Date.now() < deadline) {
     const snap = await collectDockReferenceSnapshot(page, alertBaselineMarker);
-    // A new card is one whose identity is not part of the pre-upload baseline
-    // (draft cards restored by Jimeng count as baseline, so leftovers never
-    // inflate the upload result), or a baseline upload slot that was filled
-    // in place (audio cards have no blob source to change identity).
-    const newCards = (snap.cards || []).filter(
-      (card) => isNewUploadCard(card, baseline, baselineSlotIdentities),
-    );
-    const newIds = new Set(newCards.map((card) => card.identity));
+    // A candidate is a card whose identity is not part of the pre-upload
+    // baseline (draft cards restored by Jimeng count as baseline, so leftovers
+    // never inflate the upload result), a baseline upload slot that was filled
+    // in place (audio cards have no blob source to change identity), or a
+    // collapsed tail card whose text changed to the expected asset label.
+    const poll = evaluateUploadPoll(snap.cards, {
+      baselineCards,
+      collapsed: snap.hasCollapsedMoreEntry === true || collapsedBaseline,
+      expectedLabel: asset.label,
+      previousKeys: lastKeys,
+    });
+    lastKeys = poll.keys;
     const failureObservation = observeCurrentUploadFailure({
-      cards: newCards,
+      cards: poll.candidates,
       alerts: snap.alerts,
       baselineAlerts,
       activeBaselineAlertIds,
@@ -1552,33 +1658,17 @@ async function waitForUploadCompletion(
         failedAssetIndex,
       );
     }
-    if (newCards.length > 0) {
-      const processing = newCards.some((card) => isProcessingCard(card));
-      const busyText = hasUploadBusyText(newCards.map((card) => card.text || '').join(' '));
-      const ready = !processing && !busyText;
-      // Require exactly ONE new card per upload: Jimeng can transiently create
-      // a duplicate processing card on slow hosts; confirming two cards would
-      // shift @图片N numbering and the next pre-upload gate would fail
-      // ('found 4' ghost-card pattern). A single stable card is the contract.
-      const single = newCards.length === 1;
-      // Require the same new-card set (identity) twice in a row so a
-      // transient re-render does not count as "upload complete".
-      const sameSet = lastCards !== null
-        && lastCards.size === newIds.size
-        && [...newIds].every((id) => lastCards.has(id));
-      if (ready && sameSet && single) {
-        stablePolls += 1;
-      } else {
-        stablePolls = 0;
-      }
-      if (stablePolls >= 2) {
-        await page.sleep(asset.kind === 'image' ? 0.8 : 1.2);
-        return;
-      }
-    } else {
-      stablePolls = 0;
+    // `confirmed` requires exactly ONE ready candidate: Jimeng can transiently
+    // create a duplicate processing card on slow hosts; confirming two cards
+    // would shift @图片N numbering and the next pre-upload gate would fail
+    // ('found 4' ghost-card pattern). A single stable card is the contract, and
+    // it must repeat on two consecutive polls so a transient re-render does not
+    // count as "upload complete".
+    stablePolls = poll.confirmed ? stablePolls + 1 : 0;
+    if (stablePolls >= 2) {
+      await page.sleep(asset.kind === 'image' ? 0.8 : 1.2);
+      return;
     }
-    lastCards = newIds;
     await page.sleep(0.5);
   }
 
@@ -1590,6 +1680,9 @@ async function waitForUploadCompletion(
     spin: card.hasSpin,
     mask: card.hasMask,
     remove: card.hasRemoveBtn,
+    // The collapsed-tail fallback keys on the visible card text, so the text is
+    // part of the failure evidence.
+    text: String(card.text || '').slice(0, 40),
     cls: (card.classes || []).join(' ').slice(0, 50),
   }));
   throw phaseError(
