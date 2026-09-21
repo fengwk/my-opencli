@@ -181,7 +181,12 @@ Legacy canvas flow:
    mounted (off-screen at `left == window.innerWidth`), so the panel is only
    accepted once ≥60% of it is inside the viewport; every later phase re-asserts
    that dock and the run fails closed instead of falling back to the canvas
-   bottom composer.
+   bottom composer. The launcher is clicked from inside the page (the toolbar
+   re-renders between a marked selector and a CDP click) and the leased tab is
+   brought to the front first (`foreground` window mode), because a hidden tab
+   parks the panel's slide-in animation off-screen while the app already reports
+   it open. Such a stalled panel is repaired by collapsing it through its own
+   header control, or by one project reload, before the phase is allowed to fail.
 3. Applies 创作类型 = Agent 模式. The docked panel renders that selector as an
    icon without a label, so the command opens its option list, reads the
    `aria-selected` option, closes the list again when it already matches, and
@@ -274,6 +279,10 @@ Differences from `canvas-video` worth knowing:
   rejected unless `--canvas new` is used.
 - The legacy canvas shares one composer model between the bottom composer and
   the 「对话」 sidecar, so text typed in either place is what gets submitted.
+- Docking the 「对话」 panel is the one step that depends on the leased tab being
+  foreground: run `canvas-v0-video` against a tab the browser renders, and if the
+  panel is ever reported open while sitting off-screen, the command recovers it
+  itself (collapse, then reload) instead of typing into the bottom composer.
 
 ## Canvas resource status (`canvas-status`)
 

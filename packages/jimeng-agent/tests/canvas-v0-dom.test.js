@@ -22,7 +22,7 @@ const ASSET_ID = 'cd3014e9eeadb1a6';
 const CREATE_PATH = '/mweb/v1/infinite_canvas/create_project';
 
 function createMockPage(handlers = []) {
-  const calls = { evaluate: [], goto: [], keys: [], inserts: [], setFileInput: [] };
+  const calls = { evaluate: [], goto: [], keys: [], inserts: [], setFileInput: [], cdp: [] };
   const page = {
     calls,
     async evaluate(script) {
@@ -60,6 +60,10 @@ function createMockPage(handlers = []) {
     async setFileInput(selector, filePath, options) {
       calls.setFileInput.push([selector, filePath, options]);
       return { ok: true };
+    },
+    async cdp(method) {
+      calls.cdp.push(method);
+      return {};
     },
     async startNetworkCapture() {
       return {};
@@ -173,6 +177,7 @@ describe('jimeng-agent canvas-v0 create flow', () => {
           composerReady: false,
           sidecarOpen: false,
           editorReady: false,
+          anyEditorReady: false,
           launcherVisible: false,
           uploadControlReady: false,
           creationType: '',
@@ -186,6 +191,36 @@ describe('jimeng-agent canvas-v0 create flow', () => {
 
     await expect(waitForCanvasV0Surface(page, 1)).rejects.toThrow(/Legacy canvas surface never became ready/);
     expect(page.calls.evaluate.length).toBeGreaterThan(0);
+  });
+
+  it('accepts a fresh canvas whose 对话 panel is still closed', async () => {
+    // A brand new project opens with the panel closed and its composer at the
+    // canvas bottom, so the surface wait must not require the docked panel.
+    const page = createMockPage([
+      ['surfaceReady:', (text) => (text.includes('launcherVisible:')
+        ? {
+          href: `${JIMENG_CANVAS_V0_URL}/${PROJECT_ID}`,
+          surfaceReady: true,
+          composerReady: false,
+          sidecarOpen: false,
+          panelReady: false,
+          editorReady: false,
+          anyEditorReady: true,
+          launcherVisible: true,
+          uploadControlReady: true,
+          creationType: '',
+          referenceCount: 0,
+          sendVisible: false,
+          sendEnabled: false,
+          ready: false,
+        }
+        : undefined)],
+    ]);
+
+    const state = await waitForCanvasV0Surface(page, 1_000);
+    expect(state.surfaceReady).toBe(true);
+    expect(state.sidecarOpen).toBe(false);
+    expect(state.anyEditorReady).toBe(true);
   });
 
   it('keeps generated locator scripts parseable', async () => {
@@ -243,11 +278,17 @@ describe('jimeng-agent canvas-v0 对话 panel docking', () => {
   };
   const dockedPanelProbe = { ...closedPanelProbe, composerReady: true, composerInSidecar: true, sidecarOpen: true, panelReady: true, sendVisible: true, sendEnabled: true, ready: true };
 
-  it('clicks the 对话 launcher when the panel is closed off-screen', async () => {
+  const sidecarMarkHandler = () => ['setAttribute', (text) => (text.includes('sidecar-launcher')
+    ? { ok: true, selector: '[data-opencli-jimeng-v0-target="sidecar-launcher"]' }
+    : undefined)];
+  const inPageClickHandler = () => ['node.click()', (text) => (text.includes('sidecar-launcher') ? true : undefined)];
+
+  it('activates the tab and clicks the 对话 launcher in-page when the panel is closed', async () => {
     let probeCount = 0;
     const page = createMockPage([
-      ['sidecar-launcher', () => ({ ok: true })],
-      ['surfaceReady:', (text) => {
+      inPageClickHandler(),
+      sidecarMarkHandler(),
+      ['surfaceReady:', () => {
         probeCount += 1;
         // The closed panel is mounted but sits outside the viewport, so the
         // probe keeps reporting a closed panel until the launcher is clicked.
@@ -259,14 +300,18 @@ describe('jimeng-agent canvas-v0 对话 panel docking', () => {
 
     expect(state.panelReady).toBe(true);
     expect(state.opened).toBe(true);
-    expect(page.calls.keys.filter(([, selector]) => String(selector).includes('sidecar-launcher')))
-      .toEqual([['click', '[data-opencli-jimeng-v0-target="sidecar-launcher"]']]);
+    expect(page.calls.cdp).toEqual(['Page.bringToFront']);
+    // The launcher is clicked inside the page: a marked selector round-trip goes
+    // stale because the toolbar re-renders between mark and click.
+    expect(page.calls.keys).toEqual([]);
+    expect(page.calls.evaluate.filter((text) => text.includes('node.click()'))).toHaveLength(1);
   });
 
   it('does not click anything when the panel is already docked', async () => {
     const page = createMockPage([
+      inPageClickHandler(),
+      sidecarMarkHandler(),
       ['surfaceReady:', () => dockedPanelProbe],
-      ['sidecar-launcher', () => ({ ok: true })],
     ]);
 
     const state = await ensureCanvasV0SidecarOpen(page);
@@ -274,11 +319,68 @@ describe('jimeng-agent canvas-v0 对话 panel docking', () => {
     expect(state.panelReady).toBe(true);
     expect(state.opened).toBe(false);
     expect(page.calls.keys).toEqual([]);
+    expect(page.calls.evaluate.filter((text) => text.includes('sidecar-launcher'))).toEqual([]);
+  });
+
+  it('collapses a stalled slide-in instead of clicking the missing launcher', async () => {
+    let probeCount = 0;
+    const page = createMockPage([
+      ['operation-button', (text) => (text.includes('collapse.click()') ? true : undefined)],
+      inPageClickHandler(),
+      sidecarMarkHandler(),
+      ['surfaceReady:', () => {
+        probeCount += 1;
+        // The app reports the panel open while its slide-in stalled off-screen:
+        // no launcher to click, and the header collapse control is the way back.
+        return probeCount > 2 ? dockedPanelProbe : { ...closedPanelProbe, launcherVisible: false };
+      }],
+    ]);
+
+    const state = await ensureCanvasV0SidecarOpen(page);
+
+    expect(state.panelReady).toBe(true);
+    // The panel was already reported open, so this run did not open it itself.
+    expect(state.opened).toBe(false);
+    expect(page.calls.evaluate.filter((text) => text.includes('collapse.click()'))).toHaveLength(1);
+    expect(page.calls.evaluate.filter((text) => text.includes('node.click()'))).toEqual([]);
+  });
+
+  it('reloads the project once before failing on a stalled panel', async () => {
+    const page = createMockPage([
+      ['operation-button', () => true],
+      inPageClickHandler(),
+      sidecarMarkHandler(),
+      ['surfaceReady:', () => ({ ...closedPanelProbe, launcherVisible: false, anyEditorReady: true })],
+    ]);
+
+    await expect(ensureCanvasV0SidecarOpen(page, 17_000))
+      .rejects.toThrow(/reloads=1/);
+    expect(page.calls.evaluate.filter((text) => text === 'location.reload()')).toHaveLength(1);
+    expect(page.calls.evaluate.filter((text) => text.includes('collapse.click()'))).toHaveLength(1);
+  });
+
+  it('docks the panel on transports without cdp', async () => {
+    let probeCount = 0;
+    const page = createMockPage([
+      inPageClickHandler(),
+      sidecarMarkHandler(),
+      ['surfaceReady:', () => {
+        probeCount += 1;
+        return probeCount > 1 ? dockedPanelProbe : closedPanelProbe;
+      }],
+    ]);
+    delete page.cdp;
+
+    const state = await ensureCanvasV0SidecarOpen(page);
+
+    expect(state.opened).toBe(true);
+    expect(state.panelReady).toBe(true);
   });
 
   it('fails closed when the 对话 panel never docks', async () => {
     const page = createMockPage([
-      ['sidecar-launcher', () => ({ ok: false, reason: 'launcher-not-found' })],
+      inPageClickHandler(),
+      sidecarMarkHandler(),
       ['surfaceReady:', () => closedPanelProbe],
     ]);
 

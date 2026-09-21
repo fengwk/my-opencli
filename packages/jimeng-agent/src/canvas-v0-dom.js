@@ -258,6 +258,7 @@ export async function probeJimengCanvasV0Surface(page) {
       .filter(v0Visible)
       .find((node) => /^对话$/.test((node.innerText || '').trim())) || null;
     const editor = composer ? v0Editor(composer) : null;
+    const anyEditor = anyComposer ? v0Editor(anyComposer) : null;
     const send = composer ? v0SendButton(composer) : null;
     const input = v0UploadInput(sidecar || document);
     const creationType = v0CreationTypeRead();
@@ -270,6 +271,7 @@ export async function probeJimengCanvasV0Surface(page) {
       sidecarOpen: !!sidecar,
       panelReady: v0PanelReady(),
       editorReady: !!editor,
+      anyEditorReady: !!anyEditor,
       launcherVisible: !!launcher,
       uploadControlReady: !!(composer && v0UploadControl(composer)) || !!input,
       creationType: creationType.text,
@@ -327,19 +329,83 @@ export async function createCanvasV0Project(page, canonical = {}) {
   };
 }
 
+/**
+ * Wait for the canvas app itself. A fresh project opens with the 「对话」 panel
+ * still closed and its composer living at the canvas bottom, so this only asserts
+ * that some composer with an editor is on screen; `ensureCanvasV0SidecarOpen`
+ * docks the panel right after and the pre-input controls check enforces it.
+ */
 export async function waitForCanvasV0Surface(page, timeoutMs = 60_000) {
   const deadline = Date.now() + timeoutMs;
   let last = null;
   while (Date.now() < deadline) {
     last = await probeJimengCanvasV0Surface(page).catch((error) => ({ error: describeError(error) }));
-    if (last?.surfaceReady && last?.editorReady) return last;
+    if (last?.surfaceReady && (last?.anyEditorReady || last?.editorReady)) return last;
     await page.sleep(0.5);
   }
   throw phaseError(
     'surface',
-    `Legacy canvas surface never became ready (href=${last?.href || 'unknown'}, surfaceReady=${last?.surfaceReady === true}, editorReady=${last?.editorReady === true})`,
+    `Legacy canvas surface never became ready (href=${last?.href || 'unknown'}, surfaceReady=${last?.surfaceReady === true}, anyEditorReady=${last?.anyEditorReady === true}, sidecarEditorReady=${last?.editorReady === true})`,
     'Confirm the legacy canvas URL opens in the logged-in browser session, then retry.',
   );
+}
+
+const V0_SIDECAR_LAUNCHER_MARKER = 'sidecar-launcher';
+
+const V0_SIDECAR_LAUNCHER_LOCATE = `
+  const target = [...document.querySelectorAll('button')]
+    .filter(v0Visible)
+    .find((node) => /^对话$/.test((node.innerText || '').trim())) || null;
+`;
+
+/**
+ * The 对话 panel slides in with a CSS transition, and a stalled slide-in leaves the
+ * app convinced the panel is open while it stays parked off-screen. Activating the
+ * leased tab (these commands already declare a foreground window) keeps the panel's
+ * animation honest before any click is trusted.
+ */
+export async function activateCanvasV0Tab(page) {
+  if (!page || typeof page.cdp !== 'function') return false;
+  return page.cdp('Page.bringToFront').then(() => true, () => false);
+}
+
+/** Collapse the stalled panel through its own header control so the launcher returns. */
+async function collapseStalledCanvasV0Sidecar(page) {
+  return page.evaluate(`(() => {
+    ${buildCanvasV0LocatorScript()}
+    const panel = [...document.querySelectorAll('aside[class*="right-panel"]')][0];
+    if (!panel) return false;
+    const buttons = [...panel.querySelectorAll('[class*="operation-button"]')].filter(v0Visible);
+    const collapse = buttons[buttons.length - 1];
+    if (!collapse) return false;
+    collapse.click();
+    return true;
+  })()`).catch(() => false);
+}
+
+/**
+ * Recover a panel that reports itself open while its slide-in never landed: first
+ * collapse it so the launcher comes back, then (once) reload the project, which
+ * re-mounts the panel from the state the app persisted for it.
+ *
+ * Returns `none` when the panel is not stalled, `recovered` when another probe is
+ * worth taking, and `exhausted` when the stalled panel cannot be repaired here.
+ */
+async function recoverStalledCanvasV0Sidecar(page, last, state, deadline) {
+  const stalled = !!last && last.surfaceReady === true && !last.sidecarOpen && !last.launcherVisible;
+  if (!stalled) return 'none';
+  if (state.collapses === 0) {
+    state.collapses += 1;
+    if (await collapseStalledCanvasV0Sidecar(page)) return 'recovered';
+  }
+  if (state.reloads === 0 && Date.now() + 15_000 < deadline) {
+    state.reloads += 1;
+    await page.evaluate('location.reload()').catch(() => null);
+    await waitForCanvasV0Surface(page, Math.min(30_000, Math.max(1_000, deadline - Date.now()))).catch(() => null);
+    await activateCanvasV0Tab(page);
+    return 'recovered';
+  }
+  return 'exhausted';
 }
 
 /**
@@ -349,29 +415,39 @@ export async function waitForCanvasV0Surface(page, timeoutMs = 60_000) {
  * panel composer, and `canvas-v0-video` only reports a prepared draft when the
  * panel is still open. Every phase therefore re-asserts this state, and a
  * closed panel is a hard failure instead of silently falling back to the canvas
- * bottom composer.
+ * bottom composer. A slide-in that stalls off-screen is repaired in-place (or by
+ * one reload) before the phase is allowed to fail.
  */
-export async function ensureCanvasV0SidecarOpen(page, timeoutMs = 20_000) {
+export async function ensureCanvasV0SidecarOpen(page, timeoutMs = 45_000) {
   const deadline = Date.now() + timeoutMs;
+  const state = { clicks: 0, collapses: 0, reloads: 0 };
   let last = await probeJimengCanvasV0Surface(page).catch((error) => ({ error: describeError(error) }));
-  let clicks = 0;
+  await activateCanvasV0Tab(page);
 
   while (Date.now() < deadline) {
-    if (last?.panelReady && last?.editorReady) return { ...last, opened: clicks > 0 };
-    // The launcher only exists while the panel is closed, so a repeat click
-    // cannot toggle an already docked panel shut.
-    const marked = await page.evaluate(`(() => {
-      ${buildCanvasV0LocatorScript()}
-      const launcher = [...document.querySelectorAll('button')]
-        .filter(v0Visible)
-        .find((node) => /^对话$/.test((node.innerText || '').trim()));
-      if (!launcher) return { ok: false, reason: 'launcher-not-found' };
-      launcher.setAttribute(${JSON.stringify(CANVAS_V0_TARGET_ATTR)}, 'sidecar-launcher');
-      return { ok: true };
-    })()`).catch((error) => ({ ok: false, reason: describeError(error) }));
-    if (marked?.ok) {
-      clicks += 1;
-      await page.click(`[${CANVAS_V0_TARGET_ATTR}="sidecar-launcher"]`).catch(() => null);
+    if (last?.panelReady && last?.editorReady) return { ...last, opened: state.clicks > 0 };
+    const recovery = await recoverStalledCanvasV0Sidecar(page, last, state, deadline);
+    if (recovery !== 'none') {
+      // Nothing left to try: spinning until the deadline would only hide the cause.
+      if (recovery === 'exhausted') break;
+      last = await probeJimengCanvasV0Surface(page).catch((error) => ({ error: describeError(error) }));
+      continue;
+    }
+    // The launcher only exists while the panel is closed, so re-marking it before
+    // every click guarantees a repeat click can never toggle a docked panel shut.
+    const located = last?.launcherVisible
+      ? await markCanvasV0Control(page, V0_SIDECAR_LAUNCHER_MARKER, V0_SIDECAR_LAUNCHER_LOCATE)
+        .catch((error) => ({ ok: false, reason: describeError(error) }))
+      : { ok: false, reason: 'launcher-not-found' };
+    if (located?.ok) {
+      // Same document as the marker, so a toolbar re-render cannot invalidate it.
+      const clicked = await page.evaluate(`(() => {
+        const node = document.querySelector(${JSON.stringify(located.selector)});
+        if (!node) return false;
+        node.click();
+        return true;
+      })()`).catch(() => false);
+      if (clicked) state.clicks += 1;
       await page.sleep(0.6);
     } else {
       await page.sleep(0.4);
@@ -381,7 +457,7 @@ export async function ensureCanvasV0SidecarOpen(page, timeoutMs = 20_000) {
 
   throw phaseError(
     'sidecar',
-    `Legacy canvas 对话 panel is not docked (sidecarOpen=${last?.sidecarOpen === true}, composerInSidecar=${last?.composerInSidecar === true}, editorReady=${last?.editorReady === true}, clicks=${clicks}, reason=${last?.error || 'none'})`,
+    `Legacy canvas 对话 panel is not docked (sidecarOpen=${last?.sidecarOpen === true}, composerInSidecar=${last?.composerInSidecar === true}, editorReady=${last?.editorReady === true}, clicks=${state.clicks}, collapses=${state.collapses}, reloads=${state.reloads}, reason=${last?.error || 'none'})`,
     'No generation was submitted. Open the 对话 panel manually, confirm its composer is visible, then retry.',
   );
 }
