@@ -19,6 +19,7 @@ The `video` command:
 ```bash
 opencli plugin install /path/to/my-opencli/packages/jimeng-agent
 opencli jimeng-agent video --help
+opencli jimeng-agent canvas-create --help
 opencli jimeng-agent canvas-video --help
 opencli jimeng-agent canvas-status --help
 opencli jimeng-agent status --help
@@ -29,9 +30,50 @@ opencli jimeng-agent status --help
 | Command | Target | Surface |
 |---|---|---|
 | `video` | Generate page | `https://jimeng.jianying.com/ai-tool/generate?workspace=<workspace-id>` |
+| `canvas-create` | AI Canvas | Create a blank canvas only, return its `project-id` for later runs |
 | `canvas-video` | AI Canvas | `https://jimeng.jianying.com/ai-tool/ai-canvas` (`--canvas new` or `--canvas <project-id>`) |
 | `canvas-status` | AI Canvas | List every current/historical resource, optionally correlated to one `asset-id` |
 | `status` | History | Search and official download by `asset-id` |
+
+## Canvas creation (`canvas-create`)
+
+Creates a blank canvas project and returns nothing but its identity. No
+reference is uploaded, no prompt is typed and nothing is submitted, so the
+returned `project-id` can be reused by later `canvas-video` runs (one canvas
+can host several clips):
+
+```bash
+OPENCLI_BROWSER_COMMAND_TIMEOUT=300 opencli jimeng-agent canvas-create \
+  --title '苏州猫咪短片 01' \
+  -f json
+```
+
+```json
+[
+  {
+    "status": "created",
+    "project-id": "ac84c64a-420a-4077-afd6-aa239b68f0fb",
+    "canvas-title": "苏州猫咪短片 01",
+    "canvas-url": "https://jimeng.jianying.com/ai-tool/ai-canvas/ac84c64a-420a-4077-afd6-aa239b68f0fb"
+  }
+]
+```
+
+```bash
+# prepare (and later submit) inside the canvas created above
+OPENCLI_BROWSER_COMMAND_TIMEOUT=300 opencli jimeng-agent canvas-video \
+  --canvas ac84c64a-420a-4077-afd6-aa239b68f0fb \
+  --image ./人物.png \
+  --prompt '请以@图片1作为人物形象参考。' \
+  --duration 15 \
+  --ratio 16:9 \
+  --model-version seedance2.0fast \
+  --submit 0
+```
+
+`--title` is optional and limited to 60 characters. Passing `--title` to
+`canvas-video --canvas <project-id>` is rejected: existing canvases are never
+renamed.
 
 ## Canvas Video Example (`canvas-video`)
 
@@ -75,7 +117,7 @@ Canvas video flow:
 3. Expands the right-hand AI conversation panel (文案「与 AI 对话」).
 4. Clears leftover composer content.
 5. Uploads references through the canvas composer's native attachment model and verifies visible ready chips.
-6. Types prompt directives, including `资产编号：<asset-id>`, and replaces each `@图片N` / `@视频N` / `@音频N` placeholder through the visible `@` picker. Candidate selection is bound to the current upload's exact `attachmentId`, so historical same-name resources are never selected ambiguously.
+6. Composes the prompt (including `资产编号：<asset-id>`) in one composer transaction: every text segment and every `@图片N` / `@视频N` / `@音频N` mention chip is written by a single `insertSegments` call, with chip descriptors copied from the uploaded attachment chips (same `attachmentId`, so historical same-name resources are never selected). Text and chips therefore cannot interleave. If the composer model is unavailable the run falls back to the visible `@` picker flow.
 7. Performs content checkpoint (validates uploaded attachments, ordered rich-reference chips, and prompt anchors).
 8. With `--submit 1`, waits for any active Canvas Agent turn (`canvas-agent-stop`) to finish, then clicks the unique enabled send control. Success requires either a correlated server ACK or the exact `asset-id` to move from the composer into the sent-message area; ambiguous states fail closed.
 9. With `--submit 0`, leaves the verified draft visible and never clicks send.

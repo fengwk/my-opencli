@@ -14,6 +14,7 @@ import {
   getCanvasMimeType,
   prepareJimengCanvasAsk,
   probeJimengCanvasSurface,
+  runJimengCanvasCreate,
   runCanvasContentCheckpoint,
   submitCanvasPreparedGeneration,
   uploadCanvasReferenceAssets,
@@ -1270,5 +1271,103 @@ describe('jimeng-agent/canvas-dom — composer cleanup safety', () => {
       { empty: true, editorFound: true, textLength: 0, chips: 0 },
     ]);
     await expect(clearCanvasComposer(page)).resolves.toBeUndefined();
+  });
+});
+
+describe('jimeng-agent/canvas-dom — canvas creation', () => {
+  function createCanvasCreatePage({ projectId = 'project-created', fatal = false } = {}) {
+    const urls = [];
+    const page = {
+      goto: vi.fn(async (url) => {
+        urls.push(url);
+      }),
+      click: vi.fn(async () => ({ ok: true })),
+      sleep: vi.fn(async () => undefined),
+      nativeKeyPress: vi.fn(async () => undefined),
+      insertText: vi.fn(async () => undefined),
+      evaluate: vi.fn(async (expression) => {
+        assertEvaluableExpression(expression);
+        if (expression.includes("reason: 'materializer-not-ready'")) {
+          return fatal
+            ? { ok: false, reason: 'materialize-failed', error: 'materializer exploded' }
+            : {
+              ok: true,
+              projectId,
+              projectCreated: true,
+              projectExposed: true,
+              projectMaterialized: true,
+            };
+        }
+        if (expression.includes('/octo_api/v1/project/update')) {
+          return {
+            httpOk: true,
+            status: 200,
+            body: { ret: '0', errmsg: 'OK', logid: 'create-log' },
+            parseError: '',
+          };
+        }
+        if (expression.includes('const chipData = chips.map')) {
+          return {
+            href: `${JIMENG_CANVAS_URL}/${projectId}`,
+            canvasReady: true,
+            preparing: false,
+            sidecarOpen: false,
+            launcherVisible: true,
+            editorReady: false,
+            addControlReady: false,
+            sendVisible: false,
+            sendDisabled: true,
+            chipCount: 0,
+            chipData: [],
+            alerts: [],
+            ready: true,
+          };
+        }
+        return undefined;
+      }),
+    };
+    return { page, urls };
+  }
+
+  it('creates a blank canvas, names it, and returns its project id', async () => {
+    const { page, urls } = createCanvasCreatePage({ projectId: 'project-created' });
+
+    const rows = await runJimengCanvasCreate(page, { title: '苏州猫咪短片' });
+
+    expect(rows).toEqual([{
+      status: 'created',
+      projectId: 'project-created',
+      canvasTitle: '苏州猫咪短片',
+      canvasUrl: `${JIMENG_CANVAS_URL}/project-created`,
+    }]);
+    expect(urls[0]).toBe(`${JIMENG_CANVAS_URL}?enter_from=page_click&from_page=create`);
+    expect(urls[1]).toBe(`${JIMENG_CANVAS_URL}/project-created?enter_from=page_click&from_page=create&opencli_materialized=1`);
+    const renameScript = page.evaluate.mock.calls
+      .map(([expression]) => expression)
+      .find((expression) => expression.includes('/octo_api/v1/project/update'));
+    expect(renameScript).toContain('"project_id":"project-created"');
+    expect(renameScript).toContain('"name":"苏州猫咪短片"');
+    // nothing is uploaded, typed or submitted by a create-only run
+    expect(page.nativeKeyPress).not.toHaveBeenCalled();
+    expect(page.click).not.toHaveBeenCalled();
+  });
+
+  it('creates an unnamed canvas without a rename request', async () => {
+    const { page } = createCanvasCreatePage({ projectId: 'project-unnamed' });
+
+    const rows = await runJimengCanvasCreate(page, {});
+
+    expect(rows[0]).toMatchObject({ projectId: 'project-unnamed', canvasTitle: '' });
+    expect(page.evaluate.mock.calls
+      .some(([expression]) => String(expression).includes('/octo_api/v1/project/update'))).toBe(false);
+  });
+
+  it('fails without returning an id when materialization does not complete', async () => {
+    const { page } = createCanvasCreatePage({ fatal: true });
+
+    await expect(runJimengCanvasCreate(page, {})).rejects.toMatchObject({
+      phase: 'materialize',
+      message: expect.stringContaining('Could not materialize'),
+    });
   });
 });

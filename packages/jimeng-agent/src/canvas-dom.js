@@ -18,6 +18,7 @@ import path from 'node:path';
 import { CommandExecutionError } from '@jackwener/opencli/errors';
 
 import {
+  CANVAS_NEW,
   JIMENG_CANVAS_PATH,
   buildCanvasUrl,
   evaluateCanvasContentCheckpoint,
@@ -2470,6 +2471,52 @@ export async function submitCanvasPreparedGeneration(page, canonical, options = 
   err.retryable = false;
   err.nonRetryable = true;
   throw err;
+}
+
+/**
+ * Create a blank canvas project and return its identity for later runs.
+ *
+ * Materialization is the only step: nothing is uploaded, typed or submitted,
+ * so the returned `projectId` can be reused by `canvas-video --canvas <id>`
+ * without carrying any draft state.
+ *
+ * @returns {Promise<Array<{ status: string, projectId: string, canvasTitle: string, canvasUrl: string }>>}
+ */
+export async function runJimengCanvasCreate(page, canonical = {}) {
+  assertCanvasPageCapabilities(page);
+  const title = typeof canonical.title === 'string' ? canonical.title.trim() : '';
+
+  await openCanvasWorkspace(page, buildCanvasUrl(CANVAS_NEW));
+  const materialized = await materializeNewCanvasProject(page);
+  const projectId = String(materialized?.projectId || '').trim();
+  if (!projectId) {
+    throw phaseError(
+      'materialize',
+      'Jimeng canvas project id was not exposed after materialization',
+      'The blank canvas may have been created partially. Inspect the visible canvas before retrying.',
+    );
+  }
+
+  if (title) {
+    await applyNewCanvasTitle(page, { canvasMode: 'new', title }, projectId);
+  }
+
+  // Blank-canvas materialization updates history in place but may leave the
+  // preparing shell mounted. Reload the now-real project route so the canvas is
+  // fully mounted before its id is handed to later canvas-video runs.
+  const canvasUrl = buildCanvasUrl({ mode: 'existing', value: projectId, projectId });
+  await openCanvasWorkspace(
+    page,
+    `${canvasUrl}?enter_from=page_click&from_page=create&opencli_materialized=1`,
+  );
+  const surface = await waitForCanvasSurface(page);
+
+  return [{
+    status: 'created',
+    projectId: parseProjectIdFromHref(surface?.href) || projectId,
+    canvasTitle: title,
+    canvasUrl,
+  }];
 }
 
 export async function prepareJimengCanvasAsk(page, canonical, preparedAssets, options = {}) {

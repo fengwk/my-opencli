@@ -53,6 +53,7 @@ opencli plugin list
 opencli chatgpt-agent ask --help
 opencli gemini-agent ask --help
 opencli jimeng-agent video --help
+opencli jimeng-agent canvas-create --help
 opencli jimeng-agent canvas-video --help
 opencli jimeng-agent canvas-status --help
 opencli utils scrape --help
@@ -78,6 +79,7 @@ opencli plugin list
 opencli chatgpt-agent ask --help
 opencli gemini-agent ask --help
 opencli jimeng-agent video --help
+opencli jimeng-agent canvas-create --help
 opencli jimeng-agent canvas-video --help
 opencli jimeng-agent canvas-status --help
 opencli utils scrape --help
@@ -149,6 +151,17 @@ opencli jimeng-agent video \
 # optional formal submit after checkpoint, then search/download by asset-id
 opencli jimeng-agent video ... --submit 1
 opencli jimeng-agent status --workspace <workspace-id> --search-key <asset-id> --download 1
+
+# create a blank AI Canvas only and keep its project id for later runs
+opencli jimeng-agent canvas-create --title '人物镜头测试'
+
+# prepare inside the canvas created above (several clips can reuse one canvas)
+opencli jimeng-agent canvas-video \
+  --canvas <project-id> \
+  --image ./人物.png \
+  --prompt '请以@图片1作为人物形象参考。' \
+  --ratio 16:9 \
+  --model-version seedance2.0
 
 # prepare in a newly created AI Canvas (default --submit 0) and optionally name it
 opencli jimeng-agent canvas-video \

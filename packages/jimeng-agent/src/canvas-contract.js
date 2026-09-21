@@ -122,6 +122,43 @@ export function parseProjectIdFromHref(href) {
   }
 }
 
+const CANVAS_CREATE_KEYS = Object.freeze([
+  'canvas',
+  'canvasMode',
+  'title',
+]);
+
+/**
+ * Normalize `canvas-create` arguments.
+ *
+ * The command only ever creates a blank canvas: there is no prompt, media or
+ * model input, so the identity is fixed to `new` and only an optional title is
+ * carried through.
+ *
+ * @param {object} [kwargs]
+ * @returns {{ canvas: string, canvasMode: 'new', title: string }}
+ */
+export function normalizeCanvasCreateArgs(kwargs = {}) {
+  if (kwargs === null || typeof kwargs !== 'object' || Array.isArray(kwargs)) {
+    throw new ArgumentError(
+      `Invalid arguments: expected a plain object, got ${describeType(kwargs)}`,
+      'Pass the command arguments as a plain JSON-style object.',
+    );
+  }
+  const identity = { mode: 'new', value: CANVAS_NEW, projectId: '' };
+  const result = {
+    canvas: CANVAS_NEW,
+    canvasMode: identity.mode,
+    title: normalizeCanvasTitle(kwargs.title, identity),
+  };
+  for (const key of Object.keys(result)) {
+    if (!CANVAS_CREATE_KEYS.includes(key)) {
+      throw new Error(`normalizeCanvasCreateArgs: unexpected key '${key}'`);
+    }
+  }
+  return result;
+}
+
 export function normalizeCanvasAskArgs(kwargs = {}) {
   if (kwargs === null || typeof kwargs !== 'object' || Array.isArray(kwargs)) {
     throw new ArgumentError(
