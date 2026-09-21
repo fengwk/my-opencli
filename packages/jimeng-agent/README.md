@@ -252,6 +252,12 @@ from, so nothing has to be guessed:
 - `asset-id` comes from `资产编号：…` inside the stored prompt, so a legacy
   generation is reachable exactly like a `canvas-video` one.
 
+Asset-id correlation reads the prompt stored on the history record, which is
+what a finished generation always carries. Whether a still-running record
+already comes back with that prompt was never observed (no run has been left
+in flight), so right after `--submit 1` prefer listing the canvas without a
+filter, or query the `record-id` from that listing.
+
 `canvas-v0-download` picks the newest ready generation unless `--record-id` or
 `--asset-id` narrows it, falls back to the best published definition (reporting
 `definition-fallback`) when the requested one is missing, verifies the md5 of
