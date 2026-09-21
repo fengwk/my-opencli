@@ -194,6 +194,9 @@ Legacy canvas flow:
 
 Differences from `canvas-video` worth knowing:
 
+- `canvas-status` cannot inspect legacy canvases: it reads the AI Canvas
+  `/octo_api/v1/project/draft/get` store and answers `project not found` for a
+  legacy `project-id`. Legacy resources are only visible in the canvas UI today.
 - References are uploaded as files; `--prompt` must be plain text without
   `@图片N`-style mentions (the legacy composer has no rich-reference picker).
 - Titles are capped at 20 characters and, as with `canvas-video`, `--title` is
