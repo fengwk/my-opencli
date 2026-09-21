@@ -50,6 +50,25 @@ function assertEvaluableExpression(expression) {
   }
 }
 
+/**
+ * Recover the prompt text a generated browser script was called with, so mocks
+ * can mirror what the composer document would contain.
+ */
+function expressionArgument(expression) {
+  const marker = ')(';
+  const at = expression.lastIndexOf(marker);
+  if (at < 0) return null;
+  try {
+    return JSON.parse(expression.slice(at + marker.length, expression.lastIndexOf(')')));
+  } catch {
+    return null;
+  }
+}
+
+function compactText(value) {
+  return String(value || '').replace(/[\u00a0\u200b\s]+/g, '');
+}
+
 function makeEntry(overrides = {}) {
   return {
     url: `https://jimeng.jianying.com${JIMENG_CANVAS_SEND_PATH}`,
@@ -179,11 +198,11 @@ describe('jimeng-agent/canvas-dom — rich mention preparation', () => {
     expect(canvasMentionTextMatchesVariant('图片10.png', '图片1')).toBe(false);
   });
 
-  // Without the composer model the editor owns the caret after typed text, so
-  // mentions must be anchored to the end or they land mid-prompt.
-  function createFillPromptPage({ modelInsertion, events, mentions, settle }) {
+  // Prompt text must land in the composer document, and every mention must bind
+  // only after its preceding text is there; both are verified against the model.
+  function createFillPromptPage({ modelInsertion = true, events, mentions, dropText = false }) {
     const state = { count: 0, labels: [] };
-    let settlePolls = 0;
+    let composerText = '';
     return {
       click: vi.fn(async (selector) => {
         if (selector.includes('mention-candidate-')) {
@@ -191,6 +210,7 @@ describe('jimeng-agent/canvas-dom — rich mention preparation', () => {
           if (typeof label === 'string') {
             state.count += 1;
             state.labels.push(label);
+            composerText += '@chip';
             events.push(`mention:${label}`);
           }
         }
@@ -198,21 +218,21 @@ describe('jimeng-agent/canvas-dom — rich mention preparation', () => {
       }),
       sleep: vi.fn(async () => undefined),
       nativeKeyPress: vi.fn(async () => undefined),
-      insertText: vi.fn(async () => {
+      insertText: vi.fn(async (text) => {
+        if (!dropText) composerText += compactText(text);
         events.push('typed-text');
       }),
       evaluate: vi.fn(async (expression) => {
         assertEvaluableExpression(expression);
-        if (expression.includes('const expectedText =')) {
-          settlePolls += 1;
-          const result = settle
-            ? settle(settlePolls)
-            : { ok: true, length: 0 };
-          if (settle && result?.ok) events.push('text-settled');
-          return result;
+        if (expression.includes('focus-end-unavailable')) {
+          events.push('focus-end');
+          return modelInsertion ? { ok: true } : { ok: false, reason: 'focus-end-unavailable' };
         }
-        if (expression.includes('insertSegments')) {
-          if (!modelInsertion) return { ok: false };
+        if (expression.includes("'@chip'")) {
+          return { ok: true, text: composerText };
+        }
+        if (expression.includes('accepted !== false')) {
+          if (!dropText) composerText += compactText(expressionArgument(expression));
           events.push('model-text');
           return { ok: true, via: 'insertSegments' };
         }
@@ -236,76 +256,62 @@ describe('jimeng-agent/canvas-dom — rich mention preparation', () => {
     };
   }
 
-  it('anchors the caret before every mention when the composer model is unavailable', async () => {
+  it('appends prompt text with the composer model and binds mentions afterwards', async () => {
     const events = [];
-    const mentions = ['图片1', '视频1'];
-    const page = createFillPromptPage({ modelInsertion: false, events, mentions });
+    const page = createFillPromptPage({ events, mentions: ['图片1', '视频1'] });
 
     await fillCanvasPrompt(page, '前@图片1中@视频1后', assets);
 
     expect(events).toEqual([
-      'caret-at-end',
-      'typed-text',
-      'caret-at-end',
-      'mention:图片1',
-      'caret-at-end',
-      'typed-text',
-      'caret-at-end',
-      'mention:视频1',
-      'caret-at-end',
-      'typed-text',
-    ]);
-  });
-
-  it('leaves the caret to the composer model when model insertion is available', async () => {
-    const events = [];
-    const mentions = ['图片1', '视频1'];
-    const page = createFillPromptPage({ modelInsertion: true, events, mentions });
-
-    await fillCanvasPrompt(page, '前@图片1中@视频1后', assets);
-
-    expect(events).toEqual([
+      'focus-end',
       'model-text',
       'mention:图片1',
+      'focus-end',
       'model-text',
       'mention:视频1',
+      'focus-end',
       'model-text',
     ]);
     expect(page.insertText).not.toHaveBeenCalled();
   });
 
-  // A mention bound before its preceding text lands drops or reorders that text.
-  it('binds each mention only after the inserted text settled in the editor', async () => {
+  // Without the composer model the editor owns the caret, so it is anchored
+  // explicitly before every insertion or mentions land mid-prompt.
+  it('anchors the caret before every insertion when the composer model is unavailable', async () => {
     const events = [];
-    const mentions = ['图片1'];
     const page = createFillPromptPage({
-      modelInsertion: true,
+      modelInsertion: false,
       events,
-      mentions,
-      settle: (polls) => (polls >= 3 ? { ok: true, length: 80 } : { ok: false, length: 0 }),
+      mentions: ['图片1', '视频1'],
     });
 
-    await fillCanvasPrompt(page, '前@图片1后', assets);
+    await fillCanvasPrompt(page, '前@图片1中@视频1后', assets);
 
     expect(events).toEqual([
-      'model-text',
-      'text-settled',
+      'focus-end',
+      'caret-at-end',
+      'typed-text',
+      'caret-at-end',
       'mention:图片1',
-      'model-text',
-      'text-settled',
+      'focus-end',
+      'caret-at-end',
+      'typed-text',
+      'caret-at-end',
+      'mention:视频1',
+      'focus-end',
+      'caret-at-end',
+      'typed-text',
     ]);
   });
 
-  it('fails the prompt phase when inserted text never reaches the editor', async () => {
+  it('fails the prompt phase when a segment never reaches the composer document', async () => {
     let now = 1_000;
     vi.spyOn(Date, 'now').mockImplementation(() => now);
     const events = [];
-    const mentions = ['图片1'];
     const page = createFillPromptPage({
-      modelInsertion: true,
       events,
-      mentions,
-      settle: () => ({ ok: false, length: 0 }),
+      mentions: ['图片1'],
+      dropText: true,
     });
     page.sleep = vi.fn(async (seconds) => {
       now += Math.round(seconds * 1000);
@@ -313,9 +319,9 @@ describe('jimeng-agent/canvas-dom — rich mention preparation', () => {
 
     await expect(fillCanvasPrompt(page, '前@图片1后', assets)).rejects.toMatchObject({
       phase: 'prompt',
-      message: expect.stringContaining('never reached the editor'),
+      message: expect.stringContaining('did not append to the composer'),
     });
-    expect(events).toEqual(['model-text']);
+    expect(events).toEqual(['focus-end', 'model-text']);
   });
 
   // Consecutive submissions must not replace the stop control with a mistaken send click.
@@ -491,6 +497,7 @@ describe('jimeng-agent/canvas-dom — preparation scenarios', () => {
   }
 
   function createPreparationPage(canonical, preparedAssets) {
+    let composerText = '';
     let uploadedCount = 0;
     const uploadedFilenames = [];
     const richMentionLabels = [];
@@ -504,7 +511,10 @@ describe('jimeng-agent/canvas-dom — preparation scenarios', () => {
           mentionMenuOpen = true;
         } else if (selector.includes('jimeng-canvas-mention-candidate-')) {
           const mention = canonical.mentions[richMentionLabels.length];
-          if (mention) richMentionLabels.push(mention.label);
+          if (mention) {
+            richMentionLabels.push(mention.label);
+            composerText += '@chip';
+          }
           mentionMenuOpen = false;
         }
         return { ok: true };
@@ -517,13 +527,20 @@ describe('jimeng-agent/canvas-dom — preparation scenarios', () => {
       }),
       sleep: vi.fn(async () => undefined),
       nativeKeyPress: vi.fn(async () => undefined),
-      insertText: vi.fn(async () => undefined),
+      insertText: vi.fn(async (text) => {
+        composerText += compactText(text);
+      }),
       evaluate: vi.fn(async (expression) => {
         if (typeof expression === 'function') {
           return canvasUrl;
         }
         assertEvaluableExpression(expression);
-        if (expression.includes('const expectedText =')) return { ok: true, length: 0 }; // prompt text settled
+        if (expression.includes('focus-end-unavailable')) return { ok: true };
+        if (expression.includes("'@chip'")) return { ok: true, text: composerText };
+        if (expression.includes('accepted !== false')) {
+          composerText += compactText(expressionArgument(expression));
+          return { ok: true, via: 'insertSegments' };
+        }
         if (expression.includes("reason: 'materializer-not-ready'")) {
           return {
             ok: true,

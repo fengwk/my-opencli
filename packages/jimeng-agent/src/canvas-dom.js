@@ -1433,44 +1433,64 @@ async function waitForCanvasPromptText(page, text, timeoutMs = 6_000) {
   const deadline = Date.now() + timeoutMs;
   let last = null;
   while (Date.now() < deadline) {
-    last = await page.evaluate(`(() => {
-      ${buildCanvasLocatorScript()}
-      const expectedText = ${JSON.stringify(expectedText)};
-      const editor = findCanvasPromptEditor();
-      if (!editor) return { ok: false, reason: 'editor-not-found' };
-      const text = (editor.textContent || '').replace(/[\\u00a0\\u200b\\s]+/g, '');
-      return {
-        // A mention may only bind after its preceding text reached the editor.
-        // Final order is verified by the content checkpoint instead, which
-        // tolerates editor-added trailing nodes.
-        ok: text.includes(expectedText),
-        atEnd: text.endsWith(expectedText),
-        length: text.length,
-        head: text.slice(0, 120),
-        tail: text.slice(-120),
-      };
-    })()`).catch((error) => ({ ok: false, reason: describeError(error) }));
-    if (last?.ok) return;
+    last = await readCanvasComposerText(page);
+    if (last?.ok && last.text.endsWith(expectedText)) return;
     await page.sleep(0.12);
   }
+  last = await readCanvasComposerText(page).catch(() => last);
   throw phaseError(
     'prompt',
-    `Canvas prompt segment never reached the editor (chars=${last?.length ?? 'unknown'}, expected=${JSON.stringify(expectedText.slice(-40))}, editorHead=${JSON.stringify(last?.head ?? '')}, editorTail=${JSON.stringify(last?.tail ?? '')}${last?.reason ? `, reason=${last.reason}` : ''})`,
-    'No generation was submitted. The composer text insertion stalled; retry the run.',
+    `Canvas prompt segment did not append to the composer (chars=${last?.text?.length ?? 'unknown'}, expectedTail=${JSON.stringify(expectedText.slice(-40))}, composerTail=${JSON.stringify(String(last?.text || '').slice(-80))}${last?.reason ? `, reason=${last.reason}` : ''})`,
+    'No generation was submitted. The composer rejected the prompt text; retry the run.',
   );
+}
+
+/**
+ * Composer model helpers. `focusEnd` is the editor's own "focus at end"
+ * command, so appending never depends on where the last DOM caret landed.
+ */
+async function focusCanvasComposerEnd(page) {
+  return page.evaluate(`(() => {
+    ${buildCanvasModelLocatorScript()}
+    const target = findCanvasComposerModel()?.composerRef?.current;
+    if (typeof target?.focusEnd !== 'function') return { ok: false, reason: 'focus-end-unavailable' };
+    target.focusEnd();
+    return { ok: true };
+  })()`).catch((error) => ({ ok: false, reason: describeError(error) }));
+}
+
+/**
+ * Read the composer document (not the DOM) as whitespace-free text, with every
+ * chip collapsed to `@chip`. The model document is what the canvas submits, so
+ * it is immune to rendering artifacts that confuse DOM text matching.
+ */
+async function readCanvasComposerText(page) {
+  return page.evaluate(`(() => {
+    ${buildCanvasModelLocatorScript()}
+    const target = findCanvasComposerModel()?.composerRef?.current;
+    if (typeof target?.getDocument !== 'function') return { ok: false, reason: 'document-unavailable' };
+    const parts = target.getDocument()?.parts || [];
+    const text = parts.map((part) => (
+      typeof part?.text === 'string' ? part.text : '@chip'
+    )).join('');
+    return { ok: true, text: text.replace(/[\\u00a0\\u200b\\s]+/g, '') };
+  })()`).catch((error) => ({ ok: false, reason: describeError(error) }));
 }
 
 async function insertCanvasPromptText(page, text) {
   if (!text) return '';
-  const inserted = await page.evaluate(`((promptText) => {
-    ${buildCanvasModelLocatorScript()}
-    const model = findCanvasComposerModel();
-    if (model?.composerRef?.current?.insertSegments) {
-      model.composerRef.current.insertSegments([{ type: 'text', text: promptText }]);
-      return { ok: true, via: 'insertSegments' };
-    }
-    return { ok: false };
-  })(${JSON.stringify(text)})`);
+  const focus = await focusCanvasComposerEnd(page);
+  const inserted = focus?.ok
+    ? await page.evaluate(`((promptText) => {
+      ${buildCanvasModelLocatorScript()}
+      const model = findCanvasComposerModel();
+      if (model?.composerRef?.current?.insertSegments) {
+        const accepted = model.composerRef.current.insertSegments([{ type: 'text', text: promptText }]);
+        return { ok: accepted !== false, via: 'insertSegments' };
+      }
+      return { ok: false };
+    })(${JSON.stringify(text)})`)
+    : { ok: false, reason: focus?.reason };
   if (inserted?.ok) return COMPOSER_MODEL_INSERTION;
 
   const caret = await placeCanvasPromptCaretAtEnd(page);
@@ -1809,7 +1829,10 @@ async function insertCanvasRichMention(page, asset, expectedCount) {
     const appended = last.count === expectedCount
       && last.count === before.count + 1
       && canvasMentionTextMatchesVariant(last.labels[last.labels.length - 1], asset.label);
-    if (appended && !last.menuVisible) return last;
+    if (appended && !last.menuVisible) {
+      const document = await readCanvasComposerText(page);
+      if (document?.ok && document.text.endsWith('@chip')) return last;
+    }
     if (appended && last.menuVisible && !escaped) {
       escaped = true;
       await page.nativeKeyPress('Escape').catch(() => null);
