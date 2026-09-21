@@ -6,7 +6,25 @@
  *   - main thread pure white / empty
  *   - /c/{id} has zero message nodes after settle
  *   - WS only emits conversation-update/reply, no turn stream
+ *   - in-thread red banner: "Something went wrong while generating the response"
  */
+
+export const PAGE_ERRORISH_RE = /something went wrong|出错了|无法加载|try again|重新加载|unable to load|network error/i;
+export const GENERATION_FAILED_RE = /something went wrong while generating the response|生成回复时出错|生成响应时出错/i;
+
+/**
+ * Classify visible ChatGPT main-thread text in Node so tests can pin the
+ * generation-failed banner without driving a browser.
+ * @param {string} mainText
+ * @returns {{ errorish: boolean, generationFailed: boolean }}
+ */
+export function classifyChatMainText(mainText) {
+  const text = String(mainText || '');
+  return {
+    errorish: PAGE_ERRORISH_RE.test(text),
+    generationFailed: GENERATION_FAILED_RE.test(text),
+  };
+}
 
 /**
  * @param {object} page
@@ -16,6 +34,7 @@
  *   messages: number,
  *   mainLen: number,
  *   errorish: boolean,
+ *   generationFailed: boolean,
  *   onConversation: boolean,
  *   blankThread: boolean,
  *   broken: boolean,
@@ -31,29 +50,33 @@ export async function probeChatSurface(page) {
     const main = document.querySelector('main') || document.body;
     const mainText = ((main && (main.innerText || main.textContent)) || '').trim();
     const mainLen = mainText.length;
-    const errorish = /something went wrong|出错了|无法加载|try again|重新加载|unable to load|network error/i.test(mainText);
     const onConversation = /\\/c\\/[A-Za-z0-9-]+/.test(url);
     // Composer-only shell on an existing conversation = broken or still hydrating.
     const blankThread = onConversation && messages === 0 && mainLen < 120;
     const generating = !!document.querySelector('[data-testid="stop-button"]');
-    return { url, composer, messages, mainLen, errorish, onConversation, blankThread, generating };
+    return { url, composer, messages, mainLen, mainText: mainText.slice(0, 8000), onConversation, blankThread, generating };
   })()`).catch(() => ({
     url: '',
     composer: false,
     messages: 0,
     mainLen: 0,
+    mainText: '',
     errorish: true,
+    generationFailed: false,
     onConversation: false,
     blankThread: true,
     generating: false,
   }));
 
+  const flags = classifyChatMainText(state.mainText);
+  const errorish = !!(state.errorish || flags.errorish);
+  const generationFailed = !!(state.generationFailed || flags.generationFailed);
   const broken = !!(
-    state.errorish
+    errorish
     || !state.composer
     || state.blankThread
   );
-  return { ...state, generating: !!state.generating, broken };
+  return { ...state, errorish, generationFailed, generating: !!state.generating, broken };
 }
 
 /**

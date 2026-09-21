@@ -25,7 +25,7 @@ export const STREAM_DEFAULTS = {
 /**
  * @param {object} page OpenCLI IPage
  * @param {import('./stream-collector.js').StreamCollector} collector
- * @param {{ timeoutMs: number, textSettleMs?: number, noProgressMs?: number, pollMs?: number, graceMs?: number, pendingImageMaxQuietMs?: number, imageSettleMs?: number, abortPromise?: Promise<never> }} opts
+ * @param {{ timeoutMs: number, textSettleMs?: number, noProgressMs?: number, pollMs?: number, graceMs?: number, pendingImageMaxQuietMs?: number, imageSettleMs?: number, abortPromise?: Promise<never>, checkPage?: () => Promise<void> }} opts
  */
 export async function waitForProtocolStream(page, collector, opts) {
   const timeoutMs = opts.timeoutMs;
@@ -75,6 +75,9 @@ export async function waitForProtocolStream(page, collector, opts) {
 
   while (Date.now() - start < timeoutMs) {
     const n = await drainOnce();
+    if (typeof opts.checkPage === 'function') {
+      await opts.checkPage();
+    }
     if (verbose && n > 0) {
       console.error(
         `[chatgpt-agent] ws frames+=${n} totalFrames=${collector.frameCount} `
