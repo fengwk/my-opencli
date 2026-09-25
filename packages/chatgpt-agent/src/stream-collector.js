@@ -9,7 +9,18 @@
 export const FILE_REF_STATUS_IN_PROGRESS = 'in_progress';
 export const FILE_REF_STATUS_READY = ['finished_successfully', 'finished_partial_completion'];
 
+/**
+ * Fail-closed codes for direct HTTP-SSE ingestion (see sse-stream.js): a turn
+ * whose captured stream is incomplete or undecodable must abort, never return
+ * silently partial output. The command layer maps them to actionable errors.
+ */
+export const SSE_CAPTURE_INCOMPLETE = 'SSE_CAPTURE_INCOMPLETE';
+export const SSE_CAPTURE_UNSUPPORTED = 'SSE_CAPTURE_UNSUPPORTED';
+
 const MAX_BUFFERED_ENVELOPES = 500;
+const MAX_BUFFERED_SSE_EVENTS = 500;
+/** Byte budget for events held until the conversation id is known (see _bufferDirectSseEvent). */
+const MAX_BUFFERED_SSE_CHARS = 4 << 20;
 const MAX_UNASSOCIATED_EVENTS = 100;
 const MAX_TURN_MAP_ENTRIES = 100;
 
@@ -52,6 +63,9 @@ export class StreamCollector {
 
     /** Buffered items received in guarded mode before binding conversationId */
     this.bufferedEnvelopes = [];
+    /** Buffered own-POST SSE events (direct HTTP capture) received before binding conversationId */
+    this.bufferedDirectSseEvents = [];
+    this.bufferedDirectSseChars = 0;
     /** Map of turnId -> conversationId (bounded) */
     this.turnConversationMap = new Map();
     /** Global bounded FIFO array of pending events before turn association is learned */
@@ -91,6 +105,18 @@ export class StreamCollector {
         // ignore per-item errors
       }
     }
+
+    const bufferedSse = this.bufferedDirectSseEvents;
+    this.bufferedDirectSseEvents = [];
+    this.bufferedDirectSseChars = 0;
+    for (const entry of bufferedSse) {
+      try {
+        this._recordProgress(entry.now);
+        this.ingestSseEvent(entry.sseEvent, entry.now);
+      } catch {
+        // ignore per-item errors
+      }
+    }
   }
 
   _recordProgress(now) {
@@ -123,6 +149,26 @@ export class StreamCollector {
       this.bufferedEnvelopes.shift();
     }
     this.bufferedEnvelopes.push({ envelope, now });
+  }
+
+  /**
+   * Hold one own-POST SSE event until the conversation id is known. Unlike the
+   * account-level WS buffer, dropping the start of our own turn stream would
+   * silently truncate the answer, so overflow fails closed.
+   */
+  _bufferDirectSseEvent(sseEvent, now) {
+    const chars = this.bufferedDirectSseChars + String(sseEvent.data || '').length;
+    if (this.bufferedDirectSseEvents.length >= MAX_BUFFERED_SSE_EVENTS || chars > MAX_BUFFERED_SSE_CHARS) {
+      const err = new Error(
+        'SSE_CAPTURE_INCOMPLETE: own HTTP stream produced more events before the conversation id '
+        + 'was known than can be buffered',
+      );
+      err.code = SSE_CAPTURE_INCOMPLETE;
+      err.hint = 'The turn response was discarded to avoid returning a truncated answer. Retry the ask.';
+      throw err;
+    }
+    this.bufferedDirectSseChars = chars;
+    this.bufferedDirectSseEvents.push({ sseEvent, now });
   }
 
   _bufferUnassociatedEvent(entry) {
@@ -261,6 +307,32 @@ export class StreamCollector {
         : (typeof inner?.metadata?.tool_invoked === 'boolean' ? inner.metadata.tool_invoked : null);
       if (typeof ti === 'boolean') this.toolInvoked = ti;
     }
+  }
+
+  /**
+   * Ingest one SSE event captured directly from our own conversation POST
+   * (page.startSseCapture), i.e. not wrapped in a WebSocket envelope.
+   *
+   * A guarded collector cannot attribute early events on a new chat until the
+   * conversation id is known, so those events are held (bounded) and replayed
+   * by bindConversationId. The capture is filtered to our own POST, so an
+   * explicit id inside the stream is authoritative binding evidence.
+   */
+  ingestDirectSseEvent(sseEvent, now = Date.now()) {
+    const data = sseEvent && sseEvent.data;
+    if (typeof data !== 'string' || !data) return;
+
+    if (this.guarded && !this.expectedConversationId) {
+      const explicitId = extractConversationIdFromSseParsed(parseJsonObject(data));
+      if (!explicitId) {
+        this._bufferDirectSseEvent(sseEvent, now);
+        return;
+      }
+      this.bindConversationId(explicitId);
+    }
+
+    this._recordProgress(now);
+    this.ingestSseEvent(sseEvent, now);
   }
 
   _ingestGuardedEnvelope(item, now) {
@@ -741,7 +813,20 @@ export function extractConversationIdFromSseParsed(parsed) {
   }
   if (parsed.message && parsed.message.conversation_id) return String(parsed.message.conversation_id);
   if (parsed.metadata && parsed.metadata.conversation_id) return String(parsed.metadata.conversation_id);
+  // Mirrors extractConversationIdFromEnvelope: live streams also nest the
+  // conversation object itself (e.g. a conversation-created event).
+  if (parsed.conversation && parsed.conversation.id) return String(parsed.conversation.id);
   return null;
+}
+
+/** JSON object or null — keeps non-object/unparsable payloads out of id extraction. */
+function parseJsonObject(text) {
+  try {
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 function applyProtocolTextState(collector, event, now) {

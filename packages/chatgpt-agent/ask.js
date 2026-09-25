@@ -1,7 +1,8 @@
 /**
  * chatgpt-agent ask — protocol-stream turn against ChatGPT web.
  *
- * Flow: boot session → ensure idle → startWsCapture → send → wait protocol end → resolve → return
+ * Flow: boot session → ensure idle → arm HTTP-SSE + WS capture → send →
+ * wait protocol end → resolve → return
  * On failure: stop generation and recover the shell so the next turn can submit.
  * No DOM content fallback. DOM only for composer send (and optional download probe).
  */
@@ -22,7 +23,12 @@ import {
   sendChatGPTMessage,
   startNewChat,
 } from './src/host-chatgpt.js';
-import { StreamCollector } from './src/stream-collector.js';
+import {
+  SSE_CAPTURE_INCOMPLETE,
+  SSE_CAPTURE_UNSUPPORTED,
+  StreamCollector,
+} from './src/stream-collector.js';
+import { CHATGPT_CONVERSATION_SSE_URL, SseCaptureStream } from './src/sse-stream.js';
 import { waitForProtocolStream } from './src/wait-stream.js';
 import { hasReturnableArtifacts, resolveArtifacts } from './src/resolve.js';
 import {
@@ -51,6 +57,52 @@ const DEFAULT_TIMEOUT_SEC = 1200;
  * webSocketCreated, so URL-filtered capture silently drops their frames.
  */
 const WS_PATTERN = '';
+/**
+ * Arm only our own conversation POST. The extension's pattern is a substring
+ * filter, so /backend-api/f/conversation/prepare also matches; the SSE reader
+ * re-checks the URL exactly before trusting any byte as turn output.
+ */
+const SSE_PATTERN = CHATGPT_CONVERSATION_SSE_URL;
+
+const SSE_CAPTURE_ARM_HINT = 'Update both the forked OpenCLI CLI and Browser Bridge extension to the release that '
+  + 'streams HTTP text/event-stream bodies, then reload the extension and retry.';
+
+/**
+ * Arm the turn's two non-invasive captures before the send: the HTTP stream is
+ * the turn's authoritative transport, WebSockets stay armed for images/files.
+ * Callers own the disarm (ask's finally stops both), so an arming failure after
+ * a partial arm still leaves the tab clean and aborts before the prompt is sent.
+ */
+async function armTurnCaptures(page) {
+  if (typeof page.startSseCapture !== 'function' || typeof page.readSseCapture !== 'function') {
+    throw new CommandExecutionError(
+      `${SSE_CAPTURE_UNSUPPORTED}: page.startSseCapture/readSseCapture is not available`,
+      SSE_CAPTURE_ARM_HINT,
+    );
+  }
+  if (typeof page.startWsCapture !== 'function') {
+    throw new CommandExecutionError(
+      'WS_CAPTURE_UNSUPPORTED: page.startWsCapture is not available',
+      'Use the forked OpenCLI CLI + Browser Bridge extension with ws-capture support.',
+    );
+  }
+
+  const wsArmed = await page.startWsCapture(WS_PATTERN);
+  if (!wsArmed) {
+    throw new CommandExecutionError(
+      'WS_CAPTURE_UNSUPPORTED: Browser Bridge extension does not support ws-capture-start',
+      'Load the forked extension from OpenCLI/extension-package and reload it, then retry.',
+    );
+  }
+
+  const sseArmed = await page.startSseCapture(SSE_PATTERN);
+  if (!sseArmed) {
+    throw new CommandExecutionError(
+      `${SSE_CAPTURE_UNSUPPORTED}: Browser Bridge extension does not support sse-capture-start`,
+      SSE_CAPTURE_ARM_HINT,
+    );
+  }
+}
 
 async function waitForConversationId(page, timeoutSeconds = 45) {
   const start = Date.now();
@@ -309,27 +361,16 @@ export const askCommand = cli({
     // Snapshot visible images before send (official image.js pattern).
     const beforeImageUrls = await snapshotVisibleImageUrls(page);
 
-    // --- Arm WS capture BEFORE send ---
-    if (typeof page.startWsCapture !== 'function') {
-      throw new CommandExecutionError(
-        'WS_CAPTURE_UNSUPPORTED: page.startWsCapture is not available',
-        'Use the forked OpenCLI CLI + Browser Bridge extension with ws-capture support.',
-      );
-    }
-    const armed = await page.startWsCapture(WS_PATTERN);
-    if (!armed) {
-      throw new CommandExecutionError(
-        'WS_CAPTURE_UNSUPPORTED: Browser Bridge extension does not support ws-capture-start',
-        'Load the forked extension from OpenCLI/extension-package and reload it, then retry.',
-      );
-    }
-
-    // Always disarm capture after the turn so the tab lease does not keep
-    // buffering WebSocket frames between commands (bounded ring, but still
-    // holds requestId maps and keeps hasActiveNetworkCapture true).
+    // Always disarm both captures after the turn so the tab lease does not keep
+    // buffering frames/chunks between commands (bounded rings, but they still
+    // hold requestId maps and keep hasActiveNetworkCapture true).
     // On failure, also stop generation and recover the shell so the next ask can submit.
     let turnSucceeded = false;
+    let promptSent = false;
     try {
+      // --- Arm HTTP-stream + WS capture BEFORE send ---
+      await armTurnCaptures(page);
+
       // Brief settle so Network.enable is live before the page opens stream sockets.
       await page.sleep(0.3);
 
@@ -338,6 +379,7 @@ export const askCommand = cli({
         guarded: true,
         conversationId: initialConversationId || null,
       });
+      const sseStream = new SseCaptureStream(collector);
       const t0 = Date.now();
 
       // --- Send ---
@@ -348,6 +390,7 @@ export const askCommand = cli({
           `Open ${CHATGPT_URL} in the automation window and verify the composer is ready.`,
         );
       }
+      promptSent = true;
 
       // Conversation id may appear via URL and/or stream payloads.
       const urlWaitBudget = Math.min(45, timeoutSec);
@@ -380,6 +423,7 @@ export const askCommand = cli({
           timeoutMs: wsBudgetMs,
           noProgressMs: wsNoProgressMs,
           abortPromise: bindingFailurePromise,
+          sse: sseStream,
           isPageBusy: async () => {
             const surface = await probeSurface();
             return !!(surface && surface.generating);
@@ -398,7 +442,7 @@ export const askCommand = cli({
         if (err && err.code === 'STUCK_NO_WS_PROGRESS') {
           throw new CommandExecutionError(
             err.message,
-            'WS capture armed before send but no frames arrived. Check Browser Bridge extension, '
+            'WS/HTTP-stream capture was armed before send but nothing arrived. Check Browser Bridge extension, '
             + 'login state, and that ChatGPT is actually streaming on this tab.',
           );
         }
@@ -407,6 +451,11 @@ export const askCommand = cli({
             err.message,
             'ChatGPT failed while generating the response (often a transient gateway error). Retry the ask.',
           );
+        }
+        // A captured HTTP stream that is incomplete or undecodable already
+        // discarded itself; never let a partial answer look successful.
+        if (err && (err.code === SSE_CAPTURE_INCOMPLETE || err.code === SSE_CAPTURE_UNSUPPORTED)) {
+          throw new CommandExecutionError(err.message, err.hint || SSE_CAPTURE_ARM_HINT);
         }
         throw err;
       }
@@ -417,6 +466,18 @@ export const askCommand = cli({
         throw bindingErr;
       }
 
+      // Our own HTTP stream started but never reported its terminal event, so
+      // the turn response is missing its tail: a quiet stream cannot be
+      // distinguished from a truncated one, and partial output must never be
+      // returned as a successful answer. This is reached at the user timeout.
+      if (sseStream.isOpen()) {
+        throw new CommandExecutionError(
+          `${SSE_CAPTURE_INCOMPLETE}: the turn response did not report completion before the wait ended`,
+          `reason=${waitResult.reason}; capture ${sseStream.describe()}. The partial response was discarded; `
+          + 're-run with a higher --timeout or check the connection and retry.',
+        );
+      }
+
       const { conversationId, conversationUrl } = resolveResultConversation(urlInfo, collector.conversationId);
 
       // --- Package protocol artifacts only (no extra backend HTTP) ---
@@ -424,7 +485,9 @@ export const askCommand = cli({
       artifacts = enrichFilesFromText(artifacts);
 
       // A timeout is only fatal when protocol resolution produced no actual
-      // text/file/image output. Preserve partial artifacts instead of discarding them.
+      // text/file/image output. Preserve partial artifacts instead of discarding
+      // them — the legacy WebSocket-only path, since an own HTTP stream that
+      // started without terminating failed closed above.
       if (waitResult.reason === 'wait-timeout' && !hasReturnableArtifacts(artifacts)) {
         const partial = (collector.text || '').trim();
         throw new TimeoutError(
@@ -442,7 +505,8 @@ export const askCommand = cli({
           + `sources=${(artifacts.sources || []).length} `
           + `files=${(artifacts.files || []).length} `
           + `images=${(artifacts.images || []).length} `
-          + `frames=${collector.frameCount} events=${collector.eventCount}`,
+          + `frames=${collector.frameCount} events=${collector.eventCount} `
+          + `${sseStream.describe()}`,
         );
       }
 
@@ -543,16 +607,22 @@ export const askCommand = cli({
         sources: serializeJson(artifacts.sources || []),
         downloads: serializeJson(downloads),
         uploads: serializeJson(uploads),
-        source: 'ws',
+        // Which transport actually delivered this turn's turn stream.
+        source: sseStream.eventCount > 0 ? 'sse' : 'ws',
         reason: waitResult.reason,
       }];
       turnSucceeded = true;
       return result;
     } finally {
+      if (typeof page.stopSseCapture === 'function') {
+        await page.stopSseCapture().catch(() => null);
+      }
       if (typeof page.stopWsCapture === 'function') {
         await page.stopWsCapture().catch(() => null);
       }
-      if (!turnSucceeded) {
+      // Recover only after a prompt was actually submitted: an arm failure
+      // before send left the shell untouched and must not be "recovered".
+      if (!turnSucceeded && promptSent) {
         await recoverChatSurfaceAfterFailure(page, {
           session,
           hardReset: bootConversation,

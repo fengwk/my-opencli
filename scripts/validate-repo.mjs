@@ -300,10 +300,6 @@ function validateManifestAndPackages() {
       typeof entry.opencli === 'string' && entry.opencli.trim() ? entry.opencli.trim() : null;
     if (!entryOpencli) {
       fail(`Plugin "${name}": entry.opencli must be a nonempty string`);
-    } else if (rootOpencli && entryOpencli !== rootOpencli) {
-      fail(
-        `Plugin "${name}": entry.opencli "${entryOpencli}" !== root opencli "${rootOpencli}"`,
-      );
     } else {
       ok(`Plugin "${name}": opencli=${entryOpencli}`);
     }

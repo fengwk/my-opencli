@@ -1,10 +1,10 @@
 {
   "name": "opencli-plugin-chatgpt-agent",
-  "version": "0.1.53",
+  "version": "0.1.54",
   "private": true,
   "type": "module",
-  "description": "Protocol-stream ChatGPT agent for OpenCLI (WS text/files/images + human-like upload/download)",
+  "description": "Protocol-stream ChatGPT agent for OpenCLI (HTTP SSE + WS text/files/images and uploads/downloads)",
   "peerDependencies": {
-    "@jackwener/opencli": ">=1.8.7"
+    "@jackwener/opencli": ">=1.8.8-fengwk.2"
   }
 }

@@ -17,7 +17,9 @@ export async function stopChatGPTGeneration(page) {
   if (!page || typeof page.evaluate !== 'function') return false;
   try {
     const clicked = await page.evaluate(`(() => {
-      const byTestId = document.querySelector('[data-testid="stop-button"]');
+      const byTestId = document.querySelector(
+        '[data-testid="stop-button"], button[aria-label="Stop"], button[aria-label="Stop streaming"], button[aria-label="停止生成"], button[aria-label="停止"]',
+      );
       if (byTestId instanceof HTMLElement) {
         byTestId.click();
         return true;
@@ -51,7 +53,9 @@ export async function isChatGPTGenerating(page) {
   if (!page || typeof page.evaluate !== 'function') return false;
   try {
     const generating = await page.evaluate(`(() => {
-      if (document.querySelector('[data-testid="stop-button"]')) return true;
+      if (document.querySelector(
+        '[data-testid="stop-button"], button[aria-label="Stop"], button[aria-label="Stop streaming"], button[aria-label="停止生成"], button[aria-label="停止"]',
+      )) return true;
       const controls = Array.from(document.querySelectorAll('button, [role="button"], [aria-label]'));
       for (const control of controls) {
         const label = control.getAttribute('aria-label') || '';

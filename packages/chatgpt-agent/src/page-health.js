@@ -89,7 +89,9 @@ export async function probeChatSurface(page) {
     const onConversation = /\\/c\\/[A-Za-z0-9-]+/.test(url);
     // Composer-only shell on an existing conversation = broken or still hydrating.
     const blankThread = onConversation && messages === 0 && mainLen < 120;
-    const generating = !!document.querySelector('[data-testid="stop-button"]');
+    const generating = !!document.querySelector(
+      '[data-testid="stop-button"], button[aria-label="Stop"], button[aria-label="Stop streaming"], button[aria-label="停止生成"], button[aria-label="停止"]',
+    );
     return {
       url,
       composer,

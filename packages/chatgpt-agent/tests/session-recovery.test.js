@@ -49,6 +49,26 @@ describe('session-recovery', () => {
     expect(page.evaluate).toHaveBeenCalledOnce();
   });
 
+  // Recovery must click the current aria-labelled Stop control, not just the old test id.
+  it('clicks the current Stop button during recovery', async () => {
+    class Element {
+      click = vi.fn();
+    }
+    const stop = new Element();
+    const page = {
+      evaluate: vi.fn(async (script) => (
+        Function('document', 'HTMLElement', `return ${script}`)({
+          querySelector: (selector) => (
+            selector.includes('button[aria-label="Stop"]') ? stop : null
+          ),
+        }, Element)
+      )),
+    };
+
+    await expect(stopChatGPTGeneration(page)).resolves.toBe(true);
+    expect(stop.click).toHaveBeenCalledOnce();
+  });
+
   // Ensure we wait for generation, then stop once the budget is exhausted.
   it('ensureNotGenerating waits then stops a stuck generation', async () => {
     const page = fakePage({
@@ -321,6 +341,20 @@ describe('session-recovery', () => {
     expect(startNewChat).toHaveBeenCalledWith(page);
     expect(result.reset).toBe(true);
     expect(result.generating).toBe(false);
+  });
+
+  it('recognizes the current Stop button while a turn is streaming', async () => {
+    const page = {
+      evaluate: vi.fn(async (script) => (
+        Function('document', `return ${script}`)({
+          querySelector: (selector) => (
+            selector.includes('button[aria-label="Stop"]') ? { aria: 'Stop' } : null
+          ),
+          querySelectorAll: () => [],
+        })
+      )),
+    };
+    await expect(isChatGPTGenerating(page)).resolves.toBe(true);
   });
 
   it('isChatGPTGenerating returns false when evaluate fails', async () => {

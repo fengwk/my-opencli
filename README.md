@@ -7,7 +7,7 @@ Personal OpenCLI plugins, installed via the official plugin mechanism.
 | Name | Path | Description |
 |------|------|-------------|
 | `utils` | `packages/utils` | Host-Chrome utilities; `opencli utils scrape` fetches pages in the background by default with my-mcp HTML/markdown cleaning |
-| `chatgpt-agent` | `packages/chatgpt-agent` | Protocol-stream ChatGPT agent (WS text/files/images, sequential upload, DOM file download, official-style image export) |
+| `chatgpt-agent` | `packages/chatgpt-agent` | Protocol-stream ChatGPT agent (HTTP-stream text/sources + WS image/file messages, sequential upload, DOM file download, official-style image export) |
 | `gemini-agent` | `packages/gemini-agent` | Protocol-stream Gemini agent (StreamGenerate text/images, sequential upload, native generated-image download) |
 | `jimeng-agent` | `packages/jimeng-agent` | Jimeng Agent video drafts on Generate and AI Canvas (checkpointed prepare/`--submit`, exact resource correlation, status search, official download) |
 
@@ -18,8 +18,10 @@ These plugins **require an OpenCLI fork**, not stock upstream alone:
 | Component | Minimum | Current verified release | Why |
 |-----------|---------|--------------------------|-----|
 | Node.js | **`>=20.18.1`** | `24.14.0` | Matches OpenCLI and Cheerio runtime engines |
-| CLI (`@jackwener/opencli`) | **`>=1.8.7`** | package `1.8.7-fengwk.11` (git tag `fork-v1.8.7-fengwk.11`) | Browser window/session controls, network/frame APIs, WS capture, hardened file input, `Arg.repeatable` |
-| Browser Bridge / Extension | **`>=1.0.32`** | paired Extension **`1.0.32`** | Browser/frame/CDP/WS capture, tab-scoped downloads, and ephemeral warm-tab reuse must match the CLI |
+| CLI (`@jackwener/opencli`) | **`>=1.8.7`** (shared baseline) | package `1.8.7-fengwk.11` (git tag `fork-v1.8.7-fengwk.11`) | Browser window/session controls, network/frame APIs, WS capture, hardened file input, `Arg.repeatable` |
+| Browser Bridge / Extension | **`>=1.0.32`** (shared baseline) | paired Extension **`1.0.32`** | Browser/frame/CDP/WS capture, tab-scoped downloads, and ephemeral warm-tab reuse must match the CLI |
+
+`chatgpt-agent ask` additionally requires local fork CLI `1.8.8-fengwk.2` and paired Extension `1.0.35` for HTTP SSE capture. This pair has not been published as a fork Release. Other plugins retain the shared baseline; each plugin's manifest entry declares its own minimum.
 
 Minimum ranges are the compatibility floor; the verified columns name the paired fork Release that has been published and checked. Package version (`1.8.7-fengwk.11`) and git tag (`fork-v1.8.7-fengwk.11`) are related but not the same string — do not treat the package version as a tag name.
 
@@ -209,6 +211,6 @@ Release process (maintainers):
 
 ## Relation to OpenCLI fork
 
-Core runtime changes (WS capture, setFileInput harden, `repeatable` args) live in the OpenCLI **fork**.
+Core runtime changes (WS capture, HTTP SSE stream capture, setFileInput harden, `repeatable` args) live in the OpenCLI **fork**.
 
 This repo only holds **adapter plugins** that should stay out of upstream `clis/` when possible.

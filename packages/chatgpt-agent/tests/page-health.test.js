@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import { classifyChatMainText, probeChatSurface } from '../src/page-health.js';
 
-function evaluatedPage(mainText, closest = () => null) {
+function evaluatedPage(mainText, closest = () => null, stopButton = false) {
   const main = { innerText: mainText };
   const document = {
     body: main,
     querySelector: (selector) => {
+      if (selector.includes('button[aria-label="Stop"]')) return stopButton ? {} : null;
       if (selector.includes('#prompt-textarea')) return {};
       if (selector === 'main') return main;
       return null;
@@ -55,6 +56,13 @@ describe('classifyChatMainText', () => {
 });
 
 describe('probeChatSurface', () => {
+  // The current UI uses aria-label="Stop" rather than data-testid="stop-button".
+  it('recognizes an active turn without the old test id', async () => {
+    const surface = await probeChatSurface(evaluatedPage('回答生成中', () => null, true));
+    expect(surface.generating).toBe(true);
+    expect(surface.broken).toBe(false);
+  });
+
   it('classifies generationFailed from the page main text', async () => {
     const page = {
       evaluate: vi.fn(async () => ({
