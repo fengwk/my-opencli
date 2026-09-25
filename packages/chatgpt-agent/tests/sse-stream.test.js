@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { SSE_CAPTURE_UNSUPPORTED, StreamCollector } from '../src/stream-collector.js';
+import { SSE_CAPTURE_INCOMPLETE, SSE_CAPTURE_UNSUPPORTED, StreamCollector } from '../src/stream-collector.js';
 import {
   CHATGPT_CONVERSATION_SSE_URL,
   SseCaptureStream,
@@ -278,6 +278,117 @@ describe('SseCaptureStream byte→event decoding', () => {
 });
 
 describe('SseCaptureStream fail-closed integrity', () => {
+  // CDP can report a canceled network request after the terminal event was
+  // captured; that cannot invalidate the already complete response.
+  it('accepts a network failure after [DONE] for the same request', () => {
+    const collector = new StreamCollector({ guarded: true, conversationId: CONVERSATION_ID });
+    const sse = new SseCaptureStream(collector);
+    const done = sseChunk(Buffer.from(
+      `data: ${JSON.stringify({ p: '/message/content/parts/0', o: 'append', v: '完整回答' })}\n\n`
+      + 'data: [DONE]\n\n',
+    ));
+    const failed = {
+      kind: 'sse-error',
+      url: CHATGPT_CONVERSATION_SSE_URL,
+      requestId: done.requestId,
+      error: 'stream failed: net::ERR_ABORTED',
+    };
+    expect(() => sse.ingestRead({ chunks: [done, failed], dropped: 0 })).not.toThrow();
+    expect(collector.text).toBe('完整回答');
+    expect(sse.doneSeen).toBe(true);
+  });
+
+  // A late loadingFailed may arrive in a later read, after a complete reply
+  // was already parsed; it must not retroactively turn that reply into failure.
+  it('completes the wait loop when Chrome cancels a request after its [DONE]', async () => {
+    const collector = new StreamCollector({ guarded: true, conversationId: CONVERSATION_ID });
+    const sse = new SseCaptureStream(collector);
+    const body = sseChunk(Buffer.from(
+      `data: ${JSON.stringify({ p: '/message/content/parts/0', o: 'append', v: '完整回答' })}\n\n`
+      + 'data: [DONE]\n\n',
+    ));
+    const page = sseOnlyPage([
+      body,
+      { kind: 'sse-error', url: body.url, requestId: body.requestId, error: 'stream canceled' },
+    ]);
+    const result = await waitForProtocolStream(page, collector, immediateWaitOptions({
+      sse, textSettleMs: 15, pollMs: 1,
+    }));
+    expect(result).toEqual({ reason: 'protocol-complete', text: '完整回答' });
+  });
+
+  // One completed request cannot excuse a failed second request at the same
+  // endpoint, or a missing request id that cannot be correlated safely.
+  it('rejects network failures that cannot be matched to a completed request', () => {
+    for (const requestId of ['req-other', '']) {
+      const sse = new SseCaptureStream(new StreamCollector({ guarded: true }));
+      sse.ingestRead({ chunks: [sseChunk(Buffer.from('data: [DONE]\n\n'))], dropped: 0 });
+      expect(() => sse.ingestRead({
+        chunks: [{
+          kind: 'sse-error',
+          url: CHATGPT_CONVERSATION_SSE_URL,
+          requestId,
+          error: 'stream failed: net::ERR_ABORTED',
+        }],
+        dropped: 0,
+      })).toThrow(/SSE_CAPTURE_INCOMPLETE/);
+    }
+  });
+
+  // A failed CDP arm is not a network shutdown: it must never be excused by
+  // another event, even if the same request id appears with [DONE].
+  it('does not suppress a browser capture error after [DONE]', () => {
+    const sse = new SseCaptureStream(new StreamCollector({ guarded: true }));
+    const done = sseChunk(Buffer.from('data: [DONE]\n\n'));
+    sse.ingestRead({ chunks: [done], dropped: 0 });
+    expect(() => sse.ingestRead({
+      chunks: [{
+        kind: 'sse-error',
+        url: done.url,
+        requestId: done.requestId,
+        error: 'Network.streamResourceContent was not found',
+      }],
+      dropped: 0,
+    })).toThrow(/SSE_CAPTURE_UNSUPPORTED/);
+  });
+
+  // A failed network stream before its own terminal marker remains incomplete
+  // even when the page happens to have rendered the full-looking answer.
+  it('rejects a network failure before [DONE] without claiming Chrome is unsupported', () => {
+    const sse = new SseCaptureStream(new StreamCollector({ guarded: true }));
+    const chunk = sseChunk(Buffer.from('data: {"type":"message_stream_complete"}\n\n'));
+    sse.ingestRead({ chunks: [chunk], dropped: 0 });
+    try {
+      sse.ingestRead({
+        chunks: [{
+          kind: 'sse-error',
+          url: CHATGPT_CONVERSATION_SSE_URL,
+          requestId: chunk.requestId,
+          error: 'stream failed: net::ERR_ABORTED',
+        }],
+        dropped: 0,
+      });
+      expect.unreachable('An unterminated network stream must fail');
+    } catch (err) {
+      expect(err.code).toBe(SSE_CAPTURE_INCOMPLETE);
+      expect(`${err.message} ${err.hint}`).not.toContain('net::ERR_ABORTED');
+    }
+  });
+
+  // A dropped chunk invalidates the response even if the surviving bytes end
+  // in [DONE] and Chrome subsequently reports a network failure.
+  it('still rejects dropped bytes when a completed request is canceled', () => {
+    const sse = new SseCaptureStream(new StreamCollector({ guarded: true }));
+    const done = sseChunk(Buffer.from('data: [DONE]\n\n'));
+    expect(() => sse.ingestRead({
+      chunks: [
+        done,
+        { kind: 'sse-error', url: done.url, requestId: done.requestId, error: 'stream failed: net::ERR_ABORTED' },
+      ],
+      dropped: 1,
+    })).toThrow(/SSE_CAPTURE_INCOMPLETE/);
+  });
+
   const cases = [
     // Evicted chunks mean the answer is missing a middle slice.
     ['dropped chunks', () => ({ chunks: [], dropped: 3 }), /SSE_CAPTURE_INCOMPLETE: 3 captured/],

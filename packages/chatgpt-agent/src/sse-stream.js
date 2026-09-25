@@ -231,9 +231,24 @@ export class SseCaptureStream {
       if (chunk.url && !this.isOwnConversationUrl(chunk.url)) {
         return; // Unrelated stream (e.g. /prepare) — never fail this turn for it.
       }
+      const requestId = String(chunk.requestId || '');
+      const networkFailure = /^stream failed(?::|$)/.test(String(chunk.error || ''))
+        || chunk.error === 'stream canceled';
+      // The terminal event completes this request's response body. Chrome can
+      // still cancel the network request afterward; that cannot truncate bytes
+      // already captured. Never use another request's [DONE] as evidence.
+      if (networkFailure && requestId && this.requests.get(requestId)?.doneSeen) {
+        return;
+      }
       // CDP's errorText can quote the request URL (query strings/tokens included),
       // so it is kept for internal diagnosis only and never printed or returned.
       this.captureErrorText = String(chunk.error ?? '').slice(0, 4096);
+      if (networkFailure) {
+        throw incomplete(
+          'the HTTP response ended before its terminal event was captured',
+          'The turn response is incomplete and was discarded. Check the connection before retrying.',
+        );
+      }
       throw captureError(
         SSE_CAPTURE_UNSUPPORTED,
         'SSE_CAPTURE_UNSUPPORTED: the browser could not stream this response body',
@@ -278,13 +293,14 @@ export class SseCaptureStream {
     this.sawOwnStream = true;
 
     for (const frame of parseSseFrames(state, text)) {
-      this._ingestFrame(frame);
+      this._ingestFrame(frame, state);
     }
   }
 
-  _ingestFrame(frame) {
+  _ingestFrame(frame, state) {
     this.eventCount += 1;
     if (String(frame.data).trim() === '[DONE]') {
+      state.doneSeen = true;
       this.doneSeen = true;
     }
     this.collector.ingestDirectSseEvent(frame);
@@ -306,6 +322,7 @@ export class SseCaptureStream {
         dataLines: [],
         dataChars: 0,
         eventName: '',
+        doneSeen: false,
       };
       this.requests.set(key, state);
     }
