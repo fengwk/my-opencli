@@ -43,9 +43,14 @@ export function classifyChatMainText(mainText) {
 export async function probeChatSurface(page) {
   const state = await page.evaluate(`(() => {
     const url = location.href || '';
-    const composer = !!(
-      document.querySelector('#prompt-textarea, [data-testid="prompt-textarea"], .ProseMirror[contenteditable="true"], [contenteditable="true"][role="textbox"]')
-    );
+    const composer = Array.from(document.querySelectorAll(
+      '#prompt-textarea, [data-testid="prompt-textarea"], .ProseMirror[contenteditable="true"], [contenteditable="true"][role="textbox"]',
+    )).some((node) => {
+      const style = window.getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return style.display !== 'none' && style.visibility !== 'hidden'
+        && rect.width > 0 && rect.height > 0;
+    });
     const messages = document.querySelectorAll('[data-message-author-role]').length;
     const main = document.querySelector('main') || document.body;
     const mainText = ((main && (main.innerText || main.textContent)) || '').trim();

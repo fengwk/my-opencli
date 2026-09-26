@@ -62,7 +62,9 @@ const { askCommand } = await import('../ask.js');
 describe('chatgpt-agent/ask recovery execution flow', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    ensureHealthyChatSurface.mockResolvedValue({ recovered: false });
+    ensureChatGPTComposer.mockReset().mockResolvedValue({});
+    ensureChatGPTLogin.mockReset().mockResolvedValue({});
+    ensureHealthyChatSurface.mockReset().mockResolvedValue({ recovered: false });
     ensureIdleSurfaceWithRecovery.mockResolvedValue({ ok: true });
     recoverChatSurfaceAfterFailure.mockResolvedValue({});
     snapshotVisibleImageUrls.mockResolvedValue([]);
@@ -82,6 +84,91 @@ describe('chatgpt-agent/ask recovery execution flow', () => {
       stopSseCapture: vi.fn(async () => {}),
     };
   }
+
+  // A slow /new hydration must reach the bounded page-health recovery before
+  // the composer is required. No prompt is sent until the surface is ready.
+  it('waits for pre-send recovery before requiring the composer', async () => {
+    const page = fakePage();
+    let ready = false;
+    ensureChatGPTComposer.mockImplementation(async () => {
+      if (!ready) throw new Error('composer not mounted');
+    });
+    ensureHealthyChatSurface.mockImplementationOnce(async () => {
+      ready = true;
+      return { recovered: false, after: { broken: false, composer: true } };
+    });
+
+    await askCommand.func(page, { prompt: 'hello' });
+
+    expect(ensureHealthyChatSurface).toHaveBeenCalledTimes(1);
+    expect(ensureChatGPTComposer).toHaveBeenCalled();
+    expect(startNewChat).toHaveBeenCalledTimes(1);
+    expect(sendChatGPTMessage).toHaveBeenCalledTimes(1);
+  });
+
+  // Reloading an unready /new page is allowed once before submission; prompt
+  // submission itself must still happen exactly once.
+  it('submits once after a single successful pre-send reload', async () => {
+    const page = fakePage();
+    ensureHealthyChatSurface.mockImplementationOnce(async (_page, { reload }) => {
+      await reload();
+      return { recovered: true, after: { broken: false, composer: true } };
+    });
+
+    await askCommand.func(page, { prompt: 'hello' });
+
+    expect(startNewChat).toHaveBeenCalledTimes(2);
+    expect(sendChatGPTMessage).toHaveBeenCalledTimes(1);
+  });
+
+  // A page without a composer after one reload must fail before capture/send;
+  // retrying the navigation again would add load without helping a challenge.
+  it('fails before send after a single unsuccessful page reload', async () => {
+    const page = fakePage();
+    ensureHealthyChatSurface.mockImplementationOnce(async (_page, { reload }) => {
+      await reload();
+      return {
+        recovered: true,
+        after: { broken: true, composer: false, errorish: false, onConversation: false },
+      };
+    });
+
+    const error = await askCommand.func(page, { prompt: 'hello' }).then(() => null, (err) => err);
+
+    expect(error.message).toMatch(/PAGE_BROKEN/);
+    expect(`${error.message} ${error.hint || ''}`).not.toContain('hello');
+    expect(startNewChat).toHaveBeenCalledTimes(2);
+    expect(sendChatGPTMessage).not.toHaveBeenCalled();
+    expect(page.startSseCapture).not.toHaveBeenCalled();
+  });
+
+  // A real login gate is not a hydration problem: do not reload or send.
+  it('does not retry navigation or send if login is required', async () => {
+    const page = fakePage();
+    ensureChatGPTLogin.mockRejectedValueOnce(new Error('login required'));
+
+    await expect(askCommand.func(page, { prompt: 'hello' })).rejects.toThrow('login required');
+
+    expect(startNewChat).toHaveBeenCalledTimes(1);
+    expect(ensureHealthyChatSurface).not.toHaveBeenCalled();
+    expect(sendChatGPTMessage).not.toHaveBeenCalled();
+  });
+
+  // An idle-recovery hard reset can navigate away from the ready surface.
+  // Before sending, the composer must be checked again instead of trusting a
+  // successful idle result from an earlier page.
+  it('does not submit if idle recovery leaves the composer unavailable', async () => {
+    const page = fakePage();
+    ensureChatGPTComposer
+      .mockResolvedValueOnce({})
+      .mockRejectedValueOnce(new Error('composer unavailable after reset'));
+
+    await expect(askCommand.func(page, { prompt: 'hello' })).rejects.toThrow(
+      'composer unavailable after reset',
+    );
+    expect(sendChatGPTMessage).not.toHaveBeenCalled();
+    expect(page.startSseCapture).not.toHaveBeenCalled();
+  });
 
   /**
    * One own-POST HTTP-stream chunk carrying an append patch plus the stream's

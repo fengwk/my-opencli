@@ -283,42 +283,28 @@ export const askCommand = cli({
         await startNewChat(page);
       }
       await ensureChatGPTLogin(page, 'chatgpt-agent ask requires a logged-in ChatGPT browser session.');
-      await ensureChatGPTComposer(
-        page,
-        'chatgpt-agent ask requires a visible composer. Open chatgpt.com and finish any interstitial.',
-      );
     };
 
     await bootConversation();
 
-    // Blank white thread / failed hydrate: reload once so the next send is not doomed.
+    // The /new route can still be hydrating when its first composer wait ends.
+    // Give it a bounded settle and at most one reload before requiring the
+    // composer; never submit a prompt during recovery.
     const health = await ensureHealthyChatSurface(page, {
       session,
-      reload: async () => {
-        if (session) {
-          await openChatGPTConversation(page, session);
-        } else {
-          await startNewChat(page);
-        }
-        await ensureChatGPTLogin(page, 'chatgpt-agent ask requires a logged-in ChatGPT browser session.');
-        await ensureChatGPTComposer(
-          page,
-          'chatgpt-agent ask requires a visible composer after recovery reload.',
-        );
-      },
+      reload: bootConversation,
     });
-    if (health.recovered && health.after?.broken) {
-      // One more hard navigation to session / new chat.
-      await bootConversation();
-      await page.sleep(2);
-      const retry = await probeChatSurface(page);
-      if (retry.broken) {
-        throw new CommandExecutionError(
-          'PAGE_BROKEN: ChatGPT thread shell is blank after reload',
-          'Open the automation tab, hard-refresh chatgpt.com, confirm the conversation loads, then retry.',
-        );
-      }
+    if (health.after?.broken) {
+      throw new CommandExecutionError(
+        'PAGE_BROKEN: ChatGPT composer or thread did not become ready before send',
+        `reloadAttempted=${!!health.recovered} composer=${!!health.after.composer} `
+          + `errorish=${!!health.after.errorish}. Inspect the automation tab's login state or interstitial before retrying.`,
+      );
     }
+    await ensureChatGPTComposer(
+      page,
+      'chatgpt-agent ask requires a visible composer. Open chatgpt.com and finish any interstitial.',
+    );
 
     // Previous failed turns may leave Thinking / stop-button active. Wait or stop
     // before sending; if still generating, perform hard recovery before giving up.
@@ -333,6 +319,12 @@ export const askCommand = cli({
         'Open the automation tab, stop generation or open chatgpt.com/new, then retry.',
       );
     }
+    // The idle recovery may have navigated again; revalidate before touching
+    // the composer or arming capture, with no automatic retry after a send.
+    await ensureChatGPTComposer(
+      page,
+      'chatgpt-agent ask requires a visible composer after idle recovery.',
+    );
 
     // Clear leftover composer text/attachments from a previous failed or partial turn
     // (official chatgpt image does the same via clearChatGPTDraft before upload).

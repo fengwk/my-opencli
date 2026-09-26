@@ -1,17 +1,24 @@
 import { describe, expect, it, vi } from 'vitest';
-import { classifyChatMainText, probeChatSurface } from '../src/page-health.js';
+import { classifyChatMainText, ensureHealthyChatSurface, probeChatSurface } from '../src/page-health.js';
 
-function evaluatedPage(mainText, closest = () => null, stopButton = false) {
+function evaluatedPage(mainText, closest = () => null, stopButton = false, composerVisible = true) {
   const main = { innerText: mainText };
+  const composer = {
+    getBoundingClientRect: () => ({
+      width: composerVisible ? 200 : 0,
+      height: composerVisible ? 32 : 0,
+    }),
+  };
+  const window = { getComputedStyle: () => ({ display: 'block', visibility: 'visible' }) };
   const document = {
     body: main,
     querySelector: (selector) => {
       if (selector.includes('button[aria-label="Stop"]')) return stopButton ? {} : null;
-      if (selector.includes('#prompt-textarea')) return {};
+      if (selector.includes('#prompt-textarea')) return composer;
       if (selector === 'main') return main;
       return null;
     },
-    querySelectorAll: () => [{}],
+    querySelectorAll: (selector) => selector.includes('#prompt-textarea') ? [composer] : [{}],
     createTreeWalker: () => {
       let current = {
         nodeValue: mainText,
@@ -29,7 +36,7 @@ function evaluatedPage(mainText, closest = () => null, stopButton = false) {
   const location = { href: 'https://chatgpt.com/c/conversation-id' };
   return {
     evaluate: vi.fn(async (script) => (
-      Function('document', 'location', `return ${script}`)(document, location)
+      Function('document', 'location', 'window', `return ${script}`)(document, location, window)
     )),
   };
 }
@@ -56,6 +63,14 @@ describe('classifyChatMainText', () => {
 });
 
 describe('probeChatSurface', () => {
+  // A mounted but zero-sized editor is not a usable composer; readiness must
+  // keep waiting instead of skipping the page-health recovery.
+  it('does not treat a hidden composer as ready', async () => {
+    const surface = await probeChatSurface(evaluatedPage('', () => null, false, false));
+    expect(surface.composer).toBe(false);
+    expect(surface.broken).toBe(true);
+  });
+
   // The current UI uses aria-label="Stop" rather than data-testid="stop-button".
   it('recognizes an active turn without the old test id', async () => {
     const surface = await probeChatSurface(evaluatedPage('回答生成中', () => null, true));
@@ -121,5 +136,50 @@ describe('probeChatSurface', () => {
     expect(surface.generationFailed).toBe(false);
     expect(surface.errorish).toBe(false);
     expect(surface.broken).toBe(false);
+  });
+});
+
+describe('ensureHealthyChatSurface', () => {
+  const snapshot = (composer) => ({
+    url: 'https://chatgpt.com/new',
+    composer,
+    messages: 0,
+    mainLen: 0,
+    mainText: '',
+    onConversation: false,
+    blankThread: false,
+    generating: false,
+  });
+
+  // Delayed hydration is not grounds for another navigation if the composer
+  // appears during the bounded settle window.
+  it('waits for a late composer without reloading', async () => {
+    const page = {
+      evaluate: vi.fn().mockResolvedValueOnce(snapshot(false)).mockResolvedValueOnce(snapshot(true)),
+      sleep: vi.fn(async () => {}),
+    };
+    const reload = vi.fn(async () => {});
+
+    const result = await ensureHealthyChatSurface(page, { reload, settleMs: 2000 });
+
+    expect(result.recovered).toBe(false);
+    expect(result.after.composer).toBe(true);
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  // A composer that never mounts gets only one pre-send reload; the caller
+  // remains responsible for failing closed without submitting a prompt.
+  it('reloads at most once when the composer stays unavailable', async () => {
+    const page = {
+      evaluate: vi.fn(async () => snapshot(false)),
+      sleep: vi.fn(async () => {}),
+    };
+    const reload = vi.fn(async () => {});
+
+    const result = await ensureHealthyChatSurface(page, { reload, settleMs: 2000 });
+
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(result.recovered).toBe(true);
+    expect(result.after.broken).toBe(true);
   });
 });
