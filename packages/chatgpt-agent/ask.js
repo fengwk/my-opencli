@@ -16,6 +16,7 @@ import {
   currentChatGPTUrl,
   ensureChatGPTComposer,
   ensureChatGPTLogin,
+  getChatGPTSendFailureState,
   openChatGPTConversation,
   parseChatGPTConversationId,
   requireNonEmptyPrompt,
@@ -377,9 +378,15 @@ export const askCommand = cli({
       // --- Send ---
       const sent = await sendChatGPTMessage(page, prompt);
       if (!sent) {
+        const state = await getChatGPTSendFailureState(page).catch(() => null);
+        const diagnostics = state
+          ? `composer=${!!state.composer} draftPresent=${!!state.draftPresent} `
+            + `composerForm=${!!state.composerForm} buttonPresent=${!!state.buttonPresent} `
+            + `buttonDisabled=${!!state.buttonDisabled}`
+          : 'sendDiagnostics=unavailable';
         throw new CommandExecutionError(
           'SEND_FAILED: could not fill/submit ChatGPT composer',
-          `Open ${CHATGPT_URL} in the automation window and verify the composer is ready.`,
+          `${diagnostics}. Open ${CHATGPT_URL} in the automation window and verify the composer is ready.`,
         );
       }
       promptSent = true;

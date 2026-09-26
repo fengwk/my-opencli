@@ -108,6 +108,7 @@ export const {
   currentChatGPTUrl,
   ensureChatGPTComposer,
   ensureChatGPTLogin,
+  getChatGPTSendFailureState,
   getChatGPTImageAssets,
   getChatGPTVisibleImageUrls,
   openChatGPTConversation,

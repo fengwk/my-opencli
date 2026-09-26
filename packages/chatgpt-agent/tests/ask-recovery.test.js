@@ -10,9 +10,11 @@ vi.mock('../src/session-recovery.js', () => ({
 
 const ensureChatGPTLogin = vi.fn();
 const ensureChatGPTComposer = vi.fn();
+const openChatGPTConversation = vi.fn();
 const startNewChat = vi.fn();
 const clearChatGPTDraft = vi.fn();
 const sendChatGPTMessage = vi.fn();
+const getChatGPTSendFailureState = vi.fn();
 const currentChatGPTUrl = vi.fn();
 
 vi.mock('../src/host-chatgpt.js', async (importOriginal) => {
@@ -21,9 +23,11 @@ vi.mock('../src/host-chatgpt.js', async (importOriginal) => {
     ...actual,
     ensureChatGPTLogin: (...args) => ensureChatGPTLogin(...args),
     ensureChatGPTComposer: (...args) => ensureChatGPTComposer(...args),
+    openChatGPTConversation: (...args) => openChatGPTConversation(...args),
     startNewChat: (...args) => startNewChat(...args),
     clearChatGPTDraft: (...args) => clearChatGPTDraft(...args),
     sendChatGPTMessage: (...args) => sendChatGPTMessage(...args),
+    getChatGPTSendFailureState: (...args) => getChatGPTSendFailureState(...args),
     currentChatGPTUrl: (...args) => currentChatGPTUrl(...args),
   };
 });
@@ -64,11 +68,19 @@ describe('chatgpt-agent/ask recovery execution flow', () => {
     vi.clearAllMocks();
     ensureChatGPTComposer.mockReset().mockResolvedValue({});
     ensureChatGPTLogin.mockReset().mockResolvedValue({});
+    openChatGPTConversation.mockReset().mockResolvedValue('6ab78552-6864-83ea-800b-0150d2129b79');
     ensureHealthyChatSurface.mockReset().mockResolvedValue({ recovered: false });
     ensureIdleSurfaceWithRecovery.mockResolvedValue({ ok: true });
     recoverChatSurfaceAfterFailure.mockResolvedValue({});
     snapshotVisibleImageUrls.mockResolvedValue([]);
     sendChatGPTMessage.mockResolvedValue(true);
+    getChatGPTSendFailureState.mockReset().mockResolvedValue({
+      composer: true,
+      draftPresent: true,
+      composerForm: true,
+      buttonPresent: true,
+      buttonDisabled: true,
+    });
     currentChatGPTUrl.mockResolvedValue('https://chatgpt.com/c/c-test-123');
     waitForProtocolStream.mockResolvedValue({ reason: 'stream-end' });
     hasReturnableArtifacts.mockReturnValue(true);
@@ -365,6 +377,29 @@ describe('chatgpt-agent/ask recovery execution flow', () => {
     expect(order).toEqual(['ws-arm', 'sse-arm', 'send', 'sse-stop', 'ws-stop']);
     expect(result[0].source).toBe('sse');
     expect(result[0].text).toBe('SSE 回答');
+  });
+
+  // A failed send must return only boolean UI diagnostics, never the draft,
+  // and must not attempt a second submission or post-send recovery.
+  it('reports safe composer diagnostics when a follow-up cannot be sent', async () => {
+    const page = fakePage();
+    sendChatGPTMessage.mockResolvedValueOnce(false);
+    const prompt = '不要在错误信息里泄露这个草稿';
+
+    const error = await askCommand.func(page, {
+      session: '6ab78552-6864-83ea-800b-0150d2129b79',
+      prompt,
+    }).then(() => null, (err) => err);
+
+    expect(error.message).toMatch(/SEND_FAILED/);
+    expect(error.hint).toMatch(/composer=true draftPresent=true composerForm=true/);
+    expect(error.hint).toMatch(/buttonPresent=true buttonDisabled=true/);
+    expect(`${error.message} ${error.hint}`).not.toContain(prompt);
+    expect(sendChatGPTMessage).toHaveBeenCalledTimes(1);
+    expect(getChatGPTSendFailureState).toHaveBeenCalledTimes(1);
+    expect(recoverChatSurfaceAfterFailure).not.toHaveBeenCalled();
+    expect(page.stopSseCapture).toHaveBeenCalledTimes(1);
+    expect(page.stopWsCapture).toHaveBeenCalledTimes(1);
   });
 
   // Without a new fork API the command must fail before the prompt is sent and
