@@ -91,13 +91,12 @@ const MAX_DURATION = MAX_REFERENCE_DURATION_SECONDS;
 
 /**
  * Map each allow-listed model version to its exact agentPrompt prefix.
- * Strings are copied verbatim from the product spec — including the
- * intentional ASCII '(' opening paren paired with the full-width '）'
- * closing paren. Touching these requires a product decision, not a refactor.
+ * Strings are copied verbatim from the product spec. The suffix supplies
+ * the separating comma before the generation instructions.
  */
 const MODEL_PREFIXES = Object.freeze({
-  'seedance2.0': '(必须使用 Seedance2.0 模型，**禁止使用 VIP 模型**，**禁止使用 Fast 模型**）',
-  'seedance2.0fast': '(必须使用 Seedance2.0 Fast 模型，**禁止使用 VIP 模型**）',
+  'seedance2.0': '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0`，绝对禁止使用 `seedance2.0_vip`',
+  'seedance2.0fast': '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0fast`，绝对禁止使用 `seedance2.0fast_vip`',
   'seedance2.0_vip': '(必须使用 Seedance2.0 VIP 模型）',
   'seedance2.0fast_vip': '(必须使用 Seedance2.0 Fast VIP 模型）',
   'seedance2.0mini': '(必须使用 Seedance2.0 Mini 模型）',

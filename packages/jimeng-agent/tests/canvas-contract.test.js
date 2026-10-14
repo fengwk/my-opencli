@@ -125,6 +125,19 @@ describe('jimeng-agent/canvas-contract — parseProjectIdFromHref', () => {
 });
 
 describe('jimeng-agent/canvas-contract — normalizeCanvasAskArgs', () => {
+  // Canvas must inherit the exact shared model header and preserve prompt framing.
+  it.each([
+    ['seedance2.0', '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0`，绝对禁止使用 `seedance2.0_vip`'],
+    ['seedance2.0fast', '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0fast`，绝对禁止使用 `seedance2.0fast_vip`'],
+  ])('uses the explicit %s model identifier in its Agent header', (modelVersion, prefix) => {
+    const result = normalizeCanvasAskArgs(validCanvasArgs({ model_version: modelVersion }));
+    expect(result.modelVersion).toBe(modelVersion);
+    expect(result.agentPrompt).toBe(
+      `${prefix}，你必须严格按照下面的提示词内容生成1个16:9的5s视频\n`
+      + `资产编号：${result.assetId}\n\n---\n\ntest prompt`,
+    );
+  });
+
   it('normalizes valid args for new canvas', () => {
     const result = normalizeCanvasAskArgs(validCanvasArgs());
     expect(result.canvasMode).toBe('new');
