@@ -91,18 +91,18 @@ const MAX_DURATION = MAX_REFERENCE_DURATION_SECONDS;
 
 /**
  * Map each allow-listed model version to its exact agentPrompt prefix.
- * Strings are copied verbatim from the product spec. The suffix supplies
- * the separating comma before the generation instructions.
+ * Strings are copied verbatim from the product spec. Model directives and
+ * generation instructions are separated by a blank line.
  */
 const MODEL_PREFIXES = Object.freeze({
-  'seedance2.0': '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0`，绝对禁止使用 `seedance2.0_vip`',
-  'seedance2.0fast': '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0fast`，绝对禁止使用 `seedance2.0fast_vip`',
+  'seedance2.0': '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0`，绝对禁止使用 `seedance2.0_vip` 或其它任何模型标识，模型标识必须设定为 `seedance2.0`',
+  'seedance2.0fast': '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0fast`，绝对禁止使用 `seedance2.0fast_vip` 或其它任何模型标识，模型标识必须设定为 `seedance2.0fast`',
   'seedance2.0_vip': '(必须使用 Seedance2.0 VIP 模型）',
   'seedance2.0fast_vip': '(必须使用 Seedance2.0 Fast VIP 模型）',
   'seedance2.0mini': '(必须使用 Seedance2.0 Mini 模型）',
 });
 
-const AGENT_SUFFIX_TEMPLATE = '，你必须严格按照下面的提示词内容生成1个{ratio}的{duration}s视频';
+const AGENT_SUFFIX_TEMPLATE = '你必须严格按照下面的提示词内容生成1个{ratio}的{duration}s视频';
 
 /**
  * Chinese resource-kind characters used as @-placeholder prefixes in the
@@ -631,16 +631,19 @@ export function createAssetId(randomBytes = (n) => crypto.randomBytes(n)) {
 /**
  * Assemble the exact `agentPrompt` string the browser layer types into Jimeng:
  *
- *   <modelPrefix>，你必须严格按照下面的提示词内容生成1个<ratio>的<duration>s视频
+ *   <modelPrefix>
+ *   <BLANK LINE>
+ *   你必须严格按照下面的提示词内容生成1个<ratio>的<duration>s视频
+ *   <BLANK LINE>
  *   资产编号：<16-hex>
  *   <BLANK LINE>
  *   ---
  *   <BLANK LINE>
  *   <original prompt if non-empty>
  *
- * Header and asset-id are adjacent (single LF, no blank line). The `---`
- * separator plus surrounding blank lines isolate free-form prompt text for
- * later hash-based search/download. No trailing newline.
+ * Model, generation instructions and asset-id are separated by blank lines.
+ * The `---` separator plus surrounding blank lines isolate free-form prompt
+ * text for later hash-based search/download. No trailing newline.
  */
 function assembleAgentPrompt({ modelVersion, ratio, duration, prompt, assetId }) {
   const prefix = MODEL_PREFIXES[modelVersion];
@@ -648,7 +651,7 @@ function assembleAgentPrompt({ modelVersion, ratio, duration, prompt, assetId })
     .replace('{ratio}', ratio)
     .replace('{duration}', duration);
 
-  let text = `${prefix}${suffix}\n${ASSET_ID_LINE_PREFIX}${assetId}`;
+  let text = `${prefix}\n\n${suffix}\n\n${ASSET_ID_LINE_PREFIX}${assetId}`;
   if (prompt.length > 0) {
     text += `\n\n---\n\n${prompt}`;
   }

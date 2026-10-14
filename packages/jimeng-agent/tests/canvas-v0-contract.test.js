@@ -123,15 +123,15 @@ describe('jimeng-agent canvas-v0 ask contract', () => {
     duration: 5,
   };
 
-  // Legacy canvas must inherit the same model header without changing prompt framing.
+  // Legacy canvas must inherit the emphasized header and blank-line layout.
   it.each([
-    ['seedance2.0', '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0`，绝对禁止使用 `seedance2.0_vip`'],
-    ['seedance2.0fast', '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0fast`，绝对禁止使用 `seedance2.0fast_vip`'],
+    ['seedance2.0', '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0`，绝对禁止使用 `seedance2.0_vip` 或其它任何模型标识，模型标识必须设定为 `seedance2.0`'],
+    ['seedance2.0fast', '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0fast`，绝对禁止使用 `seedance2.0fast_vip` 或其它任何模型标识，模型标识必须设定为 `seedance2.0fast`'],
   ])('uses the explicit %s model identifier in its Agent header', (modelVersion, prefix) => {
     const canonical = normalizeCanvasV0AskArgs({ ...base, model_version: modelVersion });
     expect(canonical.modelVersion).toBe(modelVersion);
     expect(canonical.agentPrompt).toBe(
-      `${prefix}，你必须严格按照下面的提示词内容生成1个16:9的5s视频\n`
+      `${prefix}\n\n你必须严格按照下面的提示词内容生成1个16:9的5s视频\n\n`
       + `资产编号：${canonical.assetId}\n\n---\n\n${base.prompt}`,
     );
   });

@@ -9,6 +9,7 @@ import {
   evaluatePreInputControls,
   normalizePromptValidationLines,
 } from '../src/checkpoint.js';
+import { normalizeAskArgs } from '../src/contract.js';
 
 const assets = [
   { label: '图片1', filename: 'a.png' },
@@ -50,6 +51,49 @@ describe('jimeng-agent/checkpoint — content expectations', () => {
     expect(expectations.mentionLabels).toEqual(['图片1', '视频1']);
     expect(expectations.expectedLines).toEqual(normalizePromptValidationLines(prompt));
   });
+
+  // Canonical header spacing must survive rich mentions and remain fail-closed.
+  it.each(['seedance2.0', 'seedance2.0fast'])(
+    'validates the separated %s header and rejects missing blank lines',
+    (modelVersion) => {
+      const canonical = normalizeAskArgs({
+        workspace: '123',
+        ratio: '16:9',
+        model_version: modelVersion,
+        duration: 15,
+        image: ['a.png'],
+        prompt: '请以@图片1作为主角。',
+      });
+      const expectations = buildCheckpointExpectations(canonical.agentPrompt, canonical.assets);
+      expect(expectations.expectedLines.slice(1)).toEqual([
+        '',
+        '你必须严格按照下面的提示词内容生成1个16:9的15s视频',
+        '',
+        `资产编号：${canonical.assetId}`,
+        '',
+        '---',
+        '',
+        '请以图片1作为主角。',
+      ]);
+      const snapshot = {
+        surfaceReady: true,
+        referenceCount: 1,
+        mentionCount: 1,
+        observedMentionLabels: ['图片1'],
+        rawAt: false,
+        menuVisible: false,
+        editorLines: expectations.expectedLines,
+        editorTextNormalized: expectations.expectedLines.join(''),
+      };
+      expect(evaluateContentCheckpoint(snapshot, expectations).ok).toBe(true);
+      const collapsed = evaluateContentCheckpoint({
+        ...snapshot,
+        editorLines: snapshot.editorLines.filter((line) => line !== ''),
+      }, expectations);
+      expect(collapsed.ok).toBe(false);
+      expect(collapsed.failures).toEqual(['lineStructure']);
+    },
+  );
 });
 
 describe('jimeng-agent/checkpoint — content evaluation', () => {

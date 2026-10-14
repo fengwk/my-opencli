@@ -657,15 +657,16 @@ describe('jimeng-agent/contract — mention extraction', () => {
 });
 
 describe('jimeng-agent/contract — agentPrompt assembly', () => {
-  // Exact headers lock model identifiers while preserving the asset-id layout.
-  it('assembles seedance2.0 header with adjacent asset-id line and no user prompt', () => {
+  // Exact headers lock model identifiers and the blank-line-separated layout.
+  it('assembles seedance2.0 header with separated asset-id line and no user prompt', () => {
     const out = normalizeAskArgs(baseArgs({
       model_version: 'seedance2.0',
       prompt: '',
     }));
     expect(out.assetId).toMatch(/^[0-9a-f]{16}$/);
     expect(out.agentPrompt).toBe(
-      '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0`，绝对禁止使用 `seedance2.0_vip`，你必须严格按照下面的提示词内容生成1个16:9的5s视频\n'
+      '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0`，绝对禁止使用 `seedance2.0_vip` 或其它任何模型标识，模型标识必须设定为 `seedance2.0`\n\n'
+      + '你必须严格按照下面的提示词内容生成1个16:9的5s视频\n\n'
       + `资产编号：${out.assetId}`,
     );
   });
@@ -675,10 +676,11 @@ describe('jimeng-agent/contract — agentPrompt assembly', () => {
       model_version: 'seedance2.0fast',
     }));
     expect(out.agentPrompt.startsWith(
-      '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0fast`，绝对禁止使用 `seedance2.0fast_vip`，',
+      '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0fast`，绝对禁止使用 `seedance2.0fast_vip` 或其它任何模型标识，模型标识必须设定为 `seedance2.0fast`\n\n',
     )).toBe(true);
     expect(out.agentPrompt).toBe(
-      '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0fast`，绝对禁止使用 `seedance2.0fast_vip`，你必须严格按照下面的提示词内容生成1个16:9的5s视频\n'
+      '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0fast`，绝对禁止使用 `seedance2.0fast_vip` 或其它任何模型标识，模型标识必须设定为 `seedance2.0fast`\n\n'
+      + '你必须严格按照下面的提示词内容生成1个16:9的5s视频\n\n'
       + `资产编号：${out.assetId}`,
     );
   });
@@ -688,7 +690,8 @@ describe('jimeng-agent/contract — agentPrompt assembly', () => {
       model_version: 'seedance2.0_vip',
     }));
     expect(out.agentPrompt).toBe(
-      '(必须使用 Seedance2.0 VIP 模型），你必须严格按照下面的提示词内容生成1个16:9的5s视频\n'
+      '(必须使用 Seedance2.0 VIP 模型）\n\n'
+      + '你必须严格按照下面的提示词内容生成1个16:9的5s视频\n\n'
       + `资产编号：${out.assetId}`,
     );
   });
@@ -698,7 +701,8 @@ describe('jimeng-agent/contract — agentPrompt assembly', () => {
       model_version: 'seedance2.0fast_vip',
     }));
     expect(out.agentPrompt).toBe(
-      '(必须使用 Seedance2.0 Fast VIP 模型），你必须严格按照下面的提示词内容生成1个16:9的5s视频\n'
+      '(必须使用 Seedance2.0 Fast VIP 模型）\n\n'
+      + '你必须严格按照下面的提示词内容生成1个16:9的5s视频\n\n'
       + `资产编号：${out.assetId}`,
     );
   });
@@ -708,7 +712,8 @@ describe('jimeng-agent/contract — agentPrompt assembly', () => {
       model_version: 'seedance2.0mini',
     }));
     expect(out.agentPrompt).toBe(
-      '(必须使用 Seedance2.0 Mini 模型），你必须严格按照下面的提示词内容生成1个16:9的5s视频\n'
+      '(必须使用 Seedance2.0 Mini 模型）\n\n'
+      + '你必须严格按照下面的提示词内容生成1个16:9的5s视频\n\n'
       + `资产编号：${out.assetId}`,
     );
   });
@@ -720,7 +725,8 @@ describe('jimeng-agent/contract — agentPrompt assembly', () => {
       duration: 12,
     }));
     expect(out.agentPrompt).toBe(
-      '(必须使用 Seedance2.0 Mini 模型），你必须严格按照下面的提示词内容生成1个9:16的12s视频\n'
+      '(必须使用 Seedance2.0 Mini 模型）\n\n'
+      + '你必须严格按照下面的提示词内容生成1个9:16的12s视频\n\n'
       + `资产编号：${out.assetId}`,
     );
   });
@@ -730,7 +736,8 @@ describe('jimeng-agent/contract — agentPrompt assembly', () => {
       prompt: 'show a cat playing piano',
     }));
     expect(out.agentPrompt).toBe(
-      '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0`，绝对禁止使用 `seedance2.0_vip`，你必须严格按照下面的提示词内容生成1个16:9的5s视频\n'
+      '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0`，绝对禁止使用 `seedance2.0_vip` 或其它任何模型标识，模型标识必须设定为 `seedance2.0`\n\n'
+      + '你必须严格按照下面的提示词内容生成1个16:9的5s视频\n\n'
       + `资产编号：${out.assetId}\n\n`
       + '---\n\n'
       + 'show a cat playing piano',
@@ -741,10 +748,28 @@ describe('jimeng-agent/contract — agentPrompt assembly', () => {
   it('always keeps the asset-id line even when the prompt is empty', () => {
     const out = normalizeAskArgs(baseArgs({ prompt: '' }));
     expect(out.agentPrompt).toBe(
-      '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0`，绝对禁止使用 `seedance2.0_vip`，你必须严格按照下面的提示词内容生成1个16:9的5s视频\n'
+      '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0`，绝对禁止使用 `seedance2.0_vip` 或其它任何模型标识，模型标识必须设定为 `seedance2.0`\n\n'
+      + '你必须严格按照下面的提示词内容生成1个16:9的5s视频\n\n'
       + `资产编号：${out.assetId}`,
     );
     expect(out.agentPrompt.includes('---')).toBe(false);
+  });
+
+  // Cover the 15s header while preserving mention placeholders and body newlines.
+  it('separates the emphasized Fast header from a multiline 15s video prompt', () => {
+    const prompt = '请以@图片1作为主角。\n\n镜头保持稳定。';
+    const out = normalizeAskArgs(baseArgs({
+      model_version: 'seedance2.0fast',
+      duration: 15,
+      prompt,
+    }));
+    expect(out.agentPrompt).toBe(
+      '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0fast`，绝对禁止使用 `seedance2.0fast_vip` 或其它任何模型标识，模型标识必须设定为 `seedance2.0fast`\n\n'
+      + '你必须严格按照下面的提示词内容生成1个16:9的15s视频\n\n'
+      + `资产编号：${out.assetId}\n\n---\n\n${prompt}`,
+    );
+    expect(out.prompt).toBe(prompt);
+    expect(out.agentPrompt.endsWith('\n')).toBe(false);
   });
 
   // assetId is always generated by the CLI; never a user input flag.
