@@ -64,7 +64,7 @@ describe('resolvePreSendConversationId', () => {
     expect(cidUndefined).toBeNull();
   });
 
-  // Verifies that when session is explicitly provided, it parses the conversation ID from URL or session.
+  // An explicit session is authoritative only when the current page URL confirms the same ID.
   it('derives conversation ID from page URL when session is explicitly requested', async () => {
     const page = {
       evaluate: async () => 'https://chatgpt.com/c/6789abcd-1234-5678-90ab-cdef12345678',
@@ -73,15 +73,36 @@ describe('resolvePreSendConversationId', () => {
     expect(cid).toBe('6789abcd-1234-5678-90ab-cdef12345678');
   });
 
-  // Verifies that a raw session ID string is parsed even if page URL is not yet at /c/...
-  it('falls back to parsing session kwarg directly if page evaluation fails', async () => {
+  // A caller-supplied ID cannot replace evidence that the active tab loaded it.
+  it('fails closed when the page URL cannot be read', async () => {
     const page = {
       evaluate: async () => {
         throw new Error('CDP target detached');
       },
     };
-    const cid = await resolvePreSendConversationId(page, 'explicit-session-id');
-    expect(cid).toBe('explicit-session-id');
+    await expect(resolvePreSendConversationId(page, 'explicit-session-id'))
+      .rejects.toThrow(/SESSION_MISMATCH/);
+  });
+
+  // Redirects to a new chat or another thread must not receive a resumed prompt.
+  it.each([
+    'https://chatgpt.com/',
+    'https://chatgpt.com/new',
+    'https://chatgpt.com/c/different-session-id',
+    'https://example.com/c/explicit-session-id',
+  ])('rejects a resumed send on %s', async (url) => {
+    const page = { evaluate: async () => url };
+    await expect(resolvePreSendConversationId(page, 'explicit-session-id'))
+      .rejects.toThrow(/SESSION_MISMATCH/);
+  });
+
+  // Project conversation URLs and raw IDs identify the same native conversation.
+  it('accepts matching project conversation URLs', async () => {
+    const page = {
+      evaluate: async () => 'https://chatgpt.com/g/g-p-project/c/explicit-session-id',
+    };
+    await expect(resolvePreSendConversationId(page, 'https://chatgpt.com/c/explicit-session-id'))
+      .resolves.toBe('explicit-session-id');
   });
 });
 

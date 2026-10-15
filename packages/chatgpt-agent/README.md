@@ -40,6 +40,14 @@ non-invasively through CDP — the page's own `fetch`/XHR are never patched.
 - Conversation continuity is provided by `--session <conversationId>`, not by pinning a persistent tab. Serializing concurrent writes to the same conversation is the caller's responsibility.
 - Parallel file downloads require the paired extension's tab-scoped download wait (`>=1.0.31`).
 
+### Pre-send readiness and resume safety
+
+- Readiness supports both legacy message attributes and the current turn/search-unit DOM. A conversation must have a visible composer and at least one rendered message/turn marker; UI text length alone is not evidence of loaded history.
+- With `--session`, the active ChatGPT conversation ID must match the requested ID. An inaccessible conversation, a redirect to a new chat, or an unreadable URL never falls back to the supplied ID and never receives a prompt.
+- Hydration is polled every 500 ms for up to 15 seconds, with at most one page-health reload and another 15-second hydration window. These windows exclude navigation/transport time and are separate from the turn's `--timeout`.
+- The surface is checked again after idle recovery, before draft cleanup or uploads, and once more before capture/send. If still hydrating, each check gets one polling window without another reload. A final URL check guards redirects during capture setup.
+- `PAGE_BROKEN` includes message-marker count, main-text length, blank-thread, session-mismatch and unavailable-conversation flags, without echoing prompt/history text. Definite unavailable-conversation notices fail before sending; submission itself is never automatically retried.
+
 ## Requirements
 
 | Host | Minimum | Current verified release |

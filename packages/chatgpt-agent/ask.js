@@ -128,16 +128,30 @@ export async function resolvePreSendConversationId(page, session) {
   if (!normalizedSession) {
     return null;
   }
+  const expectedId = parseChatGPTConversationId(normalizedSession);
+  let actualId = null;
   try {
-    const currentUrl = await currentChatGPTUrl(page);
-    return parseChatGPTConversationId(currentUrl);
-  } catch {
-    try {
-      return parseChatGPTConversationId(normalizedSession);
-    } catch {
-      return normalizedSession.startsWith('http') ? null : normalizedSession;
-    }
+    actualId = parseChatGPTConversationId(await currentChatGPTUrl(page));
+  } catch { /* An unreadable or redirected page is not an authoritative binding. */ }
+  if (actualId !== expectedId) {
+    throw new CommandExecutionError(
+      'SESSION_MISMATCH: requested ChatGPT conversation is not active before send',
+      'Open the requested conversation in this browser profile and verify access before retrying. No prompt was sent.',
+    );
   }
+  return actualId;
+}
+
+function requireReadyChatSurface(surface, recovered = false) {
+  if (surface?.broken === false) return;
+  throw new CommandExecutionError(
+    'PAGE_BROKEN: ChatGPT composer or thread did not become ready before send',
+    `reloadAttempted=${!!recovered} composer=${!!surface?.composer} errorish=${!!surface?.errorish} `
+      + `messages=${surface?.messages ?? 'unknown'} mainLen=${surface?.mainLen ?? 'unknown'} `
+      + `blankThread=${!!surface?.blankThread} sessionMismatch=${!!surface?.sessionMismatch} `
+      + `conversationUnavailable=${!!surface?.conversationUnavailable}. `
+      + 'Verify the requested conversation is accessible in this browser profile and finish any login or interstitial before retrying.',
+  );
 }
 
 export function wireCollectorUrlBinding(collector, urlInfoPromise) {
@@ -288,20 +302,13 @@ export const askCommand = cli({
 
     await bootConversation();
 
-    // The /new route can still be hydrating when its first composer wait ends.
-    // Give it a bounded settle and at most one reload before requiring the
-    // composer; never submit a prompt during recovery.
+    // The composer can mount before resumed history. Wait for the requested
+    // route and rendered messages, with at most one reload before sending.
     const health = await ensureHealthyChatSurface(page, {
       session,
       reload: bootConversation,
     });
-    if (health.after?.broken) {
-      throw new CommandExecutionError(
-        'PAGE_BROKEN: ChatGPT composer or thread did not become ready before send',
-        `reloadAttempted=${!!health.recovered} composer=${!!health.after.composer} `
-          + `errorish=${!!health.after.errorish}. Inspect the automation tab's login state or interstitial before retrying.`,
-      );
-    }
+    requireReadyChatSurface(health.after, health.recovered);
     await ensureChatGPTComposer(
       page,
       'chatgpt-agent ask requires a visible composer. Open chatgpt.com and finish any interstitial.',
@@ -322,6 +329,8 @@ export const askCommand = cli({
     }
     // The idle recovery may have navigated again; revalidate before touching
     // the composer or arming capture, with no automatic retry after a send.
+    const postIdleHealth = await ensureHealthyChatSurface(page, { session, allowReload: false });
+    requireReadyChatSurface(postIdleHealth.after, health.recovered || preSendIdle.recovered);
     await ensureChatGPTComposer(
       page,
       'chatgpt-agent ask requires a visible composer after idle recovery.',
@@ -353,6 +362,15 @@ export const askCommand = cli({
 
     // Snapshot visible images before send (official image.js pattern).
     const beforeImageUrls = await snapshotVisibleImageUrls(page);
+
+    // Idle recovery or an upload can navigate away from the validated thread.
+    // Allow hydration, but never reload an attached draft or retry submission.
+    let finalSurface = await probeChatSurface(page, { session });
+    if (finalSurface.broken && !finalSurface.conversationUnavailable) {
+      const finalHealth = await ensureHealthyChatSurface(page, { session, allowReload: false });
+      finalSurface = finalHealth.after;
+    }
+    requireReadyChatSurface(finalSurface, health.recovered || preSendIdle.recovered);
 
     // Always disarm both captures after the turn so the tab lease does not keep
     // buffering frames/chunks between commands (bounded rings, but they still

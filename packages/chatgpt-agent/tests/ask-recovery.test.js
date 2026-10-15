@@ -69,7 +69,10 @@ describe('chatgpt-agent/ask recovery execution flow', () => {
     ensureChatGPTComposer.mockReset().mockResolvedValue({});
     ensureChatGPTLogin.mockReset().mockResolvedValue({});
     openChatGPTConversation.mockReset().mockResolvedValue('6ab78552-6864-83ea-800b-0150d2129b79');
-    ensureHealthyChatSurface.mockReset().mockResolvedValue({ recovered: false });
+    ensureHealthyChatSurface.mockReset().mockResolvedValue({
+      recovered: false, after: { broken: false, composer: true },
+    });
+    probeChatSurface.mockReset().mockResolvedValue({ broken: false, composer: true });
     ensureIdleSurfaceWithRecovery.mockResolvedValue({ ok: true });
     recoverChatSurfaceAfterFailure.mockResolvedValue({});
     snapshotVisibleImageUrls.mockResolvedValue([]);
@@ -112,7 +115,7 @@ describe('chatgpt-agent/ask recovery execution flow', () => {
 
     await askCommand.func(page, { prompt: 'hello' });
 
-    expect(ensureHealthyChatSurface).toHaveBeenCalledTimes(1);
+    expect(ensureHealthyChatSurface).toHaveBeenCalledTimes(2);
     expect(ensureChatGPTComposer).toHaveBeenCalled();
     expect(startNewChat).toHaveBeenCalledTimes(1);
     expect(sendChatGPTMessage).toHaveBeenCalledTimes(1);
@@ -152,6 +155,139 @@ describe('chatgpt-agent/ask recovery execution flow', () => {
     expect(startNewChat).toHaveBeenCalledTimes(2);
     expect(sendChatGPTMessage).not.toHaveBeenCalled();
     expect(page.startSseCapture).not.toHaveBeenCalled();
+  });
+
+  // The production signature must expose safe readiness diagnostics, not prompt text.
+  it('rejects a composer-only resumed thread with actionable diagnostics', async () => {
+    const page = fakePage();
+    ensureHealthyChatSurface.mockResolvedValueOnce({
+      recovered: true,
+      after: {
+        broken: true, composer: true, errorish: false,
+        messages: 0, mainLen: 40, blankThread: true,
+        sessionMismatch: false, conversationUnavailable: false,
+        mainText: 'PRIVATE-HISTORY',
+      },
+    });
+
+    const err = await askCommand.func(page, {
+      prompt: 'PRIVATE-PROMPT', session: 'explicit-session-id',
+    }).catch((error) => error);
+
+    expect(err.message).toMatch(/PAGE_BROKEN/);
+    expect(err.hint).toContain('messages=0 mainLen=40 blankThread=true');
+    expect(`${err.message} ${err.hint}`).not.toMatch(/PRIVATE/);
+    expect(clearChatGPTDraft).not.toHaveBeenCalled();
+    expect(sendChatGPTMessage).not.toHaveBeenCalled();
+    expect(page.startSseCapture).not.toHaveBeenCalled();
+    expect(recoverChatSurfaceAfterFailure).not.toHaveBeenCalled();
+  });
+
+  // A later navigation must not bypass the initial readiness check.
+  it('fails before draft cleanup, upload or capture if idle recovery lost the requested conversation', async () => {
+    const page = fakePage();
+    ensureIdleSurfaceWithRecovery.mockResolvedValueOnce({ ok: true, recovered: true });
+    const brokenSurface = {
+      broken: true, composer: true, errorish: false,
+      messages: 0, mainLen: 0, sessionMismatch: true,
+    };
+    probeChatSurface.mockResolvedValueOnce(brokenSurface);
+    ensureHealthyChatSurface
+      .mockResolvedValueOnce({ recovered: false, after: { broken: false } })
+      .mockResolvedValueOnce({ recovered: false, after: brokenSurface });
+
+    await expect(askCommand.func(page, {
+      prompt: 'Continue the session', session: 'explicit-session-id',
+    })).rejects.toThrow(/PAGE_BROKEN/);
+
+    expect(ensureHealthyChatSurface).toHaveBeenLastCalledWith(page, {
+      session: 'explicit-session-id', allowReload: false,
+    });
+    expect(clearChatGPTDraft).not.toHaveBeenCalled();
+    expect(snapshotVisibleImageUrls).not.toHaveBeenCalled();
+    expect(probeChatSurface).not.toHaveBeenCalled();
+    expect(sendChatGPTMessage).not.toHaveBeenCalled();
+    expect(page.startSseCapture).not.toHaveBeenCalled();
+  });
+
+  // A hard reset may expose its composer before history; defer draft edits until hydration settles.
+  it('waits for post-idle readiness before clearing the resumed draft', async () => {
+    const page = fakePage();
+    let ready = false;
+    ensureIdleSurfaceWithRecovery.mockResolvedValueOnce({ ok: true, recovered: true });
+    currentChatGPTUrl.mockResolvedValue('https://chatgpt.com/c/explicit-session-id');
+    ensureHealthyChatSurface
+      .mockResolvedValueOnce({ recovered: false, after: { broken: false } })
+      .mockImplementationOnce(async (_page, options) => {
+        expect(options).toEqual({ session: 'explicit-session-id', allowReload: false });
+        expect(clearChatGPTDraft).not.toHaveBeenCalled();
+        ready = true;
+        return { recovered: false, after: { broken: false } };
+      });
+    clearChatGPTDraft.mockImplementationOnce(async () => {
+      expect(ready).toBe(true);
+    });
+
+    await askCommand.func(page, {
+      prompt: '梳理当前方案的约束，并按实现优先级列出后续工作。', session: 'explicit-session-id',
+    });
+
+    expect(clearChatGPTDraft).toHaveBeenCalledTimes(1);
+    expect(sendChatGPTMessage).toHaveBeenCalledTimes(1);
+    expect(openChatGPTConversation).toHaveBeenCalledTimes(1);
+  });
+
+  // Slow post-recovery history can settle without reloading away an attached draft.
+  it('waits without reloading when the final resumed surface is still hydrating', async () => {
+    const page = fakePage();
+    probeChatSurface.mockResolvedValueOnce({ broken: true, composer: true, messages: 0 });
+    currentChatGPTUrl.mockResolvedValue('https://chatgpt.com/c/explicit-session-id');
+
+    await askCommand.func(page, { prompt: 'Continue the session', session: 'explicit-session-id' });
+
+    expect(ensureHealthyChatSurface).toHaveBeenLastCalledWith(page, {
+      session: 'explicit-session-id', allowReload: false,
+    });
+    expect(openChatGPTConversation).toHaveBeenCalledTimes(1);
+    expect(sendChatGPTMessage).toHaveBeenCalledTimes(1);
+  });
+
+  // A later redirect still fails closed, without another navigation that could discard staged files.
+  it('rejects a lost session after draft preparation and before capture', async () => {
+    const page = fakePage();
+    const brokenSurface = { broken: true, composer: true, messages: 0, sessionMismatch: true };
+    ensureHealthyChatSurface
+      .mockResolvedValueOnce({ recovered: false, after: { broken: false } })
+      .mockResolvedValueOnce({ recovered: false, after: { broken: false } })
+      .mockResolvedValueOnce({ recovered: false, after: brokenSurface });
+    probeChatSurface.mockResolvedValueOnce(brokenSurface);
+
+    await expect(askCommand.func(page, {
+      prompt: '梳理当前方案的约束，并按实现优先级列出后续工作。', session: 'explicit-session-id',
+    })).rejects.toThrow(/PAGE_BROKEN/);
+
+    expect(clearChatGPTDraft).toHaveBeenCalledTimes(1);
+    expect(ensureHealthyChatSurface).toHaveBeenLastCalledWith(page, {
+      session: 'explicit-session-id', allowReload: false,
+    });
+    expect(openChatGPTConversation).toHaveBeenCalledTimes(1);
+    expect(page.startSseCapture).not.toHaveBeenCalled();
+    expect(sendChatGPTMessage).not.toHaveBeenCalled();
+  });
+
+  // Even a redirect during capture arming must be caught before submission.
+  it('never falls back to the supplied session id after a last-moment redirect', async () => {
+    const page = fakePage();
+    currentChatGPTUrl.mockResolvedValueOnce('https://chatgpt.com/');
+
+    await expect(askCommand.func(page, {
+      prompt: 'Continue the session', session: 'explicit-session-id',
+    })).rejects.toThrow(/SESSION_MISMATCH/);
+
+    expect(sendChatGPTMessage).not.toHaveBeenCalled();
+    expect(page.stopSseCapture).toHaveBeenCalledTimes(1);
+    expect(page.stopWsCapture).toHaveBeenCalledTimes(1);
+    expect(recoverChatSurfaceAfterFailure).not.toHaveBeenCalled();
   });
 
   // A real login gate is not a hydration problem: do not reload or send.
@@ -246,7 +382,7 @@ describe('chatgpt-agent/ask recovery execution flow', () => {
 
   it('maps a generation-failed page check to an actionable command error', async () => {
     const page = fakePage();
-    probeChatSurface.mockResolvedValue({
+    probeChatSurface.mockResolvedValueOnce({ broken: false, composer: true }).mockResolvedValue({
       composer: true,
       broken: true,
       generationFailed: true,
@@ -384,6 +520,7 @@ describe('chatgpt-agent/ask recovery execution flow', () => {
   it('reports safe composer diagnostics when a follow-up cannot be sent', async () => {
     const page = fakePage();
     sendChatGPTMessage.mockResolvedValueOnce(false);
+    currentChatGPTUrl.mockResolvedValue('https://chatgpt.com/c/6ab78552-6864-83ea-800b-0150d2129b79');
     const prompt = '不要在错误信息里泄露这个草稿';
 
     const error = await askCommand.func(page, {
