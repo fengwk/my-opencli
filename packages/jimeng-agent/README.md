@@ -6,8 +6,9 @@ The `video` command:
 
 1. Clears leftover composer text and reference cards.
 2. Selects Agent mode.
-3. Opens the generation-preference panel by DOM structure.
-4. Enables Auto and selects the video radio when necessary.
+3. Opens the generation-preference panel when needed (the legacy 自动 dock can
+   use its existing fast path).
+4. Configures and verifies Auto/Video on the legacy or current 智能 panel.
 5. **Pre-input controls check** (Agent / Auto / Video) — before any upload/prompt.
 6. Uploads image / video / audio references one-by-one and confirms each card.
 7. Replaces `@图片N`, `@视频N`, and `@音频N` with Jimeng rich mentions.
@@ -431,12 +432,26 @@ the agent prompt, and returns it in the CLI result for later `status --search-ke
 
 - Surface ready
 - Agent mode selected
-- Auto preference enabled (read from the dock 自动 button when the panel is closed)
+- Auto preference enabled
 - Video preference selected
 
-Failure phase: `pre-input`. The Auto preference panel is **not** force-opened to
-re-read state (that was flaky on Hub); the dock's 自动 button is the source of
-truth once configured.
+The current Generate preference card uses 视频/图片 tabs instead of radios.
+The adapter selects 视频 and verifies the active tab, then selects and reads
+back **模型 · 智能**, **比例 · 智能**, and the automatic-resolution radio. All
+three must be selected together for the equivalent of Auto; merely seeing
+智能 is not enough. Missing, ambiguous, or ineffective controls fail in the
+`preference` phase. The legacy switch/radio card and closed 自动 dock fast
+path remain supported.
+
+These UI selections do **not** select a requested paid model: `--model-version`,
+`--ratio`, and `--duration` remain instructions in the assembled Agent prompt
+for the Agent to execute. The adapter does not choose a VIP model.
+
+Failure phase for the controls gate: `pre-input`. The panel is not reopened to
+re-read it (that was flaky on Hub). A closed 智能 label alone does not prove
+video: it is accepted only alongside the current card's video/Auto state
+verified during this configuration, without a conflicting 图片 dock label.
+The panel is closed before uploading or typing.
 
 ### Content checkpoint (after prompt is filled)
 

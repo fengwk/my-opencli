@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 
+import { load } from 'cheerio';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ArgumentError, CommandExecutionError } from '@jackwener/opencli/errors';
 
@@ -11,6 +12,8 @@ import {
   buildMentionSegments,
   buildWorkspaceUrl,
   chooseRetryPlan,
+  closeVisiblePreferenceTooltip,
+  configureAutoVideoPreference,
   findSpacedNeedleRange,
   inspectComposerAssetIdState,
   isMentionChipAppended,
@@ -19,7 +22,9 @@ import {
   normalizePromptValidationLines,
   openWorkspace,
   prepareJimengAgentAsk,
+  probeJimengAgentSurface,
   resolveMentionDebugOptions,
+  runPreInputControlsCheck,
   submitPreparedGeneration,
 } from '../src/agent-dom.js';
 
@@ -51,6 +56,305 @@ const assets = [
     browserPath: 'C:\\assets\\move.mp4',
   },
 ];
+
+/**
+ * Execute the adapter's real page expressions against a small HTML-backed DOM.
+ * Every click recreates all nodes, as the preference panel can do on re-render.
+ */
+function createPreferencePage(options = {}) {
+  const state = {
+    kind: 'current',
+    open: false,
+    video: false,
+    model: false,
+    ratio: false,
+    resolution: false,
+    legacyAuto: false,
+    dock: '智能',
+    missing: '',
+    blocked: '',
+    ...options,
+  };
+  const clicks = [];
+  let now = 1_000_000;
+  vi.spyOn(Date, 'now').mockImplementation(() => now);
+  let document;
+  let window;
+  let HTMLElement;
+  let HTMLButtonElement;
+
+  function render() {
+    const currentPanel = `
+      ${state.missing === 'videoTab' ? '' : `<button class="tab-a ${state.video ? 'active-a' : ''}" data-control="video">视频</button>`}
+      ${state.missing === 'imageTab' ? '' : `<button class="tab-b ${!state.video || state.bothActive ? 'active-b' : ''}" data-control="image">图片</button>`}
+      ${state.missing === 'structure' ? '' : `
+        <div role="listbox" aria-label="模型">
+          ${state.missing === 'model' ? '' : `<button role="option" aria-selected="${state.model}" data-control="model">模型 · 智能</button>`}
+          ${state.duplicateModel ? `<button role="option" aria-selected="true">模型 · 智能</button>` : ''}
+          <button role="option" aria-selected="${!state.model}" data-control="vip">模型 · VIP</button>
+        </div>`}
+      <section>比例
+        ${state.missing === 'ratio' ? '' : `<button aria-pressed="${state.ratio}" data-control="ratio">智能</button>`}
+        <button aria-pressed="${!state.ratio}">16:9</button>
+      </section>
+      <section>清晰度
+        ${state.missing === 'resolution' ? '' : state.bareResolution
+          ? `<input type="radio" value="__agentic_resolution_auto__" ${state.resolution ? 'checked' : ''}>`
+          : `<label data-control="resolution">智能<input type="radio" value="__agentic_resolution_auto__" ${state.resolution ? 'checked' : ''}></label>`}
+      </section>`;
+    const legacyPanel = `
+      <button role="switch" aria-checked="${state.legacyAuto}" data-control="switch">自动</button>
+      <label><input type="radio" value="image" ${state.video ? '' : 'checked'}>图片</label>
+      <label data-control="video"><input type="radio" value="video" ${state.video ? 'checked' : ''}>视频</label>`;
+    const $ = load(`<!doctype html><html><body>
+      <div class="dock">
+        <div role="combobox">Agent 模式</div>
+        <button aria-expanded="${state.open}" ${state.dockAria ? `aria-label="${state.dockAria}"` : ''} data-control="dock">${state.dock}</button>
+        ${state.imageDock ? '<button>图片</button>' : ''}
+        <div class="tiptap ProseMirror" contenteditable="true"></div>
+        <input type="file">
+      </div>
+      ${state.open ? `<div role="tooltip">${state.kind === 'legacy' ? legacyPanel : currentPanel}</div>` : ''}
+    </body></html>`);
+    const wrappers = new WeakMap();
+    HTMLElement = class {
+      constructor(node) { this.node = node; }
+      querySelectorAll(selector) { return $(this.node).find(selector).toArray().map(wrap); }
+      querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+      closest(selector) { const found = $(this.node).closest(selector)[0]; return found ? wrap(found) : null; }
+      matches(selector) { return $(this.node).is(selector); }
+      contains(other) { return this.node === other.node || $(this.node).find('*').toArray().includes(other.node); }
+      get parentElement() { return this.node.parent?.type === 'tag' ? wrap(this.node.parent) : null; }
+      get children() { return $(this.node).children().toArray().map(wrap); }
+      get classList() { return (this.node.attribs.class || '').split(/\s+/).filter(Boolean); }
+      get className() { return this.node.attribs.class || ''; }
+      get innerText() { return $(this.node).text(); }
+      get textContent() { return $(this.node).text(); }
+      get checked() { return Object.hasOwn(this.node.attribs, 'checked'); }
+      get id() { return this.node.attribs.id || ''; }
+      get accept() { return this.node.attribs.accept || ''; }
+      get multiple() { return Object.hasOwn(this.node.attribs, 'multiple'); }
+      getAttribute(name) { return this.node.attribs[name] ?? null; }
+      setAttribute(name, value) { this.node.attribs[name] = String(value); }
+      getBoundingClientRect() {
+        if (state.bareResolution && this.getAttribute('value') === '__agentic_resolution_auto__') {
+          return { left: 0, top: 0, bottom: 0, width: 0, height: 0 };
+        }
+        const index = ['dock', 'video', 'model', 'ratio', 'resolution', 'switch'].indexOf(this.getAttribute('data-control'));
+        return { left: 10 + Math.max(0, index) * 120, top: 20, bottom: 60, width: 100, height: 40 };
+      }
+    };
+    HTMLButtonElement = class extends HTMLElement {};
+    function wrap(node) {
+      if (!wrappers.has(node)) wrappers.set(node, new (node.name === 'button' ? HTMLButtonElement : HTMLElement)(node));
+      return wrappers.get(node);
+    }
+    document = {
+      body: wrap($('body')[0]),
+      activeElement: null,
+      querySelectorAll: (selector) => $(selector).toArray().map(wrap),
+      querySelector: (selector) => $(selector).toArray().map(wrap)[0] || null,
+    };
+    window = {
+      innerHeight: 1000,
+      getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+    };
+  }
+  render();
+  function clickTarget(target) {
+    if (!target) throw new Error('stale or missing target');
+    const control = target.getAttribute('data-control');
+    clicks.push(control);
+    if (control === state.throwControl) throw new Error('target replaced');
+    if (control === 'dock') state.open = !state.open;
+    if (control !== state.blocked) {
+      if (control === 'video') state.video = true;
+      if (control === 'model') state.model = true;
+      if (control === 'ratio') state.ratio = true;
+      if (control === 'resolution') state.resolution = true;
+      if (control === 'switch') state.legacyAuto = true;
+    }
+    if (control === state.resetModelAfter) state.model = false;
+    render();
+  }
+  const page = {
+    async evaluate(expression) {
+      return Function('document', 'window', 'HTMLElement', 'HTMLButtonElement', 'location', `return ${expression}`)(
+        document, window, HTMLElement, HTMLButtonElement, { href: 'https://jimeng.jianying.com/ai-tool/generate' },
+      );
+    },
+    async click(selector) {
+      clickTarget(document.querySelector(selector));
+    },
+    async nativeClick(x, y) {
+      const target = document.querySelectorAll('[data-opencli-jimeng-target]').find((el) => {
+        const rect = el.getBoundingClientRect();
+        return x === rect.left + rect.width / 2 && y === rect.top + rect.height / 2;
+      });
+      clickTarget(target);
+    },
+    async nativeKeyPress(key) {
+      if (key === 'Escape' && !state.ignoreEscape) state.open = false;
+      render();
+    },
+    async sleep(seconds) { now += Math.max(10, seconds * 1000); },
+  };
+  return { page, state, clicks, render };
+}
+
+describe('jimeng-agent/agent-dom — Auto/video preference cards', () => {
+  it('configures a re-rendering smart card, verifies it, and closes it without reopening', async () => {
+    // A closed 智能 dock alone must not certify video; exercise the actual DOM
+    // expressions and all four selections across node replacement.
+    const { page, clicks } = createPreferencePage({ dockAria: '生成偏好' });
+    expect(await probeJimengAgentSurface(page)).toMatchObject({
+      smartFromDock: true, autoEnabled: false, videoSelected: false,
+    });
+    const preference = await configureAutoVideoPreference(page);
+    expect(clicks).toEqual(['dock', 'video', 'model', 'ratio', 'resolution']);
+    expect(await probeJimengAgentSurface(page)).toMatchObject({
+      preferenceKind: 'current', autoPopupOpen: true, autoEnabled: true, videoSelected: true,
+    });
+    expect((await runPreInputControlsCheck(page, preference)).ok).toBe(true);
+    await closeVisiblePreferenceTooltip(page);
+    expect((await runPreInputControlsCheck(page, preference)).ok).toBe(true);
+    expect(clicks).toEqual(['dock', 'video', 'model', 'ratio', 'resolution']);
+  });
+
+  it('does not confuse a smart image tab with video or click a VIP model', async () => {
+    // Smart settings can all be selected while the active media tab is image.
+    const { page, clicks } = createPreferencePage({ open: true, model: true, ratio: true, resolution: true });
+    expect(await probeJimengAgentSurface(page)).toMatchObject({ autoEnabled: true, videoSelected: false });
+    await configureAutoVideoPreference(page);
+    expect(clicks).toEqual(['video']);
+  });
+
+  it('finds the expandable Agent preference trigger even when its label is custom', async () => {
+    // An initially non-smart preference still needs a way to open the card
+    // and restore the smart video settings without choosing a specific model.
+    const { page, clicks } = createPreferencePage({ dock: '自定义' });
+    const preference = await configureAutoVideoPreference(page);
+    expect((await runPreInputControlsCheck(page, preference)).ok).toBe(true);
+    expect(clicks).toEqual(['dock', 'video', 'model', 'ratio', 'resolution']);
+  });
+
+  it('closes the current card via its dock trigger when Escape is ignored', async () => {
+    // The fallback must identify the 智能 trigger, not a similarly named
+    // option inside the still-open tooltip.
+    const { page, clicks } = createPreferencePage({
+      video: true, model: true, ratio: true, resolution: true, ignoreEscape: true,
+    });
+    await configureAutoVideoPreference(page);
+    await closeVisiblePreferenceTooltip(page);
+    expect(clicks).toEqual(['dock', 'dock']);
+    expect((await probeJimengAgentSurface(page)).autoPopupOpen).toBe(false);
+  });
+
+  it('accepts the already-selected smart video card without clicking its hidden auto radio', async () => {
+    // A checked input can be visually hidden; its read-back, not clickability,
+    // proves an already configured resolution and avoids unnecessary changes.
+    const { page, clicks } = createPreferencePage({
+      video: true, model: true, ratio: true, resolution: true, bareResolution: true,
+    });
+    const preference = await configureAutoVideoPreference(page);
+    expect((await runPreInputControlsCheck(page, preference)).ok).toBe(true);
+    expect(clicks).toEqual(['dock']);
+  });
+
+  it.each(['model', 'ratio', 'resolution'])(
+    'does not report Auto when the smart %s is not selected',
+    async (unselected) => {
+      // Every individual smart state is necessary, even when the other two
+      // and the video tab are already selected.
+      const { page } = createPreferencePage({
+        open: true, video: true, model: true, ratio: true, resolution: true, [unselected]: false,
+      });
+      expect(await probeJimengAgentSurface(page)).toMatchObject({ autoEnabled: false, videoSelected: true });
+    },
+  );
+
+  it('rejects ambiguous smart controls and contradictory active tabs', async () => {
+    // Duplicate model matches and two active media tabs cannot certify video/Auto.
+    const model = createPreferencePage({ open: true, video: true, model: true, ratio: true, resolution: true, duplicateModel: true });
+    expect((await probeJimengAgentSurface(model.page)).autoEnabled).toBe(false);
+    await expect(configureAutoVideoPreference(model.page)).rejects.toMatchObject({ phase: 'preference' });
+    vi.restoreAllMocks();
+    const tabs = createPreferencePage({ open: true, video: true, model: true, ratio: true, resolution: true, bothActive: true });
+    expect((await probeJimengAgentSurface(tabs.page)).videoSelected).toBe(false);
+    await expect(configureAutoVideoPreference(tabs.page)).rejects.toMatchObject({ phase: 'preference' });
+  });
+
+  it.each(['structure', 'videoTab', 'imageTab', 'model', 'ratio', 'resolution'])(
+    'fails in the preference phase when current-card %s is missing',
+    async (missing) => {
+      // Missing structure or any smart setting must never fall back to dock text.
+      const { page, clicks } = createPreferencePage({ missing });
+      await expect(configureAutoVideoPreference(page)).rejects.toMatchObject({ phase: 'preference' });
+      expect(clicks).not.toContain('vip');
+    },
+  );
+
+  it.each(['video', 'model', 'ratio', 'resolution'])(
+    'fails closed when clicking %s does not produce the selected state',
+    async (blocked) => {
+      // A visible button/input is not proof of an effective selection.
+      const { page } = createPreferencePage({ blocked });
+      await expect(configureAutoVideoPreference(page)).rejects.toMatchObject({ phase: 'preference' });
+    },
+  );
+
+  it('rejects controls that stop being selected after a later re-render', async () => {
+    // Final verification must read all settings together, not only each earlier click.
+    const { page } = createPreferencePage({ resetModelAfter: 'ratio' });
+    await expect(configureAutoVideoPreference(page)).rejects.toMatchObject({
+      phase: 'preference', message: expect.stringContaining('remain selected together'),
+    });
+  });
+
+  it('reports a replaced smart model target as a preference failure', async () => {
+    // A re-render that invalidates the marked selector must not cause a
+    // fallback to stale coordinates over a different model.
+    const { page, clicks } = createPreferencePage({ throwControl: 'model' });
+    await expect(configureAutoVideoPreference(page)).rejects.toMatchObject({ phase: 'preference' });
+    expect(clicks).not.toContain('vip');
+  });
+
+  it('requires an actual verified video state for a closed smart dock', async () => {
+    // Even a previously valid result cannot override an explicit image label or
+    // a newly opened card that shows image mode.
+    const { page, state, render } = createPreferencePage({ model: true, ratio: true, resolution: true });
+    await expect(runPreInputControlsCheck(page)).rejects.toMatchObject({ phase: 'pre-input' });
+    const preference = await configureAutoVideoPreference(page);
+    state.video = false;
+    render();
+    await expect(runPreInputControlsCheck(page, preference)).rejects.toMatchObject({ phase: 'pre-input' });
+    state.video = true;
+    state.missing = 'structure';
+    render();
+    expect((await probeJimengAgentSurface(page)).autoPopupOpen).toBe(true);
+    await expect(runPreInputControlsCheck(page, preference)).rejects.toMatchObject({ phase: 'pre-input' });
+    state.open = false;
+    state.imageDock = true;
+    render();
+    await expect(runPreInputControlsCheck(page, preference)).rejects.toMatchObject({ phase: 'pre-input' });
+  });
+
+  it('retains the legacy closed-dock fast path and switch/radio card path', async () => {
+    // Legacy 自动 must remain usable without opening the Hub dropdown, while
+    // a visible legacy card still requires its switch and video radio.
+    const fast = createPreferencePage({ kind: 'legacy', dock: '自动' });
+    await configureAutoVideoPreference(fast.page);
+    expect(fast.clicks).toEqual([]);
+    expect((await runPreInputControlsCheck(fast.page)).ok).toBe(true);
+    vi.restoreAllMocks();
+    const open = createPreferencePage({ kind: 'legacy', dock: '自定义', open: true });
+    await configureAutoVideoPreference(open.page);
+    expect(open.clicks).toEqual(['switch', 'video']);
+    expect((await runPreInputControlsCheck(open.page)).ok).toBe(true);
+    await closeVisiblePreferenceTooltip(open.page);
+    expect((await probeJimengAgentSurface(open.page)).autoPopupOpen).toBe(false);
+  });
+});
 
 describe('jimeng-agent/agent-dom — workspace URL', () => {
   it('builds the visible Jimeng generate workspace URL and encodes the workspace value', () => {

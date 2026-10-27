@@ -300,10 +300,10 @@ export async function prepareJimengAgentAsk(page, canonical, preparedAssets, opt
         baselineSlots = await clearInitialDraftState(page);
       }
       await selectAgentMode(page);
-      await configureAutoVideoPreference(page);
+      const preference = await configureAutoVideoPreference(page);
       // Preference panel is still the source of truth for Auto/Video. Verify it
       // here, then close it before any upload/prompt typing.
-      await runPreInputControlsCheck(page);
+      await runPreInputControlsCheck(page, preference);
       await closeVisiblePreferenceTooltip(page);
       await uploadReferenceAssets(page, preparedAssets, uploads, startAssetIndex, baselineSlots);
       // Jimeng may insert an uploaded reference chip at the document start.
@@ -566,12 +566,81 @@ async function collectDockReferenceSnapshot(page, alertBaselineMarker = '') {
 }
 
 /**
+ * Shared browser-side locator for both observed preference card generations.
+ * The current card requires a model listbox AND both media tabs; its smart
+ * controls are checked separately so an incomplete card cannot look valid.
+ */
+function buildPreferencePanelLocatorScript() {
+  return `
+    const preferenceText = (el) => (el.innerText || el.textContent || '').replace(/\\s+/g, '').trim();
+    const preferencePanels = () => [...document.querySelectorAll('[role="tooltip"]')]
+      .filter(visible)
+      .map((tip) => {
+        const switches = [...tip.querySelectorAll('button[role="switch"]')].filter(visible);
+        const imageRadios = [...tip.querySelectorAll('input[type="radio"][value="image"]')];
+        const videoRadios = [...tip.querySelectorAll('input[type="radio"][value="video"]')];
+        if (switches.length && imageRadios.length && videoRadios.length) {
+          return { kind: 'legacy', tip, switches, imageRadios, videoRadios };
+        }
+        const lists = [...tip.querySelectorAll('[role="listbox"][aria-label="模型"]')].filter(visible);
+        const buttons = [...tip.querySelectorAll('button')].filter(visible);
+        const videoTabs = buttons.filter((el) => preferenceText(el) === '视频');
+        const imageTabs = buttons.filter((el) => preferenceText(el) === '图片');
+        if (lists.length && videoTabs.length && imageTabs.length) {
+          return { kind: 'current', tip, lists, videoTabs, imageTabs };
+        }
+        return null;
+      })
+      .filter(Boolean);
+    const preferenceTabSelected = (el) => !!el && (
+      el.getAttribute('aria-selected') === 'true'
+      || el.getAttribute('aria-pressed') === 'true'
+      || [...el.classList].some((name) => name.startsWith('active-'))
+    );
+    const preferenceState = (panel) => {
+      if (!panel) return {};
+      if (panel.kind === 'legacy') {
+        return {
+          autoEnabled: panel.switches.length === 1
+            && panel.switches[0].getAttribute('aria-checked') === 'true',
+          videoSelected: panel.videoRadios.length === 1 && !!panel.videoRadios[0].checked,
+        };
+      }
+      const list = panel.lists.length === 1 ? panel.lists[0] : null;
+      const models = list ? [...list.querySelectorAll('button[role="option"]')]
+        .filter(visible)
+        .filter((el) => /^(?:模型[·・]智能|智能)$/.test(preferenceText(el))) : [];
+      const ratios = [...panel.tip.querySelectorAll('button[aria-pressed]')]
+        .filter(visible)
+        .filter((el) => !panel.lists.some((list) => list.contains(el)) && preferenceText(el) === '智能');
+      const resolutions = [...panel.tip.querySelectorAll('input[type="radio"][value="__agentic_resolution_auto__"]')];
+      const videoTab = panel.videoTabs.length === 1 ? panel.videoTabs[0] : null;
+      const imageTab = panel.imageTabs.length === 1 ? panel.imageTabs[0] : null;
+      const model = models.length === 1 ? models[0] : null;
+      const ratio = ratios.length === 1 ? ratios[0] : null;
+      const resolution = resolutions.length === 1 ? resolutions[0] : null;
+      const smartModelSelected = !!model && model.getAttribute('aria-selected') === 'true';
+      const smartRatioSelected = !!ratio && ratio.getAttribute('aria-pressed') === 'true';
+      const smartResolutionSelected = !!resolution && !!resolution.checked;
+      return {
+        videoTab, imageTab, model, ratio, resolution,
+        smartModelSelected, smartRatioSelected, smartResolutionSelected,
+        autoEnabled: smartModelSelected && smartRatioSelected && smartResolutionSelected,
+        videoSelected: !!videoTab && !!imageTab
+          && preferenceTabSelected(videoTab) && !preferenceTabSelected(imageTab),
+      };
+    };
+  `;
+}
+
+/**
  * Visible page health snapshot. It intentionally exposes only UI state and
  * does not call hidden application endpoints or inspect internal stores.
  */
 export async function probeJimengAgentSurface(page) {
   const surface = await page.evaluate(`(() => {
     ${buildPromptEditorLocatorScript()}
+    ${buildPreferencePanelLocatorScript()}
     const readable = (el) => ((el.getAttribute('aria-label') || '') + ' ' + (el.innerText || el.textContent || ''))
       .replace(/\\s+/g, ' ')
       .trim();
@@ -586,7 +655,7 @@ export async function probeJimengAgentSurface(page) {
     const comboboxes = [...document.querySelectorAll('[role="combobox"]')].filter(visible);
     const modeText = comboboxes.map(readable).join(' | ');
 
-    // Current Jimeng dock: "Agent 模式" combobox + standalone "自动" button
+    // Current Jimeng dock: "Agent 模式" combobox + standalone preference button
     // (not a second combobox). Collect dock control text near the editor.
     const dockRoots = [];
     if (editor) {
@@ -594,22 +663,17 @@ export async function probeJimengAgentSurface(page) {
       for (let i = 0; node && i < 10; i += 1, node = node.parentElement) dockRoots.push(node);
     }
     const dockScope = dockRoots[dockRoots.length - 1] || document.body;
-    const dockControls = [...dockScope.querySelectorAll('button, [role="button"], [role="combobox"]')]
+    const dockElements = [...dockScope.querySelectorAll('button, [role="button"], [role="combobox"]')]
       .filter(visible)
+      .filter((el) => !el.closest('[role="tooltip"]'));
+    const dockControls = dockElements
       .map(readable)
       .filter(Boolean);
     const dockText = dockControls.join(' | ');
 
-    const preferenceTooltips = [...document.querySelectorAll('[role="tooltip"]')]
-      .filter(visible)
-      .filter((tip) => (
-        tip.querySelector('button[role="switch"]')
-        && tip.querySelector('input[type="radio"][value="image"]')
-        && tip.querySelector('input[type="radio"][value="video"]')
-      ));
-    const tooltip = preferenceTooltips.length === 1 ? preferenceTooltips[0] : null;
-    const autoSwitch = tooltip?.querySelector('button[role="switch"]') || null;
-    const videoRadio = tooltip?.querySelector('input[type="radio"][value="video"]') || null;
+    const panels = preferencePanels();
+    const panel = panels.length === 1 ? panels[0] : null;
+    const preference = preferenceState(panel);
     const alertTexts = [...document.querySelectorAll('[role="alert"]')]
       .filter(visible)
       .map(readable)
@@ -627,10 +691,27 @@ export async function probeJimengAgentSurface(page) {
           return /(?:图片|视频|音频)\\d+/.test(compact) || /mention/i.test(metadata);
         })
       : [];
-    // Auto is enabled when the dock shows the 自动 chip/button, or the open
-    // preference switch is aria-checked=true.
+    // Preserve the legacy closed 自动 dock signal; an open card is read from
+    // its own selected controls instead.
     const autoFromDock = /(?:^|[|\\s])自动(?:$|[|\\s])/.test(dockText.replace(/\\s+/g, ''))
       || dockControls.some((t) => t.replace(/\\s+/g, '') === '自动' || /^自动/.test(t.replace(/\\s+/g, '')));
+    // Unlike legacy 自动, 智能 alone does not identify the media type.
+    const smartFromDock = dockElements.some((el) => el.getAttribute('aria-expanded') !== null
+      && /^智能/.test(preferenceText(el) || (el.getAttribute('aria-label') || '').replace(/\\s+/g, '')));
+    const imageFromDock = dockElements.some((el) => /^(?:图片|图片模式)$/.test(preferenceText(el)));
+    // An expanded trigger still blocks the composer even if a partial or
+    // changed tooltip no longer matches either supported card structure.
+    const preferenceControlExpanded = dockElements.some((el) => el.getAttribute('aria-expanded') === 'true'
+      && /^(?:自动|智能)/.test(preferenceText(el) || (el.getAttribute('aria-label') || '').replace(/\\s+/g, '')))
+      || comboboxes.some((combobox) => {
+        if (!/Agent\\s*模式/i.test(readable(combobox))) return false;
+        const siblings = [...(combobox.parentElement?.children || [])];
+        const next = siblings[siblings.indexOf(combobox) + 1];
+        return !!next && next.matches('button, [role="button"]') && visible(next)
+          && next.getAttribute('aria-expanded') === 'true';
+      });
+    const popupOpen = panels.length > 0 || preferenceControlExpanded;
+    const legacyAutoFromDock = autoFromDock && !smartFromDock && !imageFromDock && !popupOpen;
     return {
       url: location.href,
       editorCount: editors.length,
@@ -647,14 +728,17 @@ export async function probeJimengAgentSurface(page) {
       modeText,
       dockText,
       agentSelected: /Agent\\s*模式/i.test(modeText) || /Agent\\s*模式/i.test(dockText),
-      autoPopupOpen: !!tooltip,
-      preferencePopupCount: preferenceTooltips.length,
-      autoEnabled: autoSwitch?.getAttribute('aria-checked') === 'true' || (!tooltip && autoFromDock),
-      // Video radio is only readable while the preference tooltip is open.
-      // When closed, if Auto is already on the dock, treat video as selected
-      // for Agent video workflows (do not force-open the dropdown just to re-read).
-      videoSelected: !!videoRadio?.checked || (!tooltip && autoFromDock),
-      autoFromDock,
+      autoPopupOpen: popupOpen,
+      preferencePopupCount: panels.length,
+      preferenceKind: panel?.kind || null,
+      autoEnabled: preference.autoEnabled === true || legacyAutoFromDock,
+      videoSelected: preference.videoSelected === true || legacyAutoFromDock,
+      smartModelSelected: preference.smartModelSelected === true,
+      smartRatioSelected: preference.smartRatioSelected === true,
+      smartResolutionSelected: preference.smartResolutionSelected === true,
+      autoFromDock: legacyAutoFromDock,
+      smartFromDock,
+      imageFromDock,
       mentionCount: mentionNodes.length,
       alerts: alertTexts,
       // An upload entry is ready when the composer exposes either contract:
@@ -795,49 +879,50 @@ async function selectAgentMode(page) {
   await closeVisibleListbox(page);
 }
 
-async function configureAutoVideoPreference(page) {
-  // One-shot configuration of Auto + Video. Prefer nativeClick on real
-  // coordinates; avoid fragile re-open loops of the preference dropdown.
+export async function configureAutoVideoPreference(page) {
+  // One-shot configuration of Auto + Video; avoid fragile re-open loops of
+  // the preference dropdown.
   let surface = await probeJimengAgentSurface(page);
 
   // Fast path: dock already shows Agent + 自动. Do NOT open the preference
   // dropdown just to re-read radios (Hub flaky / blank-page side effects).
   if (!surface.autoPopupOpen && surface.agentSelected && (surface.autoFromDock || surface.autoEnabled)) {
-    return;
+    return { kind: 'legacy-dock' };
   }
 
   if (!surface.autoPopupOpen) {
     const marker = nextMarker('auto');
     const marked = await markPreferenceControl(page, marker);
     if (!marked?.ok) {
-      // Soft: if Agent is already on and dock shows 自动, skip.
-      if (surface.agentSelected && (surface.autoFromDock || surface.autoEnabled)) return;
       throw phaseError('preference', 'Could not locate the Auto preference control', 'Verify that Agent mode is selected and the visible composer is complete.');
     }
     await page.click(`[${TARGET_ATTR}="${marker}"]`);
     await page.sleep(0.25);
-    await waitForCondition(page, async () => (await probeJimengAgentSurface(page)).autoPopupOpen, 8_000, 'Auto preference popup did not open');
     surface = await probeJimengAgentSurface(page);
+  }
+  if (!surface.preferencePopupCount) {
+    await waitForCondition(page, async () => (await probeJimengAgentSurface(page)).preferencePopupCount > 0, 8_000, 'Auto preference popup did not expose a supported card', 'preference');
+    surface = await probeJimengAgentSurface(page);
+  }
+
+  if (surface.preferencePopupCount !== 1 || !surface.preferenceKind) {
+    throw phaseError('preference', 'Could not uniquely identify the Auto/video preference card');
+  }
+  if (surface.preferenceKind === 'current') {
+    await configureSmartVideoPreference(page);
+    // Keep the verified card open for the pre-input gate; the caller closes it
+    // immediately afterwards, before upload or prompt input.
+    return { kind: 'current', autoEnabled: true, videoSelected: true };
   }
 
   if (!surface.autoEnabled) {
     const switchMarker = nextMarker('auto-switch');
     const switchState = await page.evaluate(`(() => {
-      const visible = (el) => {
-        if (!(el instanceof HTMLElement)) return false;
-        const style = window.getComputedStyle(el);
-        const rect = el.getBoundingClientRect();
-        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-      };
-      const tooltips = [...document.querySelectorAll('[role="tooltip"]')]
-        .filter(visible)
-        .filter((tip) => (
-          tip.querySelector('button[role="switch"]')
-          && tip.querySelector('input[type="radio"][value="image"]')
-          && tip.querySelector('input[type="radio"][value="video"]')
-        ));
-      if (tooltips.length !== 1) return { ok: false, popupCount: tooltips.length };
-      const controls = [...tooltips[0].querySelectorAll('button[role="switch"]')].filter(visible);
+      ${buildPromptEditorLocatorScript()}
+      ${buildPreferencePanelLocatorScript()}
+      const panels = preferencePanels();
+      if (panels.length !== 1 || panels[0].kind !== 'legacy') return { ok: false, popupCount: panels.length };
+      const controls = panels[0].switches;
       if (controls.length !== 1) return { ok: false, switchCount: controls.length };
       const control = controls[0];
       const rect = control.getBoundingClientRect();
@@ -861,9 +946,13 @@ async function configureAutoVideoPreference(page) {
       await page.sleep(0.25);
       await waitForCondition(
         page,
-        async () => (await probeJimengAgentSurface(page)).autoEnabled,
+        async () => {
+          const current = await probeJimengAgentSurface(page);
+          return current.preferenceKind === 'legacy' && current.autoEnabled;
+        },
         8_000,
         'Auto preference switch did not enable',
+        'preference',
       );
     }
   }
@@ -872,17 +961,11 @@ async function configureAutoVideoPreference(page) {
   if (!surface.videoSelected) {
     const radioMarker = nextMarker('video-radio');
     const radioFound = await page.evaluate(`(() => {
-      const visible = (el) => {
-        if (!(el instanceof HTMLElement)) return false;
-        const style = window.getComputedStyle(el);
-        const rect = el.getBoundingClientRect();
-        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-      };
-      const tooltip = [...document.querySelectorAll('[role="tooltip"]')]
-        .filter(visible)
-        .find((tip) => tip.querySelector('input[type="radio"][value="video"]'));
-      const input = tooltip?.querySelector('input[type="radio"][value="video"]');
-      if (!input) return { ok: false };
+      ${buildPromptEditorLocatorScript()}
+      ${buildPreferencePanelLocatorScript()}
+      const panels = preferencePanels();
+      if (panels.length !== 1 || panels[0].kind !== 'legacy' || panels[0].videoRadios.length !== 1) return { ok: false };
+      const input = panels[0].videoRadios[0];
       const clickTarget = input.closest('label') || input;
       const rect = clickTarget.getBoundingClientRect();
       clickTarget.setAttribute(${JSON.stringify(TARGET_ATTR)}, ${JSON.stringify(radioMarker)});
@@ -907,13 +990,71 @@ async function configureAutoVideoPreference(page) {
         await page.click(`[${TARGET_ATTR}="${radioMarker}"]`);
       }
       await page.sleep(0.3);
-      if ((await probeJimengAgentSurface(page)).videoSelected) break;
+      const current = await probeJimengAgentSurface(page);
+      if (current.preferenceKind === 'legacy' && current.videoSelected) break;
     }
-    await waitForCondition(page, async () => (await probeJimengAgentSurface(page)).videoSelected, 5_000, 'Video output preference did not become selected');
+    await waitForCondition(page, async () => {
+      const current = await probeJimengAgentSurface(page);
+      return current.preferenceKind === 'legacy' && current.videoSelected;
+    }, 5_000, 'Video output preference did not become selected', 'preference');
   }
 
-  // Close the preference card immediately so it never blocks upload/composer.
-  await closeVisiblePreferenceTooltip(page).catch(() => null);
+  surface = await probeJimengAgentSurface(page);
+  if (surface.preferenceKind !== 'legacy' || !surface.autoEnabled || !surface.videoSelected) {
+    throw phaseError('preference', 'Auto/video preference did not remain selected');
+  }
+  return { kind: 'legacy', autoEnabled: true, videoSelected: true };
+}
+
+async function configureSmartVideoPreference(page) {
+  const steps = [
+    ['videoTab', 'videoSelected', 'video'],
+    ['model', 'smartModelSelected', 'smart model'],
+    ['ratio', 'smartRatioSelected', 'smart ratio'],
+    ['resolution', 'smartResolutionSelected', 'smart resolution'],
+  ];
+  for (const [controlName, stateName, description] of steps) {
+    const marker = nextMarker(`preference-${controlName}`);
+    // Every selection can replace the card's DOM nodes. Resolve a fresh,
+    // unique control on each step, and read back its state after clicking.
+    const control = await page.evaluate(`(() => {
+      ${buildPromptEditorLocatorScript()}
+      ${buildPreferencePanelLocatorScript()}
+      const panels = preferencePanels();
+      if (panels.length !== 1 || panels[0].kind !== 'current') return { ok: false };
+      const state = preferenceState(panels[0]);
+      const input = state[${JSON.stringify(controlName)}];
+      if (!input) return { ok: false };
+      if (state[${JSON.stringify(stateName)}] === true) return { ok: true, selected: true };
+      const target = ${JSON.stringify(controlName)} === 'resolution'
+        ? (input.closest('label') || (input.labels?.length === 1 ? input.labels[0] : null) || input)
+        : input;
+      if (!visible(target)) return { ok: false };
+      target.setAttribute(${JSON.stringify(TARGET_ATTR)}, ${JSON.stringify(marker)});
+      return { ok: true, selected: false };
+    })()`);
+    if (!control?.ok) {
+      throw phaseError('preference', `Could not uniquely locate the ${description} control in the preference card`);
+    }
+    if (!control.selected) {
+      // Resolve the marked element at click time instead of reusing stale
+      // coordinates: a re-render must not redirect a model click to VIP.
+      try {
+        await page.click(`[${TARGET_ATTR}="${marker}"]`);
+      } catch (error) {
+        throw phaseError('preference', `Could not click the ${description} control: ${describeError(error)}`);
+      }
+      await page.sleep(0.25);
+      await waitForCondition(page, async () => {
+        const current = await probeJimengAgentSurface(page);
+        return current.preferenceKind === 'current' && current[stateName] === true;
+      }, 5_000, `The ${description} preference did not become selected`, 'preference');
+    }
+  }
+  const final = await probeJimengAgentSurface(page);
+  if (final.preferenceKind !== 'current' || !final.autoEnabled || !final.videoSelected) {
+    throw phaseError('preference', 'Smart/video preferences did not remain selected together');
+  }
 }
 
 async function markPreferenceControl(page, marker) {
@@ -925,20 +1066,37 @@ async function markPreferenceControl(page, marker) {
     let node = editor.parentElement;
     for (let i = 0; node && i < 10; i += 1, node = node.parentElement) roots.push(node);
     const scope = roots[roots.length - 1] || document.body;
-    const readable = (el) => ((el.getAttribute('aria-label') || '') + ' ' + (el.innerText || el.textContent || ''))
-      .replace(/\\s+/g, '')
-      .trim();
+    const preferenceLabel = (el) => [el.innerText || el.textContent || '', el.getAttribute('aria-label') || '']
+      .map((value) => value.replace(/\\s+/g, '').trim());
 
-    // New UI: standalone button labeled 自动 next to Agent 模式 combobox.
+    // Current UI: the expandable preference trigger immediately follows the
+    // Agent combobox, including when its label is no longer 智能.
+    const agentComboboxes = [...new Set(roots.flatMap((root) => [...root.querySelectorAll('[role="combobox"]')]))]
+      .filter(visible)
+      .filter((el) => preferenceLabel(el).some((text) => /Agent模式/i.test(text)));
+    const triggers = [...new Set(agentComboboxes.map((combobox) => {
+      const siblings = [...(combobox.parentElement?.children || [])];
+      const next = siblings[siblings.indexOf(combobox) + 1];
+      return next && next.matches('button, [role="button"]') && visible(next)
+        && next.getAttribute('aria-expanded') !== null ? next : null;
+    }).filter(Boolean))];
+    if (triggers.length > 1) return { ok: false, reason: 'trigger-match-count', count: triggers.length };
+    if (triggers.length === 1) {
+      triggers[0].setAttribute(${JSON.stringify(TARGET_ATTR)}, ${JSON.stringify(marker)});
+      return { ok: true, via: 'agent-trigger' };
+    }
+
+    // Standalone 自动 / 智能 button next to the Agent 模式 combobox.
     const autoButtons = [...scope.querySelectorAll('button, [role="button"]')]
       .filter(visible)
-      .filter((el) => {
-        const t = readable(el);
-        return t === '自动' || t.startsWith('自动');
-      });
+      .filter((el) => !el.closest('[role="tooltip"]'))
+      .filter((el) => preferenceLabel(el).some((t) => t.startsWith('自动') || t.startsWith('智能')));
     if (autoButtons.length >= 1) {
-      // Prefer the smallest leaf control in the composer dock.
+      // Prefer the observed expandable trigger, then the smallest dock leaf.
       autoButtons.sort((a, b) => {
+        const expandedRank = Number(b.getAttribute('aria-expanded') !== null)
+          - Number(a.getAttribute('aria-expanded') !== null);
+        if (expandedRank) return expandedRank;
         const ar = a.getBoundingClientRect();
         const br = b.getBoundingClientRect();
         return (ar.width * ar.height) - (br.width * br.height);
@@ -2484,13 +2642,13 @@ async function waitForMarker(page, marker, expression, timeoutMs) {
   return last ?? { ok: false };
 }
 
-async function waitForCondition(page, check, timeoutMs, failureMessage) {
+async function waitForCondition(page, check, timeoutMs, failureMessage, phase = 'surface') {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await check()) return;
     await page.sleep(0.2);
   }
-  throw phaseError('surface', failureMessage, 'Inspect the visible Jimeng workspace and retry.');
+  throw phaseError(phase, failureMessage, 'Inspect the visible Jimeng workspace and retry.');
 }
 
 async function closeVisibleListbox(page) {
@@ -2513,7 +2671,7 @@ async function closeVisibleListbox(page) {
   await page.sleep(0.1);
 }
 
-async function closeVisiblePreferenceTooltip(page) {
+export async function closeVisiblePreferenceTooltip(page) {
   // Jimeng keeps the preference card open after the switch / radio are
   // configured. That overlays the upload card and the composer, which blocks
   // both `setFileInput` and the `@` mention picker. Close it before upload.
@@ -3209,20 +3367,25 @@ async function stripLeftoverRawMentionQuery(page, asset) {
  * on Hub (wrong target / blank page side-effects) and is not required after
  * configureAutoVideoPreference already applied Auto/Video once.
  *
- * When the panel is closed, Auto is inferred from the dock combobox text
- * ("自动"). Video cannot be re-read without reopening the panel — trust the
- * earlier configure step and only require Agent + Auto signals here.
+ * The legacy closed 自动 dock retains its compatibility signal. A closed
+ * 智能 dock is accepted only with a verified current-card result from this
+ * configuration, never as evidence of video on its own.
  */
-export async function runPreInputControlsCheck(page) {
+export async function runPreInputControlsCheck(page, preference = null) {
   const surface = await probeJimengAgentSurface(page);
+  const verifiedSmart = !surface.autoPopupOpen
+    && surface.preferencePopupCount === 0
+    && surface.smartFromDock === true
+    && surface.imageFromDock !== true
+    && preference?.kind === 'current'
+    && preference.autoEnabled === true
+    && preference.videoSelected === true;
   const snapshot = {
     surfaceReady: surface.ready === true || (surface.editorReady === true
       && (surface.fileInputCount > 0 || surface.uploadTileCount > 0)),
     agentSelected: surface.agentSelected === true,
-    // probe already folds dock "自动" button into autoEnabled/videoSelected
-    // when the preference tooltip is closed.
-    autoEnabled: surface.autoEnabled === true,
-    videoSelected: surface.videoSelected === true,
+    autoEnabled: surface.autoEnabled === true || verifiedSmart,
+    videoSelected: surface.videoSelected === true || verifiedSmart,
   };
 
   const report = evaluatePreInputControls(snapshot);
