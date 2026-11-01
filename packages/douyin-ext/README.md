@@ -41,7 +41,6 @@ opencli douyin-ext download "https://www.douyin.com/video/7701962254330128228" -
 |---|---|---|---|
 | `<target>` | String (positional) | *required* | Numeric ID, official video URL, or `v.douyin.com` share link |
 | `--op` | String | `.` | Target directory on CLI execution host for downloaded video |
-| `--output` | String | - | Target directory on CLI execution host (deprecated, use `--op` instead) |
 | `--quality` | String | `best` | `best`, `2160p`, `1440p`, `1080p`, `720p`, `540p`, `480p`, `360p` |
 | `--timeout` | Integer | `60` | Overall timeout in seconds shared across target resolution, API fetch, and stream download |
 

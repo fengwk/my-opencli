@@ -49,11 +49,6 @@ export const downloadCommand = cli({
       help: 'Target directory on CLI execution host for downloaded video (default current directory)',
     },
     {
-      name: 'output',
-      valueRequired: true,
-      help: 'Target directory on CLI execution host for downloaded video (deprecated, use --op instead)',
-    },
-    {
       name: 'quality',
       valueRequired: true,
       default: 'best',

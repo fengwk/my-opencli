@@ -65,11 +65,6 @@ export const statusCommand = cli({
       valueRequired: true,
       help: 'Download directory when --download 1 (default: ~/Downloads/jimeng-agent)',
     },
-    {
-      name: 'output',
-      valueRequired: true,
-      help: 'Download directory when --download 1 (deprecated, use --op instead)',
-    },
   ],
   columns: cliColumns([
     'status',

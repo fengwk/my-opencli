@@ -256,7 +256,7 @@ describe('jimeng-agent canvas-v0 read-back API', () => {
       canvas: PROJECT_ID,
       record_id: RECORD_ID,
       definition: '360p',
-      output: outputDir,
+      op: outputDir,
     }));
 
     expect(fetchMock).toHaveBeenCalledWith('https://cdn.example/360.mp4');
@@ -287,7 +287,7 @@ describe('jimeng-agent canvas-v0 read-back API', () => {
       canvas: PROJECT_ID,
       record_id: RECORD_ID,
       definition: 'origin',
-      output: makeTempDir(),
+      op: makeTempDir(),
     }));
     expect(rows[0]).toMatchObject({ definition: '720p', definitionFallback: true, requestedDefinition: 'origin' });
   });
@@ -305,7 +305,7 @@ describe('jimeng-agent canvas-v0 read-back API', () => {
       canvas: PROJECT_ID,
       record_id: RECORD_ID,
       definition: '360p',
-      output: outputDir,
+      op: outputDir,
     }))).rejects.toThrow(/md5 mismatch/);
     expect(fs.readdirSync(outputDir)).toEqual([]);
   });
@@ -319,7 +319,7 @@ describe('jimeng-agent canvas-v0 read-back API', () => {
     });
     await expect(runCanvasV0Download(page, normalizeCanvasV0DownloadArgs({
       canvas: PROJECT_ID,
-      output: makeTempDir(),
+      op: makeTempDir(),
     }))).rejects.toThrow(/no downloadable video yet .*states=39441026984460:pending/);
   });
 });

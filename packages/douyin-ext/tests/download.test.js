@@ -47,20 +47,9 @@ describe('douyin-ext download (validation, contract, and overall deadline)', () 
     expect(() => downloadCommand.validateArgs({ target: '7701962254330128228', quality: '123p' })).toThrow(
       ArgumentError
     );
-    // Reject both non-empty op and legacy output combined
-    expect(() =>
-      downloadCommand.validateArgs({
-        target: '7701962254330128228',
-        op: './v1',
-        output: './v2',
-      })
-    ).toThrow(ArgumentError);
-    // Allow either op or legacy output alone
+    // Allow valid op
     expect(() =>
       downloadCommand.validateArgs({ target: '7701962254330128228', op: './v1' })
-    ).not.toThrow();
-    expect(() =>
-      downloadCommand.validateArgs({ target: '7701962254330128228', output: './v2' })
     ).not.toThrow();
   });
 
@@ -77,19 +66,12 @@ describe('douyin-ext download (validation, contract, and overall deadline)', () 
     expect(downloadCommand.defaultFormat).toBe('json');
 
     const argNames = downloadCommand.args.map((a) => a.name);
-    const opIndex = argNames.indexOf('op');
-    const outputIndex = argNames.indexOf('output');
-    expect(opIndex).toBeGreaterThan(-1);
-    expect(outputIndex).toBeGreaterThan(-1);
-    expect(opIndex).toBeLessThan(outputIndex);
+    expect(argNames).toContain('op');
+    expect(argNames).not.toContain('output');
 
     const opArg = downloadCommand.args.find((a) => a.name === 'op');
-    const outputArg = downloadCommand.args.find((a) => a.name === 'output');
     expect(opArg.valueRequired).toBe(true);
     expect(opArg.default).toBeUndefined();
-    expect(outputArg.valueRequired).toBe(true);
-    expect(outputArg.default).toBeUndefined();
-    expect(outputArg.help).toMatch(/deprecated/i);
   });
 
   // Verify controlled deadline exhaustion using vi.spyOn(Date, 'now')
@@ -115,7 +97,7 @@ describe('douyin-ext download (validation, contract, and overall deadline)', () 
     await expect(
       downloadCommand.func(page, {
         target: '7701962254330128228',
-        output: testDir,
+        op: testDir,
         timeout: 30,
       })
     ).rejects.toThrow(/timed out|exceeded overall timeout/i);
@@ -184,7 +166,7 @@ describe('douyin-ext download (validation, contract, and overall deadline)', () 
 
     const rows = await downloadCommand.func(page, {
       target: targetId,
-      output: testDir,
+      op: testDir,
       quality: 'best',
       timeout: 30,
     });
@@ -196,6 +178,8 @@ describe('douyin-ext download (validation, contract, and overall deadline)', () 
     expect(result.quality).toBe('1080p');
     expect(result.codec).toBe('h264');
     expect(result.source).toBe('v26-web.douyinvod.com');
+    expect(result.path).toContain(testDir);
+    expect(fs.existsSync(result.path)).toBe(true);
   });
 
   it('executes download workflow when output directory passed via --op', async () => {

@@ -525,7 +525,7 @@ Download strategy (`--download 1`) mirrors `chatgpt-agent` file collection:
 
 1. Prefer the official card **下载** button via `waitForDownload` (full quality; typically ~9MB+)
 2. Remap Windows Chrome paths (`C:\...` → `/mnt/c/...` on WSL)
-3. Copy into managed `--op` (legacy `--output` supported) and rewrite `path` (`collected=true`, `collected-from=<chrome path>`)
+3. Copy into managed `--op` and rewrite `path` (`collected=true`, `collected-from=<chrome path>`)
 4. Fall back only to a search-API media URL whose business/asset identity
    uniquely matches the selected DOM row; otherwise fail closed
 

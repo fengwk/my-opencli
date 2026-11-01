@@ -57,11 +57,6 @@ export const canvasV0DownloadCommand = cli({
       valueRequired: true,
       help: 'Download directory (default: ~/Downloads/jimeng-agent)',
     },
-    {
-      name: 'output',
-      valueRequired: true,
-      help: 'Download directory (deprecated, use --op instead)',
-    },
   ],
   columns: cliColumns([
     'status',

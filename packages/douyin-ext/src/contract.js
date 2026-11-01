@@ -124,22 +124,7 @@ export function normalizeDownloadArgs(kwargs = {}) {
     );
   }
 
-  const hasOp = kwargs.op !== undefined && kwargs.op !== null && String(kwargs.op).trim() !== '';
-  const hasOutput = kwargs.output !== undefined && kwargs.output !== null && String(kwargs.output).trim() !== '';
-
-  if (hasOp && hasOutput) {
-    throw new ArgumentError(
-      "Invalid arguments: 'op' and 'output' cannot be combined",
-      "Pass --op as the output directory ('--output' is deprecated)."
-    );
-  }
-
-  let output = '.';
-  if (hasOp) {
-    output = String(kwargs.op).trim();
-  } else if (hasOutput) {
-    output = String(kwargs.output).trim();
-  }
+  const output = String(kwargs.op ?? '.').trim() || '.';
 
   return {
     target: rawTarget,
