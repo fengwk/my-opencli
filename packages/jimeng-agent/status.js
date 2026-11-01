@@ -61,9 +61,14 @@ export const statusCommand = cli({
       help: 'Max virtual-list scroll pages while searching (default 5)',
     },
     {
-      name: 'output',
+      name: 'op',
       valueRequired: true,
       help: 'Download directory when --download 1 (default: ~/Downloads/jimeng-agent)',
+    },
+    {
+      name: 'output',
+      valueRequired: true,
+      help: 'Download directory when --download 1 (deprecated, use --op instead)',
     },
   ],
   columns: cliColumns([

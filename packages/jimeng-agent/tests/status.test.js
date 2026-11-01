@@ -32,6 +32,12 @@ describe('jimeng-agent/status command registration', () => {
       default: 0,
       choices: [0, 1],
     });
+    expect(byName.get('op')).toMatchObject({ valueRequired: true });
+    expect(byName.get('output')).toMatchObject({ valueRequired: true });
+    expect(byName.get('output').help).toMatch(/deprecated/i);
+
+    const names = statusCommand.args.map((a) => a.name);
+    expect(names.indexOf('op')).toBeLessThan(names.indexOf('output'));
   });
 
   it('declares every field emitted by status rows', () => {
@@ -56,6 +62,11 @@ describe('jimeng-agent/status command registration', () => {
 
   it('validates through the public kebab-case contract', () => {
     expect(() => statusCommand.validateArgs(validArgs())).not.toThrow();
+    expect(() => statusCommand.validateArgs(validArgs({ op: '/tmp/op' }))).not.toThrow();
+    expect(() => statusCommand.validateArgs(validArgs({ output: '/tmp/output' }))).not.toThrow();
+    expect(() => statusCommand.validateArgs(validArgs({ op: '/tmp/op', output: '/tmp/output' }))).toThrow(
+      ArgumentError
+    );
     expect(() => statusCommand.validateArgs(validArgs({ limit: 0 }))).toThrow(ArgumentError);
     expect(() => statusCommand.validateArgs(validArgs({ 'search-key': '' }))).toThrow(ArgumentError);
   });

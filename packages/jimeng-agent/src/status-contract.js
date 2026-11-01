@@ -26,7 +26,7 @@ export function normalizeStatusArgs(kwargs = {}) {
   const limit = normalizePositiveInt(kwargs.limit, 1, 'limit');
   const maxPages = normalizePositiveInt(kwargs.max_pages, 5, 'max_pages');
   const type = normalizeTaskType(kwargs.type);
-  const outputDir = normalizeOutputDir(kwargs.output);
+  const outputDir = normalizeOutputDir(kwargs.op, kwargs.output);
 
   return {
     workspace,
@@ -76,17 +76,38 @@ function normalizeTaskType(raw) {
   return value;
 }
 
-function normalizeOutputDir(raw) {
-  if (raw === undefined || raw === null || String(raw).trim() === '') {
-    return path.join(os.homedir(), 'Downloads', 'jimeng-agent');
-  }
-  if (typeof raw !== 'string') {
+function normalizeOutputDir(op, output) {
+  const hasOp = op !== undefined && op !== null && (typeof op !== 'string' || op.trim() !== '');
+  const hasOutput = output !== undefined && output !== null && (typeof output !== 'string' || output.trim() !== '');
+
+  if (hasOp && hasOutput) {
     throw new ArgumentError(
-      `Invalid output: expected string, got ${describeType(raw)}`,
-      'Pass --output as a directory path.',
+      "Invalid arguments: 'op' and 'output' cannot be combined",
+      "Pass --op as the output directory ('--output' is deprecated).",
     );
   }
-  return path.resolve(raw.trim());
+
+  if (hasOp) {
+    if (typeof op !== 'string') {
+      throw new ArgumentError(
+        `Invalid 'op': expected string, got ${describeType(op)}`,
+        'Pass --op as a directory path.',
+      );
+    }
+    return path.resolve(op.trim());
+  }
+
+  if (hasOutput) {
+    if (typeof output !== 'string') {
+      throw new ArgumentError(
+        `Invalid 'output': expected string, got ${describeType(output)}`,
+        'Pass --op as a directory path.',
+      );
+    }
+    return path.resolve(output.trim());
+  }
+
+  return path.join(os.homedir(), 'Downloads', 'jimeng-agent');
 }
 
 function normalizeBoolFlag(raw, defaultValue) {

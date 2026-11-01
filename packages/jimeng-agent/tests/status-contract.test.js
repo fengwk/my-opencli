@@ -154,6 +154,60 @@ describe('jimeng-agent/status-contract', () => {
     expect(out.download).toBe(false);
     expect(out.limit).toBe(1);
     expect(out.type).toBe('auto');
+    expect(out.outputDir).toMatch(/Downloads[/\\]jimeng-agent$/);
+  });
+
+  it('normalizes output directory supporting --op and legacy --output, rejecting conflicts', () => {
+    // Legacy output works
+    const legacyOut = normalizeStatusArgs({
+      workspace: '1',
+      search_key: 'abc',
+      output: '/tmp/legacy-dir',
+    });
+    expect(legacyOut.outputDir).toBe('/tmp/legacy-dir');
+
+    // New op works
+    const opOut = normalizeStatusArgs({
+      workspace: '1',
+      search_key: 'abc',
+      op: '/tmp/op-dir',
+    });
+    expect(opOut.outputDir).toBe('/tmp/op-dir');
+
+    // Reject combining both non-empty
+    expect(() =>
+      normalizeStatusArgs({
+        workspace: '1',
+        search_key: 'abc',
+        op: '/tmp/op-dir',
+        output: '/tmp/legacy-dir',
+      })
+    ).toThrow(ArgumentError);
+
+    // Rejects non-string types
+    expect(() =>
+      normalizeStatusArgs({
+        workspace: '1',
+        search_key: 'abc',
+        op: 12345,
+      })
+    ).toThrow(ArgumentError);
+    expect(() =>
+      normalizeStatusArgs({
+        workspace: '1',
+        search_key: 'abc',
+        output: 12345,
+      })
+    ).toThrow(ArgumentError);
+
+    // Blank strings fall back to default
+    expect(
+      normalizeStatusArgs({
+        workspace: '1',
+        search_key: 'abc',
+        op: '   ',
+      }).outputDir
+    ).toMatch(/Downloads[/\\]jimeng-agent$/);
   });
 
   it('accepts download 1 and rejects invalid flags', () => {

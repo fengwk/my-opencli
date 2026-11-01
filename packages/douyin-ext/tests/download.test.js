@@ -47,6 +47,21 @@ describe('douyin-ext download (validation, contract, and overall deadline)', () 
     expect(() => downloadCommand.validateArgs({ target: '7701962254330128228', quality: '123p' })).toThrow(
       ArgumentError
     );
+    // Reject both non-empty op and legacy output combined
+    expect(() =>
+      downloadCommand.validateArgs({
+        target: '7701962254330128228',
+        op: './v1',
+        output: './v2',
+      })
+    ).toThrow(ArgumentError);
+    // Allow either op or legacy output alone
+    expect(() =>
+      downloadCommand.validateArgs({ target: '7701962254330128228', op: './v1' })
+    ).not.toThrow();
+    expect(() =>
+      downloadCommand.validateArgs({ target: '7701962254330128228', output: './v2' })
+    ).not.toThrow();
   });
 
   it('registers with the expected OpenCLI command contracts', () => {
@@ -60,6 +75,21 @@ describe('douyin-ext download (validation, contract, and overall deadline)', () 
     expect(downloadCommand.navigateBefore).toBe(false);
     expect(downloadCommand.defaultWindowMode).toBe('background');
     expect(downloadCommand.defaultFormat).toBe('json');
+
+    const argNames = downloadCommand.args.map((a) => a.name);
+    const opIndex = argNames.indexOf('op');
+    const outputIndex = argNames.indexOf('output');
+    expect(opIndex).toBeGreaterThan(-1);
+    expect(outputIndex).toBeGreaterThan(-1);
+    expect(opIndex).toBeLessThan(outputIndex);
+
+    const opArg = downloadCommand.args.find((a) => a.name === 'op');
+    const outputArg = downloadCommand.args.find((a) => a.name === 'output');
+    expect(opArg.valueRequired).toBe(true);
+    expect(opArg.default).toBeUndefined();
+    expect(outputArg.valueRequired).toBe(true);
+    expect(outputArg.default).toBeUndefined();
+    expect(outputArg.help).toMatch(/deprecated/i);
   });
 
   // Verify controlled deadline exhaustion using vi.spyOn(Date, 'now')
@@ -166,5 +196,73 @@ describe('douyin-ext download (validation, contract, and overall deadline)', () 
     expect(result.quality).toBe('1080p');
     expect(result.codec).toBe('h264');
     expect(result.source).toBe('v26-web.douyinvod.com');
+  });
+
+  it('executes download workflow when output directory passed via --op', async () => {
+    const targetId = '7701962254330128228';
+    const cdnUrl = 'https://v26-web.douyinvod.com/video/tos-cn-v/fullflow.mp4';
+    const dummyBuffer = createDummyMp4Buffer(2048);
+
+    const page = {
+      goto: vi.fn(async () => {}),
+      wait: vi.fn(async () => {}),
+      sleep: vi.fn(async () => {}),
+      evaluate: vi.fn(async () => ({
+        __kind: 'ok',
+        data: {
+          status_code: 0,
+          aweme_detail: {
+            aweme_id: targetId,
+            desc: 'Op test video',
+            author: { nickname: 'Tester' },
+            video: {
+              width: 1080,
+              height: 1920,
+              bit_rate: [
+                {
+                  gear_name: 'normal_1080_0',
+                  is_h265: 0,
+                  play_addr: {
+                    width: 1080,
+                    height: 1920,
+                    url_list: [cdnUrl],
+                  },
+                },
+              ],
+            },
+          },
+        },
+      })),
+    };
+
+    const mockFetch = vi.fn().mockImplementation(() =>
+      Promise.resolve({
+        status: 200,
+        headers: new Headers({
+          'content-type': 'video/mp4',
+          'content-length': String(dummyBuffer.length),
+        }),
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array(dummyBuffer));
+            controller.close();
+          },
+        }),
+      })
+    );
+    vi.stubGlobal('fetch', mockFetch);
+
+    const opDir = path.join(testDir, 'op-target');
+    const rows = await downloadCommand.func(page, {
+      target: targetId,
+      op: opDir,
+      quality: 'best',
+      timeout: 30,
+    });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe('ok');
+    expect(rows[0].path).toContain('op-target');
+    expect(fs.existsSync(rows[0].path)).toBe(true);
   });
 });

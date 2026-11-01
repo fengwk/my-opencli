@@ -154,15 +154,27 @@ describe('jimeng-agent canvas-v0-download command registration', () => {
     expect(canvasV0DownloadCommand.siteSession).toBe('ephemeral');
   });
 
-  it('exposes canvas, record-id, asset-id, definition and output', () => {
+  it('exposes canvas, record-id, asset-id, definition, op, and legacy output', () => {
     expect(canvasV0DownloadCommand.args.map((arg) => arg.name))
-      .toEqual(['canvas', 'record-id', 'asset-id', 'definition', 'output']);
+      .toEqual(['canvas', 'record-id', 'asset-id', 'definition', 'op', 'output']);
     expect(canvasV0DownloadCommand.args.find((arg) => arg.name === 'definition').choices)
       .toEqual(['origin', '720p', '480p', '360p']);
+    const opArg = canvasV0DownloadCommand.args.find((arg) => arg.name === 'op');
+    const outputArg = canvasV0DownloadCommand.args.find((arg) => arg.name === 'output');
+    expect(opArg.valueRequired).toBe(true);
+    expect(outputArg.valueRequired).toBe(true);
+    expect(outputArg.help).toMatch(/deprecated/i);
   });
 
   it('validates args through pure contract validation', () => {
     expect(() => canvasV0DownloadCommand.validateArgs({ canvas: '17883546906892' })).not.toThrow();
+    expect(() => canvasV0DownloadCommand.validateArgs({ canvas: '17883546906892', op: '/tmp/a' })).not.toThrow();
+    expect(() => canvasV0DownloadCommand.validateArgs({ canvas: '17883546906892', output: '/tmp/b' })).not.toThrow();
+    expect(() => canvasV0DownloadCommand.validateArgs({
+      canvas: '17883546906892',
+      op: '/tmp/a',
+      output: '/tmp/b',
+    })).toThrow(ArgumentError);
     expect(() => canvasV0DownloadCommand.validateArgs({
       canvas: '17883546906892',
       'record-id': '39441026984460',

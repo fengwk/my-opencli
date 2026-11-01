@@ -73,6 +73,7 @@ const V0_DOWNLOAD_INPUT_KEYS = Object.freeze([
   'asset_id',
   'record_id',
   'definition',
+  'op',
   'output',
 ]);
 const CANONICAL_ASK_KEYS = Object.freeze([
@@ -600,7 +601,7 @@ export function normalizeCanvasV0DownloadArgs(kwargs = {}) {
     recordId,
     assetId,
     definition,
-    outputDir: normalizeCanvasV0OutputDir(kwargs.output),
+    outputDir: normalizeCanvasV0OutputDir(kwargs.op, kwargs.output),
   };
 }
 
@@ -651,17 +652,38 @@ function normalizeCanvasV0RecordId(raw, caller) {
   return recordId;
 }
 
-function normalizeCanvasV0OutputDir(raw) {
-  if (raw === undefined || raw === null || String(raw).trim() === '') {
-    return path.join(os.homedir(), 'Downloads', 'jimeng-agent');
-  }
-  if (typeof raw !== 'string') {
+function normalizeCanvasV0OutputDir(op, output) {
+  const hasOp = op !== undefined && op !== null && (typeof op !== 'string' || op.trim() !== '');
+  const hasOutput = output !== undefined && output !== null && (typeof output !== 'string' || output.trim() !== '');
+
+  if (hasOp && hasOutput) {
     throw new ArgumentError(
-      `Invalid 'output': expected string, got ${describeType(raw)}`,
-      'Pass --output as a directory path.',
+      "Invalid arguments: 'op' and 'output' cannot be combined",
+      "Pass --op as the output directory ('--output' is deprecated).",
     );
   }
-  return path.resolve(raw.trim());
+
+  if (hasOp) {
+    if (typeof op !== 'string') {
+      throw new ArgumentError(
+        `Invalid 'op': expected string, got ${describeType(op)}`,
+        'Pass --op as a directory path.',
+      );
+    }
+    return path.resolve(op.trim());
+  }
+
+  if (hasOutput) {
+    if (typeof output !== 'string') {
+      throw new ArgumentError(
+        `Invalid 'output': expected string, got ${describeType(output)}`,
+        'Pass --op as a directory path.',
+      );
+    }
+    return path.resolve(output.trim());
+  }
+
+  return path.join(os.homedir(), 'Downloads', 'jimeng-agent');
 }
 
 export function evaluateCanvasV0PreInputControls(snapshot) {

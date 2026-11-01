@@ -272,7 +272,7 @@ OPENCLI_BROWSER_COMMAND_TIMEOUT=240 opencli jimeng-agent canvas-v0-download \
   --canvas 17883546906892 \
   --record-id 39441026984460 \
   --definition 720p \
-  --output ~/Downloads/jimeng-agent
+  --op ~/Downloads/jimeng-agent
 ```
 
 `canvas-v0-status` rows carry the generation state plus every fact it was derived
@@ -516,7 +516,7 @@ opencli jimeng-agent status \
   --workspace <workspace-id> \
   --search-key b7e4f19a2c0d5e68 \
   --download 1 \
-  --output ~/Downloads/jimeng-agent
+  --op ~/Downloads/jimeng-agent
 ```
 
 Returned fields include `status` (`ready` / `generating` / `cancelled` / `not_found` / `failed` / `unknown`), `data-id`, `task-type`, `path`, `collected`, `collected-from`, `download-bytes`, `download-note`, `download-error`, and `download-warning`.
@@ -525,7 +525,7 @@ Download strategy (`--download 1`) mirrors `chatgpt-agent` file collection:
 
 1. Prefer the official card **下载** button via `waitForDownload` (full quality; typically ~9MB+)
 2. Remap Windows Chrome paths (`C:\...` → `/mnt/c/...` on WSL)
-3. Copy into managed `--output` and rewrite `path` (`collected=true`, `collected-from=<chrome path>`)
+3. Copy into managed `--op` (legacy `--output` supported) and rewrite `path` (`collected=true`, `collected-from=<chrome path>`)
 4. Fall back only to a search-API media URL whose business/asset identity
    uniquely matches the selected DOM row; otherwise fail closed
 

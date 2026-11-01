@@ -35,7 +35,7 @@ export const downloadCommand = cli({
   defaultWindowMode: 'background',
   defaultFormat: 'json',
   example:
-    'opencli douyin-ext download "https://v.douyin.com/xxxx/" --output ./videos --quality best --timeout 60',
+    'opencli douyin-ext download "https://v.douyin.com/xxxx/" --op ./videos --quality best --timeout 60',
   args: [
     {
       name: 'target',
@@ -44,10 +44,14 @@ export const downloadCommand = cli({
       help: 'Douyin video ID, official video URL, or v.douyin.com short share link',
     },
     {
+      name: 'op',
+      valueRequired: true,
+      help: 'Target directory on CLI execution host for downloaded video (default current directory)',
+    },
+    {
       name: 'output',
       valueRequired: true,
-      default: '.',
-      help: 'Target directory on CLI execution host for downloaded video (default current directory)',
+      help: 'Target directory on CLI execution host for downloaded video (deprecated, use --op instead)',
     },
     {
       name: 'quality',
