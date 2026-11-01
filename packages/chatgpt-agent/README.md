@@ -48,6 +48,13 @@ non-invasively through CDP — the page's own `fetch`/XHR are never patched.
 - The surface is checked again after idle recovery, before draft cleanup or uploads, and once more before capture/send. If still hydrating, each check gets one polling window without another reload. A final URL check guards redirects during capture setup.
 - `PAGE_BROKEN` includes message-marker count, main-text length, blank-thread, session-mismatch and unavailable-conversation flags, without echoing prompt/history text. Definite unavailable-conversation notices fail before sending; submission itself is never automatically retried.
 
+### DOM compatibility (Uploads & File Downloads)
+
+- **Composer & Upload Inputs**: Supports modern `form[data-chatgpt-composer]` and `.ProseMirror[contenteditable="true"][role="textbox"]` alongside legacy `#prompt-textarea`. File inputs in the composer form are selected semantically by `aria-label` (`Attach files` / `Attach photos`), strictly preventing general files from being routed to `Take a photo`, with safe fallbacks to legacy IDs.
+- **Upload Preview Verification**: Bounded strictly to the visible composer form/root scope. Body-wide text or avatar thumbnails never trigger false-positive upload completion.
+- **Last Assistant Turn Identification**: Accurately bounds file downloads to the last assistant turn using modern role/search-unit attributes (`data-chatgpt-search-unit-key*=":assistant"`, `data-conversation-role="assistant"`) and legacy author-role attributes. Never uses prose text to guess roles, strictly isolates against user messages or prior history turns, and merges nested wrappers to avoid empty container traps or duplicate turn splits.
+- **File Chips & Sandbox Evidence**: Supports both legacy `button.behavior-btn` and modern sandbox `<a>` links. Only links with restricted sandbox evidence (`sandbox:` protocol, `/mnt/data/` path, or `data-sandbox` marker) matching the expected filename are clicked; arbitrary external links are never triggered. Real flyout inspection, download, and close remain supported against ChatGPT's stage flyout DOM.
+
 ## Requirements
 
 | Host | Minimum | Current verified release |

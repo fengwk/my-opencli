@@ -24,6 +24,8 @@ const {
   IMAGE_MAX_SIZE_BYTES,
   MAX_ATTACHMENT_COUNT,
   SPREADSHEET_MAX_SIZE_BYTES,
+  COMPOSER_IMAGE_FILE_SELECTORS,
+  COMPOSER_GENERAL_FILE_SELECTORS,
   getMaxFileSize,
   prepareLocalFiles,
   uploadComposerFiles,
@@ -122,7 +124,7 @@ describe('uploadComposerFiles — native CDP only', () => {
     expect(result.ok).toBe(true);
     expect(result.files).toEqual(['a.png']);
     expect(setFileInput).toHaveBeenCalledTimes(1);
-    expect(setFileInput).toHaveBeenCalledWith([file], '#upload-photos');
+    expect(setFileInput).toHaveBeenCalledWith([file], COMPOSER_IMAGE_FILE_SELECTORS[0]);
     // The DataTransfer / base64 fallback must not run at all.
     expect(page.evaluate).not.toHaveBeenCalledWith(expect.stringMatching(/DataTransfer/));
     expect(page.evaluate).not.toHaveBeenCalledWith(expect.stringMatching(/atob/));
@@ -130,11 +132,10 @@ describe('uploadComposerFiles — native CDP only', () => {
 
   it('treats selector-not-found as recoverable and advances to the next selector', async () => {
     const setFileInput = vi.fn();
-    // Image selector list: #upload-photos, input[type="file"][accept*="image"], #upload-files, input[type="file"]
     setFileInput
-      .mockRejectedValueOnce(new Error('No element found matching selector: #upload-photos'))
-      .mockRejectedValueOnce(new Error('No element found matching selector: input[type="file"][accept*="image"]'))
-      .mockResolvedValueOnce(undefined); // success on #upload-files
+      .mockRejectedValueOnce(new Error(`No element found matching selector: ${COMPOSER_IMAGE_FILE_SELECTORS[0]}`))
+      .mockRejectedValueOnce(new Error(`No element found matching selector: ${COMPOSER_IMAGE_FILE_SELECTORS[1]}`))
+      .mockResolvedValueOnce(undefined);
 
     const page = fakePage({ setFileInput });
     const file = tmpFileWithContent('a.jpg', 'jpg-bytes');
@@ -145,9 +146,9 @@ describe('uploadComposerFiles — native CDP only', () => {
     expect(result.files).toEqual(['a.jpg']);
     expect(setFileInput).toHaveBeenCalledTimes(3);
     expect(setFileInput.mock.calls.map((c) => c[1])).toEqual([
-      '#upload-photos',
-      'input[type="file"][accept*="image"]',
-      '#upload-files',
+      COMPOSER_IMAGE_FILE_SELECTORS[0],
+      COMPOSER_IMAGE_FILE_SELECTORS[1],
+      COMPOSER_IMAGE_FILE_SELECTORS[2],
     ]);
   });
 
@@ -162,10 +163,10 @@ describe('uploadComposerFiles — native CDP only', () => {
 
     expect(result.ok).toBe(false);
     expect(setFileInput).toHaveBeenCalledTimes(1); // only the first selector is tried
-    expect(setFileInput).toHaveBeenCalledWith([file], '#upload-photos');
+    expect(setFileInput).toHaveBeenCalledWith([file], COMPOSER_IMAGE_FILE_SELECTORS[0]);
     // Filename + selector + exact underlying error must all be present.
     expect(result.reason).toContain('a.png');
-    expect(result.reason).toContain('#upload-photos');
+    expect(result.reason).toContain(COMPOSER_IMAGE_FILE_SELECTORS[0]);
     expect(result.reason).toContain(
       'Page.fileChooserOpened not received within 8s — the input may not have opened a file chooser',
     );
@@ -182,27 +183,21 @@ describe('uploadComposerFiles — native CDP only', () => {
     const result = await uploadComposerFiles(page, prepared(file));
 
     expect(result.ok).toBe(false);
-    // Image selectors: 4 candidates; setFileInput is called exactly once per selector.
-    expect(setFileInput).toHaveBeenCalledTimes(4);
-    const tried = result.reason.match(/\(tried: ([^)]+)\)/);
-    expect(tried).not.toBeNull();
-    expect(tried[1].split(', ').sort()).toEqual([
-      '#upload-files',
-      '#upload-photos',
-      'input[type="file"]',
-      'input[type="file"][accept*="image"]',
-    ]);
+    expect(setFileInput).toHaveBeenCalledTimes(COMPOSER_IMAGE_FILE_SELECTORS.length);
+    for (const sel of COMPOSER_IMAGE_FILE_SELECTORS) {
+      expect(result.reason).toContain(sel);
+    }
     expect(result.reason).toContain('a.png');
     expect(result.files).toEqual([]);
   });
 
   it('never calls page.evaluate with File/DataTransfer/atob/typed-array payload as a fallback', async () => {
     const setFileInput = vi.fn();
-    setFileInput
-      .mockRejectedValueOnce(new Error('No element found matching selector: #upload-photos'))
-      .mockRejectedValueOnce(new Error('No element found matching selector: input[type="file"][accept*="image"]'))
-      .mockRejectedValueOnce(new Error('No element found matching selector: #upload-files'))
-      .mockRejectedValueOnce(new Error('No element found matching selector: input[type="file"]'));
+    for (let i = 0; i < COMPOSER_IMAGE_FILE_SELECTORS.length; i += 1) {
+      setFileInput.mockRejectedValueOnce(
+        new Error(`No element found matching selector: ${COMPOSER_IMAGE_FILE_SELECTORS[i]}`)
+      );
+    }
     const page = fakePage({ setFileInput });
     const file = tmpFileWithContent('a.png');
 
@@ -238,18 +233,58 @@ describe('uploadComposerFiles — native CDP only', () => {
 
     expect(result.ok).toBe(false);
     expect(result.files).toEqual(['a.png']); // first file completed
-    // 1st file: 1 selector (success). 2nd file: only first selector tried (non-selector failure short-circuits).
     expect(setFileInput).toHaveBeenCalledTimes(2);
     expect(setFileInput.mock.calls.map((c) => c[1])).toEqual([
-      '#upload-photos',         // a.png success
-      '#upload-photos',         // b.png attempt 1 — fails (transport)
+      COMPOSER_IMAGE_FILE_SELECTORS[0], // a.png success
+      COMPOSER_IMAGE_FILE_SELECTORS[0], // b.png attempt 1 — fails (transport)
     ]);
     expect(result.reason).toContain('b.png');
-    expect(result.reason).toContain('#upload-photos');
+    expect(result.reason).toContain(COMPOSER_IMAGE_FILE_SELECTORS[0]);
     expect(result.reason).toContain('-32000');
     // Inter-file gap is preserved between files.
     const sleepArgs = page.sleep.mock.calls.map((c) => c[0]);
     expect(sleepArgs).toContain(0.4);
+  });
+
+  it('routes non-image files through COMPOSER_GENERAL_FILE_SELECTORS and never targets take-photo', async () => {
+    const setFileInput = vi.fn(async () => undefined);
+    const page = fakePage({ setFileInput });
+    const file = tmpFileWithContent('data.csv');
+
+    const result = await uploadComposerFiles(page, prepared(file));
+
+    expect(result.ok).toBe(true);
+    expect(setFileInput).toHaveBeenCalledTimes(1);
+    expect(setFileInput).toHaveBeenCalledWith([file], COMPOSER_GENERAL_FILE_SELECTORS[0]);
+    expect(COMPOSER_GENERAL_FILE_SELECTORS[0]).toContain('Attach files');
+    // None of the general selectors positively select take-photo
+    for (const sel of COMPOSER_GENERAL_FILE_SELECTORS) {
+      expect(sel.includes('[aria-label="Take a photo"]')).toBe(false);
+      expect(sel.includes('[aria-label*="Take a photo"]') && !sel.includes(':not(')).toBe(false);
+    }
+  });
+
+  it('unwraps { session, data } envelope from page.evaluate seamlessly', async () => {
+    const setFileInput = vi.fn(async () => undefined);
+    const page = {
+      setFileInput,
+      evaluate: vi.fn(async (script) => {
+        if (typeof script !== 'string') return undefined;
+        if (script.includes("querySelectorAll('input[type=\"file\"]')")) {
+          return { session: 'sess-123', data: { count: 1, inputs: [{ i: 0, id: 'attach' }] } };
+        }
+        if (script.includes('findVisibleComposerRoot()')) {
+          return { session: 'sess-123', data: true };
+        }
+        return { session: 'sess-123', data: undefined };
+      }),
+      sleep: vi.fn(async () => {}),
+    };
+    const file = tmpFileWithContent('hello.txt');
+
+    const result = await uploadComposerFiles(page, prepared(file));
+    expect(result.ok).toBe(true);
+    expect(result.files).toEqual(['hello.txt']);
   });
 
   it('returns a clean error when page.setFileInput is not available', async () => {

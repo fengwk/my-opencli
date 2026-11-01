@@ -10,6 +10,39 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { previewCheckScript, unwrapEvaluateResult } from './dom-helpers.js';
+
+export const COMPOSER_IMAGE_FILE_SELECTORS = [
+  'form[data-chatgpt-composer] input[type="file"][aria-label="Attach files"]',
+  'form[data-chatgpt-composer] input[type="file"][aria-label="Attach photos or videos"]',
+  'form[data-chatgpt-composer] input[type="file"][aria-label="Attach photos"]',
+  'form input[type="file"][aria-label="Attach files"]',
+  'form input[type="file"][aria-label="Attach photos or videos"]',
+  'form input[type="file"][aria-label="Attach photos"]',
+  'input[type="file"][aria-label="Attach files"]',
+  'input[type="file"][aria-label="Attach photos or videos"]',
+  'input[type="file"][aria-label="Attach photos"]',
+  '#upload-photos',
+  '#upload-files',
+  'form[data-chatgpt-composer] input[type="file"][accept*="image"]:not([aria-label*="Take a photo"])',
+  'form input[type="file"][accept*="image"]:not([aria-label*="Take a photo"])',
+  'input[type="file"][accept*="image"]:not([aria-label*="Take a photo"])',
+  'form[data-chatgpt-composer] input[type="file"]:not([aria-label*="Take a photo"])',
+  'form input[type="file"]:not([aria-label*="Take a photo"])',
+  'input[type="file"]:not([aria-label*="Take a photo"])',
+];
+
+export const COMPOSER_GENERAL_FILE_SELECTORS = [
+  'form[data-chatgpt-composer] input[type="file"][aria-label="Attach files"]',
+  'form input[type="file"][aria-label="Attach files"]',
+  'input[type="file"][aria-label="Attach files"]',
+  '#upload-files',
+  'form[data-chatgpt-composer] input[type="file"]:not([aria-label*="photo" i]):not([aria-label*="Take a photo"])',
+  'form input[type="file"]:not([aria-label*="photo" i]):not([aria-label*="Take a photo"])',
+  'input[type="file"]:not([aria-label*="photo" i]):not([aria-label*="Take a photo"]):not([accept*="image"])',
+  'form[data-chatgpt-composer] input[type="file"]:not([accept*="image"])',
+  'form input[type="file"]:not([accept*="image"])',
+];
 
 /**
  * Path translation for the browser host that owns Chrome.
@@ -302,9 +335,7 @@ export async function uploadComposerFiles(page, preparedFiles) {
     }
 
     const isImage = String(mimeFromPath(file.nodePath)).startsWith('image/');
-    const selectors = isImage
-      ? ['#upload-photos', 'input[type="file"][accept*="image"]', '#upload-files', 'input[type="file"]']
-      : ['#upload-files', 'form input[type="file"]', 'input[type="file"]'];
+    const selectors = isImage ? COMPOSER_IMAGE_FILE_SELECTORS : COMPOSER_GENERAL_FILE_SELECTORS;
 
     /** @type {Array<{ selector: string, message: string }>} */
     const selectorMisses = [];
@@ -378,29 +409,31 @@ function isSelectorNotFound(message) {
 }
 
 async function ensureFileInputsMounted(page) {
-  let probe = await page.evaluate(`(() => {
+  let rawProbe = await page.evaluate(`(() => {
     const inputs = [...document.querySelectorAll('input[type="file"]')].map((el, i) => ({
-      i, id: el.id || '', accept: el.accept || '', multiple: !!el.multiple,
+      i, id: el.id || '', ariaLabel: el.getAttribute('aria-label') || '', accept: el.accept || '', multiple: !!el.multiple,
     }));
     return { count: inputs.length, inputs };
   })()`).catch(() => ({ count: 0, inputs: [] }));
+  let probe = unwrapEvaluateResult(rawProbe);
 
   if (!probe?.count) {
     await page.evaluate(`(() => {
       const plus = document.querySelector(
-        '#composer-plus-btn, button[data-testid="composer-plus-btn"], button[aria-label="Add files and more"]',
+        'form[data-chatgpt-composer] button[aria-label*="Attach"], button[aria-label*="Add files"], #composer-plus-btn, button[data-testid="composer-plus-btn"], button[aria-label="Add files and more"]',
       );
       if (plus) plus.click();
       return !!plus;
     })()`).catch(() => null);
     await page.sleep(0.35);
     await dismissMenus(page);
-    probe = await page.evaluate(`(() => {
+    rawProbe = await page.evaluate(`(() => {
       const inputs = [...document.querySelectorAll('input[type="file"]')].map((el, i) => ({
-        i, id: el.id || '', accept: el.accept || '', multiple: !!el.multiple,
+        i, id: el.id || '', ariaLabel: el.getAttribute('aria-label') || '', accept: el.accept || '', multiple: !!el.multiple,
       }));
       return { count: inputs.length, inputs };
     })()`).catch(() => ({ count: 0, inputs: [] }));
+    probe = unwrapEvaluateResult(rawProbe);
   }
   if (process.env.OPENCLI_VERBOSE) {
     console.error(`[chatgpt-agent] upload-probe=${JSON.stringify(probe)}`);
@@ -411,46 +444,13 @@ async function ensureFileInputsMounted(page) {
   return probe;
 }
 
-/** Filenames in composer, or visible image thumbnails (official-style). */
+/** Filenames in composer, or visible image thumbnails (strictly scoped to composer). */
 async function waitForAttachmentPreview(page, basenames, opts = {}) {
   const minCount = opts.minCount || basenames.length;
   for (let i = 0; i < 24; i += 1) {
     await page.sleep(0.5);
-    const ok = await page.evaluate(`(() => {
-      const names = ${JSON.stringify(basenames)};
-      const minCount = ${minCount};
-      const body = (document.body && (document.body.innerText || document.body.textContent)) || '';
-      if (names.every((n) => body.includes(n))) return true;
-      const form = document.querySelector('form');
-      if (form) {
-        const text = form.innerText || form.textContent || '';
-        if (names.every((n) => text.includes(n))) return true;
-      }
-      // Image upload previews near composer (official waitForChatGPTUploadPreview)
-      const composer = document.querySelector(
-        '[aria-label="Chat with ChatGPT"], [placeholder="Ask anything"], #prompt-textarea, [data-testid="prompt-textarea"]',
-      );
-      let root = composer;
-      for (let i = 0; i < 6 && root && root.parentElement; i += 1) root = root.parentElement;
-      const scope = root || document.body;
-      if (!scope) return false;
-      const isVisibleMedia = (node) => {
-        if (!(node instanceof HTMLElement)) return false;
-        const style = window.getComputedStyle(node);
-        if (style.display === 'none' || style.visibility === 'hidden') return false;
-        const rect = node.getBoundingClientRect();
-        const width = node.naturalWidth || node.videoWidth || rect.width || 0;
-        const height = node.naturalHeight || node.videoHeight || rect.height || 0;
-        return width > 24 && height > 24;
-      };
-      const previews = Array.from(scope.querySelectorAll('img[src], canvas, video')).filter(isVisibleMedia);
-      const removeBtns = Array.from(scope.querySelectorAll('button')).filter((b) => {
-        if (!(b instanceof HTMLElement)) return false;
-        const a = (b.getAttribute('aria-label') || '') + (b.innerText || '');
-        return /remove|删除|dismiss|close file|移除/i.test(a);
-      });
-      return previews.length >= minCount || removeBtns.length >= minCount;
-    })()`).catch(() => false);
+    const raw = await page.evaluate(previewCheckScript(basenames, minCount)).catch(() => false);
+    const ok = unwrapEvaluateResult(raw);
     if (ok) return true;
   }
   return false;
