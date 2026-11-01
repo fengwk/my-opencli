@@ -6,8 +6,9 @@
  * 2. Identifying the last assistant message turn strictly (explicit role/search-unit ending with assistant,
  *    never expanding empty markers into unmarked ancestors, never using prose guessing).
  * 3. File chip identification (button and sandbox:/mnt/data/ links, strictly rejecting external URLs).
- * 4. Composer-scoped upload preview check.
- * 5. Page.evaluate return unwrap ({ session, data } compatibility).
+ * 4. Dedicated resource-row download identification (modern ChatGPT file row with preview + Download file button).
+ * 5. Composer-scoped upload preview check.
+ * 6. Page.evaluate return unwrap ({ session, data } compatibility).
  */
 
 /**
@@ -158,7 +159,123 @@ export function lastAssistantTurnSnippet() {
 }
 
 /**
- * File chip detection in the last assistant turn.
+ * Modern resource-row download identification and click snippet.
+ * Real DOM structure:
+ * <span class="group/resource-row relative">
+ *   <button aria-label="Open preview of <file>" ...></button>
+ *   <span>
+ *     <span title="<file>">...</span>
+ *     <span>
+ *       <span class="... opacity-0 group-focus-within/resource-row:opacity-100 group-hover/resource-row:opacity-100">
+ *         <button type="button" aria-label="Download file">...</button>
+ *       </span>
+ *     </span>
+ *   </span>
+ * </span>
+ */
+export function resourceRowSnippet() {
+  return `
+    ${lastAssistantTurnSnippet()}
+
+    const nameMatches = (str, fileName) => {
+      if (!str || !fileName) return false;
+      const s = String(str).trim();
+      const fn = String(fileName).trim();
+      if (s === fn || s.includes(fn)) return true;
+      try { if (decodeURIComponent(s).includes(fn)) return true; } catch (_) {}
+      try { if (s.includes(encodeURIComponent(fn))) return true; } catch (_) {}
+      return false;
+    };
+
+    const isDownloadAffordance = (btn) => {
+      if (!btn || !(btn instanceof HTMLElement)) return false;
+      if (btn.hidden || btn.hasAttribute('hidden')) return false;
+      if (btn.closest('[inert], [aria-hidden="true"]')) return false;
+      const st = window.getComputedStyle(btn);
+      if (st.display === 'none' || st.visibility === 'hidden') return false;
+      const aria = (btn.getAttribute('aria-label') || '').trim();
+      const text = (btn.innerText || btn.textContent || '').trim();
+      const label = (aria + ' ' + text).toLowerCase();
+      if (/preview|预览/i.test(label)) return false;
+      return /download\\s*file|下载文件/i.test(label)
+        || /^(download|下载)$/i.test(aria)
+        || /^(download|下载)$/i.test(text);
+    };
+
+    const findResourceRowContext = (fileName) => {
+      const root = findLastAssistantTurnRoot();
+      if (!root) return null;
+
+      const candidates = [...root.querySelectorAll('button, [title], span, a')].filter((el) => {
+        if (!el || !(el instanceof HTMLElement)) return false;
+        if (el.hidden || el.hasAttribute('hidden')) return false;
+        if (el.closest('[inert], [aria-hidden="true"]')) return false;
+        const aria = el.getAttribute('aria-label') || '';
+        const title = el.getAttribute('title') || '';
+        const text = el.innerText || el.textContent || '';
+        return nameMatches(aria, fileName) || nameMatches(title, fileName) || nameMatches(text, fileName);
+      });
+
+      for (const cand of candidates) {
+        const row = cand.closest('.group\\/resource-row, [class*="group/resource-row"], [class*="resource-row"]');
+        if (!row || !root.contains(row)) continue;
+
+        // Ensure row does not encompass multiple sibling resource rows
+        const nestedRows = row.querySelectorAll('.group\\/resource-row, [class*="group/resource-row"], [class*="resource-row"]');
+        if (nestedRows.length > 1) continue;
+
+        let previewBtn = row.querySelector('button[aria-label*="preview" i], button[aria-label*="预览" i]');
+        if (!previewBtn) {
+          const rowBtns = [...row.querySelectorAll('button')].filter((b) => !isDownloadAffordance(b));
+          previewBtn = rowBtns.find((b) => nameMatches(b.getAttribute('aria-label'), fileName)) || rowBtns[0] || null;
+        }
+
+        const dlBtn = [...row.querySelectorAll('button')].find((b) => b !== previewBtn && isDownloadAffordance(b));
+        if (dlBtn) {
+          return { row, previewBtn, dlBtn };
+        }
+      }
+
+      return null;
+    };
+
+    const findResourceRowDownload = (fileName) => {
+      const ctx = findResourceRowContext(fileName);
+      if (!ctx) return { found: false, scope: 'last-assistant' };
+      return {
+        found: true,
+        mode: 'resource-row',
+        aria: (ctx.dlBtn.getAttribute('aria-label') || '').trim(),
+        previewAria: (ctx.previewBtn?.getAttribute('aria-label') || '').trim(),
+        scope: 'last-assistant',
+      };
+    };
+
+    const clickResourceRowDownload = (fileName) => {
+      const ctx = findResourceRowContext(fileName);
+      if (!ctx) return { ok: false, reason: 'resource-row-download-missing', scope: 'last-assistant' };
+      if (ctx.previewBtn && typeof ctx.previewBtn.focus === 'function') {
+        ctx.previewBtn.focus();
+      }
+      if (typeof ctx.dlBtn.scrollIntoView === 'function') {
+        ctx.dlBtn.scrollIntoView({ block: 'center', inline: 'center' });
+      }
+      ctx.dlBtn.focus?.();
+      ctx.dlBtn.click();
+      return {
+        ok: true,
+        mode: 'resource-row',
+        tag: ctx.dlBtn.tagName,
+        aria: (ctx.dlBtn.getAttribute('aria-label') || '').trim(),
+        previewAria: (ctx.previewBtn?.getAttribute('aria-label') || '').trim(),
+        scope: 'last-assistant',
+      };
+    };
+  `;
+}
+
+/**
+ * File chip detection in the last assistant turn (legacy button / sandbox link fallback).
  * - Supports button.behavior-btn, button[aria-label], button
  * - Supports sandbox <a> links strictly: rejects any external URL regardless of path or data-sandbox;
  *   only accepts sandbox:/mnt/data/... or same-origin download URLs with sandbox proof.

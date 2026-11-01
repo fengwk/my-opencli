@@ -53,7 +53,11 @@ non-invasively through CDP — the page's own `fetch`/XHR are never patched.
 - **Composer & Upload Inputs**: Supports modern `form[data-chatgpt-composer]` and `.ProseMirror[contenteditable="true"][role="textbox"]` alongside legacy `#prompt-textarea`. File inputs in the composer form are selected semantically by `aria-label` (`Attach files` / `Attach photos`), strictly preventing general files from being routed to `Take a photo`, with safe fallbacks to legacy IDs.
 - **Upload Preview Verification**: Bounded strictly to the visible composer form/root scope. Body-wide text or avatar thumbnails never trigger false-positive upload completion.
 - **Last Assistant Turn Identification**: Accurately bounds file downloads to the last assistant turn using modern role/search-unit attributes (`data-chatgpt-search-unit-key*=":assistant"`, `data-conversation-role="assistant"`) and legacy author-role attributes. Never uses prose text to guess roles, strictly isolates against user messages or prior history turns, and merges nested wrappers to avoid empty container traps or duplicate turn splits.
-- **File Chips & Sandbox Evidence**: Supports both legacy `button.behavior-btn` and modern sandbox `<a>` links. Only links with restricted sandbox evidence (`sandbox:` protocol, `/mnt/data/` path, or `data-sandbox` marker) matching the expected filename are clicked; arbitrary external links are never triggered. Real flyout inspection, download, and close remain supported against ChatGPT's stage flyout DOM.
+- **File Downloads & Resource Rows**: Supports modern ChatGPT resource rows (`.group/resource-row` with preview button and hover `Download file` button), legacy flyout panels (`section[data-testid="screen-threadFlyOut"]`), and legacy direct file chips (`button.behavior-btn` and sandbox `<a>` links).
+  - Modern resource rows: focuses the preview button to expose the download button and clicks `Download file` directly without opening the preview or polling legacy flyouts (`mode: 'resource-row'`).
+  - Strict isolation: files are resolved strictly within the latest assistant turn, guaranteeing row isolation between different files and rejecting user/history decoys.
+  - Race elimination: `page.waitForDownload` is armed before clicking any download trigger across all paths (`resource-row`, `panel`, `chip-direct`).
+  - Strict sandbox evidence: arbitrary external links are strictly rejected.
 
 ## Requirements
 

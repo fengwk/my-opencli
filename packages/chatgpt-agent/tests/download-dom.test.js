@@ -52,4 +52,12 @@ describe('download-dom helpers', () => {
     });
     expect(out.files.map((f) => f.name)).toEqual(['hello.json']);
   });
+
+  it('normalizes chinese filename with comma/underscore', () => {
+    const names = collectExpectedFileNames({
+      text: '[下载清单](sandbox:/mnt/data/番茄鸡蛋意大利面_两人份采购清单.csv)',
+      files: [],
+    });
+    expect(names).toEqual(['番茄鸡蛋意大利面_两人份采购清单.csv']);
+  });
 });

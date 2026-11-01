@@ -1,20 +1,22 @@
 /**
  * Directed DOM regression tests for ChatGPT DOM adaptation.
  *
- * Verifies that the generated JavaScript scripts (fileChipSnippet, composerRootSnippet,
- * previewCheckScript) execute correctly against:
+ * Verifies that the generated JavaScript scripts (fileChipSnippet, resourceRowSnippet,
+ * composerRootSnippet, previewCheckScript) execute correctly against:
  * 1. Real new ChatGPT DOM structures (form[data-chatgpt-composer], ProseMirror, 4 React file inputs,
  *    search-unit / conversation-role turns, sandbox <a> links).
- * 2. Legacy ChatGPT DOM structures (#prompt-textarea, behavior-btn buttons, author-role turns).
- * 3. Multi-turn history with user decoy links and historic assistant files (strict isolation).
- * 4. Empty marker protection: empty markers do NOT expand into broad unmarked parent containers or history.
- * 5. Strict sandbox evidence protection: external URLs (https://evil.example/mnt/data/x, data-sandbox)
- *    are strictly rejected.
+ * 2. Modern resource-row file download path:
+ *    - Real DOM from live inspection: .group/resource-row with preview button and hover Download file button.
+ *    - Focuses preview button to reveal download button, strictly clicks Download file (never clicks preview).
+ *    - Strict turn & row isolation: no row crossing across files, user/history decoys rejected.
+ * 3. End-to-end race elimination with fakePage:
+ *    - waitForDownload is armed BEFORE clicking download controls.
+ *    - No old flyout polling for resource-row path.
+ *    - Distinguishes mode: 'resource-row' / 'panel' / 'chip-direct'.
+ * 4. Legacy ChatGPT DOM structures (#prompt-textarea, behavior-btn buttons, author-role turns).
+ * 5. Strict sandbox evidence protection: external URLs strictly rejected.
  * 6. Composer-scoped upload preview: no fallback to body, random forms with buttons rejected.
  * 7. Strict visibility: rejects hidden, inert, aria-hidden="true", and zero-dimension elements.
- *
- * All tests execute the actual generated script strings in an isolated VM context against a DOM mock
- * backed by Cheerio.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -26,8 +28,12 @@ import {
   fileChipSnippet,
   lastAssistantTurnSnippet,
   previewCheckScript,
+  resourceRowSnippet,
   unwrapEvaluateResult,
 } from '../src/dom-helpers.js';
+import {
+  downloadFilesViaDomClick,
+} from '../src/download-dom.js';
 import {
   COMPOSER_GENERAL_FILE_SELECTORS,
   COMPOSER_IMAGE_FILE_SELECTORS,
@@ -158,15 +164,254 @@ function createDomSandbox(html, { origin = 'https://chatgpt.com', href = 'https:
   return { sandbox, runScript, $ };
 }
 
+describe('DOM Regression: Modern ChatGPT Resource-Row Download', () => {
+  const liveDomHtml = `
+    <div data-conversation-role="assistant" data-chatgpt-search-unit-key="fallback-turn-0:1:assistant">
+      <span class="group/resource-row relative">
+        <button aria-label="Open preview of 番茄鸡蛋意大利面_两人份采购清单.csv" class="absolute inset-0" type="button" aria-busy="false"></button>
+        <span class="pointer-events-none relative z-10">
+          <span>
+            <span class="truncate" title="番茄鸡蛋意大利面_两人份采购清单.csv">番茄鸡蛋意大利面_两人份采购清单.csv</span>
+          </span>
+          <span class="absolute end-3 top-1/2">
+            <span class="pointer-events-none opacity-0 group-focus-within/resource-row:pointer-events-auto group-focus-within/resource-row:opacity-100 group-hover/resource-row:pointer-events-auto group-hover/resource-row:opacity-100">
+              <button type="button" aria-label="Download file" id="live-dl-btn">svg icon</button>
+            </span>
+          </span>
+        </span>
+      </span>
+    </div>
+  `;
+
+  it('locates modern resource-row and clicks Download file without clicking preview', () => {
+    const { runScript, sandbox } = createDomSandbox(liveDomHtml);
+
+    // 1. Locate resource-row download affordance
+    const found = runScript(`(() => {
+      ${resourceRowSnippet()}
+      return findResourceRowDownload('番茄鸡蛋意大利面_两人份采购清单.csv');
+    })()`);
+
+    expect(found.found).toBe(true);
+    expect(found.mode).toBe('resource-row');
+    expect(found.aria).toBe('Download file');
+    expect(found.previewAria).toBe('Open preview of 番茄鸡蛋意大利面_两人份采购清单.csv');
+
+    // 2. Click resource-row download affordance
+    const clicked = runScript(`(() => {
+      ${resourceRowSnippet()}
+      return clickResourceRowDownload('番茄鸡蛋意大利面_两人份采购清单.csv');
+    })()`);
+
+    expect(clicked.ok).toBe(true);
+    expect(clicked.mode).toBe('resource-row');
+
+    // Verify DOM state: preview focused, download button clicked, preview button NOT clicked!
+    const previewBtn = sandbox.document.querySelector('button[aria-label^="Open preview"]');
+    const dlBtn = sandbox.document.querySelector('#live-dl-btn');
+
+    expect(previewBtn._focused).toBe(true);
+    expect(previewBtn._clicked).toBeUndefined(); // NEVER clicked!
+    expect(dlBtn._clicked).toBe(true); // Download clicked!
+  });
+
+  it('does not cross rows between multiple different files in the same turn', () => {
+    const multiRowHtml = `
+      <div data-conversation-role="assistant" data-chatgpt-search-unit-key="fallback-turn-0:1:assistant">
+        <!-- Row 1: file_a.csv -->
+        <span class="group/resource-row relative" id="row-a">
+          <button aria-label="Open preview of file_a.csv" type="button"></button>
+          <span>
+            <span title="file_a.csv">file_a.csv</span>
+            <span><button type="button" aria-label="Download file" id="dl-a"></button></span>
+          </span>
+        </span>
+
+        <!-- Row 2: file_b.csv -->
+        <span class="group/resource-row relative" id="row-b">
+          <button aria-label="Open preview of file_b.csv" type="button"></button>
+          <span>
+            <span title="file_b.csv">file_b.csv</span>
+            <span><button type="button" aria-label="Download file" id="dl-b"></button></span>
+          </span>
+        </span>
+      </div>
+    `;
+    const { runScript, sandbox } = createDomSandbox(multiRowHtml);
+
+    // Click file_b.csv only
+    const clickedB = runScript(`(() => {
+      ${resourceRowSnippet()}
+      return clickResourceRowDownload('file_b.csv');
+    })()`);
+    expect(clickedB.ok).toBe(true);
+
+    const dlA = sandbox.document.querySelector('#dl-a');
+    const dlB = sandbox.document.querySelector('#dl-b');
+    expect(dlB._clicked).toBe(true);
+    expect(dlA._clicked).toBeUndefined(); // Must NOT touch dlA!
+  });
+
+  it('strictly isolates against user decoys and historic assistant turns', () => {
+    const decoyHtml = `
+      <!-- User turn decoy with same filename -->
+      <div data-conversation-role="user" data-chatgpt-search-unit-key="fallback-turn-0:0:user">
+        <span class="group/resource-row relative">
+          <button aria-label="Open preview of target.csv"></button>
+          <span><button type="button" aria-label="Download file" id="user-decoy"></button></span>
+        </span>
+      </div>
+
+      <!-- Old assistant turn decoy with same filename -->
+      <div data-conversation-role="assistant" data-chatgpt-search-unit-key="fallback-turn-0:1:assistant">
+        <span class="group/resource-row relative">
+          <button aria-label="Open preview of target.csv"></button>
+          <span><button type="button" aria-label="Download file" id="old-assistant-decoy"></button></span>
+        </span>
+      </div>
+
+      <!-- Latest assistant turn with a DIFFERENT file -->
+      <div data-conversation-role="assistant" data-chatgpt-search-unit-key="fallback-turn-0:2:assistant">
+        <span class="group/resource-row relative">
+          <button aria-label="Open preview of actual_latest.json"></button>
+          <span><button type="button" aria-label="Download file" id="latest-btn"></button></span>
+        </span>
+      </div>
+    `;
+    const { runScript } = createDomSandbox(decoyHtml);
+
+    // Searching for target.csv must fail because target.csv is not in the latest assistant turn
+    const found = runScript(`(() => {
+      ${resourceRowSnippet()}
+      return findResourceRowDownload('target.csv');
+    })()`);
+    expect(found.found).toBe(false);
+
+    // Searching for actual_latest.json must succeed
+    const foundLatest = runScript(`(() => {
+      ${resourceRowSnippet()}
+      return findResourceRowDownload('actual_latest.json');
+    })()`);
+    expect(foundLatest.found).toBe(true);
+  });
+});
+
+describe('DOM Regression: End-to-End Download Order and Race Elimination (fakePage)', () => {
+  it('arms waitForDownload BEFORE clicking download button and never polls flyout for resource-row', async () => {
+    const html = `
+      <div data-conversation-role="assistant" data-chatgpt-search-unit-key="fallback-turn-0:1:assistant">
+        <span class="group/resource-row relative">
+          <button aria-label="Open preview of 番茄鸡蛋意大利面_两人份采购清单.csv" class="absolute inset-0" type="button"></button>
+          <span>
+            <span title="番茄鸡蛋意大利面_两人份采购清单.csv">番茄鸡蛋意大利面_两人份采购清单.csv</span>
+            <span>
+              <button type="button" aria-label="Download file" id="dl-file">svg</button>
+            </span>
+          </span>
+        </span>
+      </div>
+    `;
+    const { runScript, sandbox } = createDomSandbox(html);
+
+    const callTrace = [];
+    const fakePage = {
+      evaluate: async (script) => {
+        const isFind = script.includes('return findResourceRowDownload');
+        const isClick = script.includes('return clickResourceRowDownload');
+        const isFlyout = script.includes('return inspectFlyout');
+        callTrace.push({ type: 'evaluate', isFind, isClick, isFlyout });
+        return runScript(script);
+      },
+      waitForDownload: (name, timeout) => {
+        callTrace.push({ type: 'waitForDownload', name, timeout });
+        return Promise.resolve({
+          downloaded: true,
+          filename: '番茄鸡蛋意大利面_两人份采购清单.csv',
+          path: '/downloads/番茄鸡蛋意大利面_两人份采购清单.csv',
+        });
+      },
+      sleep: async (sec) => {
+        callTrace.push({ type: 'sleep', sec });
+      },
+    };
+
+    const results = await downloadFilesViaDomClick(fakePage, ['番茄鸡蛋意大利面_两人份采购清单.csv']);
+
+    expect(results).toHaveLength(1);
+    expect(results[0].downloaded).toBe(true);
+    expect(results[0].clickMeta.mode).toBe('resource-row');
+
+    // Call trace assertions:
+    // 1. waitForDownload must occur BEFORE clickResourceRowDownload
+    const waitIdx = callTrace.findIndex((c) => c.type === 'waitForDownload');
+    const clickIdx = callTrace.findIndex((c) => c.isClick);
+    expect(waitIdx).toBeGreaterThan(-1);
+    expect(clickIdx).toBeGreaterThan(-1);
+    expect(waitIdx).toBeLessThan(clickIdx); // Armed BEFORE click!
+
+    // 2. inspectFlyout must NOT have been polled
+    const flyoutPolls = callTrace.filter((c) => c.isFlyout);
+    expect(flyoutPolls).toHaveLength(0);
+
+    // 3. In the DOM, preview was not clicked
+    const previewBtn = sandbox.document.querySelector('button[aria-label^="Open preview"]');
+    const dlBtn = sandbox.document.querySelector('#dl-file');
+    expect(previewBtn._clicked).toBeUndefined();
+    expect(dlBtn._clicked).toBe(true);
+  });
+
+  it('falls back to legacy panel when resource-row is absent, arming waiter before clicking', async () => {
+    const legacyHtml = `
+      <div data-conversation-role="assistant" data-chatgpt-search-unit-key="fallback-turn-0:1:assistant">
+        <button class="behavior-btn" aria-label="legacy_doc.pdf">legacy_doc.pdf</button>
+      </div>
+      <section data-testid="screen-threadFlyOut" aria-label="legacy_doc.pdf">
+        <header>
+          <button aria-label="Download">Download</button>
+          <button data-testid="close-button" aria-label="Close"></button>
+        </header>
+      </section>
+    `;
+    const { runScript } = createDomSandbox(legacyHtml);
+
+    const callTrace = [];
+    const fakePage = {
+      evaluate: async (script) => {
+        const isChipClick = script.includes('return clickFileChip');
+        callTrace.push({ type: 'evaluate', isChipClick });
+        return runScript(script);
+      },
+      waitForDownload: (name, timeout) => {
+        callTrace.push({ type: 'waitForDownload', name });
+        return Promise.resolve({
+          downloaded: true,
+          filename: 'legacy_doc.pdf',
+          path: '/downloads/legacy_doc.pdf',
+        });
+      },
+      sleep: async () => {},
+    };
+
+    const results = await downloadFilesViaDomClick(fakePage, ['legacy_doc.pdf']);
+
+    expect(results).toHaveLength(1);
+    expect(results[0].downloaded).toBe(true);
+    expect(results[0].clickMeta.mode).toBe('panel');
+
+    // Waiter must still be armed BEFORE clickFileChip!
+    const waitIdx = callTrace.findIndex((c) => c.type === 'waitForDownload');
+    const chipClickIdx = callTrace.findIndex((c) => c.isChipClick);
+    expect(waitIdx).toBeLessThan(chipClickIdx);
+  });
+});
+
 describe('DOM Regression: Strict Sandbox Link Evidence Protection', () => {
   it('strictly rejects external URLs with /mnt/data/ path or data-sandbox attribute', () => {
     const html = `
       <div data-conversation-role="assistant" data-chatgpt-search-unit-key="fallback-turn-0:1:assistant">
-        <!-- Attack vectors: external URLs disguised with /mnt/data/ or data-sandbox -->
         <a href="https://evil.example/mnt/data/report.json">report.json</a>
         <a href="https://attacker.org/report.json" data-sandbox="true">report.json</a>
         <a href="//phishing.site/mnt/data/report.json">report.json</a>
-        <!-- Genuine sandbox link -->
         <a href="sandbox:/mnt/data/report.json">Download report.json</a>
       </div>
     `;
@@ -177,7 +422,6 @@ describe('DOM Regression: Strict Sandbox Link Evidence Protection', () => {
       return findFileChip('report.json');
     })()`);
 
-    // Must strictly select the sandbox:/ link, never external domains
     expect(chip.found).toBe(true);
     expect(chip.href).toBe('sandbox:/mnt/data/report.json');
   });
@@ -236,7 +480,6 @@ describe('DOM Regression: Composer Scope Strict Resolution', () => {
       return findVisibleComposerRoot();
     })()`);
 
-    // Must return null, not adopt arbitrary form
     expect(root).toBeNull();
   });
 
@@ -278,18 +521,15 @@ describe('DOM Regression: Composer Scope Strict Resolution', () => {
 describe('DOM Regression: Last Assistant Turn Strict Bounding & Empty Marker Protection', () => {
   it('empty marker does NOT expand to unmarked broad parent containers containing history', () => {
     const html = `
-      <!-- Unmarked broad conversation container with history -->
       <div class="unmarked-stream-container">
         <div class="user-turn">
           <a href="sandbox:/mnt/data/decoy.csv">decoy.csv</a>
         </div>
-        <!-- Empty marker that has assistant search-unit-key -->
         <div data-chatgpt-search-unit-key="fallback-turn-0:1:assistant"></div>
       </div>
     `;
     const { runScript } = createDomSandbox(html);
 
-    // The empty marker must NOT swallow the unmarked container and expose decoy.csv
     const chip = runScript(`(() => {
       ${fileChipSnippet()}
       return findFileChip('decoy.csv');
