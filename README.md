@@ -8,6 +8,7 @@ Personal OpenCLI plugins, installed via the official plugin mechanism.
 |------|------|-------------|
 | `utils` | `packages/utils` | Host-Chrome utilities; `opencli utils scrape` fetches pages in the background by default with my-mcp HTML/markdown cleaning |
 | `chatgpt-agent` | `packages/chatgpt-agent` | Protocol-stream ChatGPT agent (HTTP-stream text/sources + WS image/file messages, sequential upload, DOM file download, official-style image export) |
+| `douyin-ext` | `packages/douyin-ext` | Douyin video downloader (in-page read-only metadata fetch + Node streaming MP4 download, bypassing third-party extensions) |
 | `gemini-agent` | `packages/gemini-agent` | Protocol-stream Gemini agent (StreamGenerate text/images, sequential upload, native generated-image download) |
 | `jimeng-agent` | `packages/jimeng-agent` | Jimeng Agent video drafts on Generate and AI Canvas (checkpointed prepare/`--submit`, exact resource correlation, status search, official download) |
 
@@ -21,7 +22,7 @@ These plugins **require an OpenCLI fork**, not stock upstream alone:
 | CLI (`@jackwener/opencli`) | **`>=1.8.7`** (shared baseline) | package `1.8.7-fengwk.11` (git tag `fork-v1.8.7-fengwk.11`) | Browser window/session controls, network/frame APIs, WS capture, hardened file input, `Arg.repeatable` |
 | Browser Bridge / Extension | **`>=1.0.32`** (shared baseline) | paired Extension **`1.0.32`** | Browser/frame/CDP/WS capture, tab-scoped downloads, and ephemeral warm-tab reuse must match the CLI |
 
-`chatgpt-agent ask` additionally requires local fork CLI `1.8.8-fengwk.2` and paired Extension `1.0.35` for HTTP SSE capture. This pair has not been published as a fork Release. Other plugins retain the shared baseline; each plugin's manifest entry declares its own minimum.
+`chatgpt-agent ask` additionally requires local fork CLI `1.8.8-fengwk.2` and paired Extension `1.0.35` for HTTP SSE capture. This pair has not been published as a fork Release. `douyin-ext download` requires fork CLI `>=2.0.2-fengwk.1` and paired Browser Bridge `1.0.37`; note that CLI `2.0.2-fengwk.1` and Bridge `1.0.37` are currently in preparation for upcoming release and not yet published. Other plugins retain the shared baseline; each plugin's manifest entry declares its own minimum.
 
 Minimum ranges are the compatibility floor; the verified columns name the paired fork Release that has been published and checked. Package version (`1.8.7-fengwk.11`) and git tag (`fork-v1.8.7-fengwk.11`) are related but not the same string — do not treat the package version as a tag name.
 
@@ -41,11 +42,13 @@ Exact local install from the subplugin package path:
 REPO="$(pwd)"
 
 opencli plugin uninstall chatgpt-agent 2>/dev/null || true
+opencli plugin uninstall douyin-ext 2>/dev/null || true
 opencli plugin uninstall gemini-agent 2>/dev/null || true
 opencli plugin uninstall jimeng-agent 2>/dev/null || true
 opencli plugin uninstall utils 2>/dev/null || true
 # Local installs use the standalone subplugin path (not the monorepo root).
 opencli plugin install "${REPO}/packages/chatgpt-agent"
+opencli plugin install "${REPO}/packages/douyin-ext"
 opencli plugin install "${REPO}/packages/gemini-agent"
 opencli plugin install "${REPO}/packages/jimeng-agent"
 opencli plugin install "${REPO}/packages/utils"
@@ -53,6 +56,7 @@ opencli plugin install "${REPO}/packages/utils"
 # verify
 opencli plugin list
 opencli chatgpt-agent ask --help
+opencli douyin-ext download --help
 opencli gemini-agent ask --help
 opencli jimeng-agent video --help
 opencli jimeng-agent canvas-create --help
@@ -72,6 +76,8 @@ Install individual subplugins from this GitHub repo:
 ```bash
 opencli plugin uninstall chatgpt-agent 2>/dev/null || true
 opencli plugin install github:fengwk/my-opencli/chatgpt-agent
+opencli plugin uninstall douyin-ext 2>/dev/null || true
+opencli plugin install github:fengwk/my-opencli/douyin-ext
 opencli plugin uninstall gemini-agent 2>/dev/null || true
 opencli plugin install github:fengwk/my-opencli/gemini-agent
 opencli plugin uninstall jimeng-agent 2>/dev/null || true
@@ -81,6 +87,7 @@ opencli plugin install github:fengwk/my-opencli/utils
 
 opencli plugin list
 opencli chatgpt-agent ask --help
+opencli douyin-ext download --help
 opencli gemini-agent ask --help
 opencli jimeng-agent video --help
 opencli jimeng-agent canvas-create --help
@@ -124,6 +131,10 @@ Notes:
 ```bash
 # scrape a URL in the host Chrome without stealing the current tab
 opencli utils scrape https://example.com --only-main-content true --window background
+
+# Douyin video download (short link, official URL, or numeric ID)
+opencli douyin-ext download "https://v.douyin.com/xxxx/" --output ./videos --quality best
+opencli douyin-ext download 7701962254330128228 --output ./videos --quality 1080p --timeout 60
 
 # text
 opencli chatgpt-agent ask '用一句话说明今天天气如何' --timeout 180

@@ -1,0 +1,13 @@
+{
+  "name": "opencli-plugin-douyin-ext",
+  "version": "0.1.62",
+  "private": true,
+  "type": "module",
+  "description": "Douyin video downloads via in-page read-only metadata fetch and local streaming MP4 download",
+  "engines": {
+    "node": ">=20.18.1"
+  },
+  "peerDependencies": {
+    "@jackwener/opencli": ">=2.0.2-fengwk.1"
+  }
+}
