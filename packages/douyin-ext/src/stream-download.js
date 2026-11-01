@@ -225,11 +225,12 @@ export async function downloadVideoToFile({
   let lastError = null;
 
   for (const candidateUrl of variant.urls ?? []) {
-    const tmpFileName = `.tmp_douyin_${id}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.mp4`;
-    const tmpFilePath = path.join(resolvedOutputDir, tmpFileName);
-
+    let taskDir = null;
     let res = null;
     try {
+      taskDir = await fs.promises.mkdtemp(path.join(resolvedOutputDir, `.douyin-tmp-${id}-`));
+      const partFilePath = path.join(taskDir, 'video.part');
+
       const hopResult = await fetchStreamWithHops(candidateUrl, {
         userAgent,
         timeoutSignal,
@@ -242,8 +243,8 @@ export async function downloadVideoToFile({
         throw new CommandExecutionError('Response body is empty or unavailable');
       }
 
-      // Exclusive open write stream
-      const writeStream = fs.createWriteStream(tmpFilePath, { flags: 'wx' });
+      // Exclusive open write stream inside owned task directory
+      const writeStream = fs.createWriteStream(partFilePath, { flags: 'wx' });
       const validator = createMp4HeaderValidator();
 
       let writtenBytes = 0;
@@ -281,10 +282,10 @@ export async function downloadVideoToFile({
         }
       }
 
-      // Atomic, non-overwriting rename via hardlink + unlink
+      // Atomic, non-overwriting rename via hardlink from owned task directory
       const cleanTitle = sanitizeFilename(title);
       const baseName = cleanTitle ? `${cleanTitle}_${id}` : String(id);
-      const finalTargetPath = await atomicNoOverwriteLink(tmpFilePath, resolvedOutputDir, baseName, '.mp4');
+      const finalTargetPath = await atomicNoOverwriteLink(partFilePath, resolvedOutputDir, baseName, '.mp4');
 
       return {
         status: 'ok',
@@ -301,12 +302,15 @@ export async function downloadVideoToFile({
       if (res?.body) {
         await res.body.cancel().catch(() => {});
       }
-      fs.rmSync(tmpFilePath, { force: true });
       lastError = err;
       if (timeoutSignal.aborted) {
         throw new CommandExecutionError(
           `Video download timed out after ${Math.round(timeoutMs / 1000)} seconds`
         );
+      }
+    } finally {
+      if (taskDir) {
+        await fs.promises.rm(taskDir, { recursive: true, force: true }).catch(() => {});
       }
     }
   }

@@ -2,6 +2,7 @@ import {
   AuthRequiredError,
   CommandExecutionError,
   EmptyResultError,
+  TimeoutError,
 } from '@jackwener/opencli/errors';
 
 export function unwrapEvaluateResult(payload) {
@@ -35,6 +36,13 @@ export async function fetchAwemeDetailFromPage(
   id,
   { timeoutMs = 30000, waitTime = 2.5 } = {}
 ) {
+  const deadline = Date.now() + timeoutMs;
+  const getRemainingMs = () => deadline - Date.now();
+
+  if (getRemainingMs() <= 0) {
+    throw new TimeoutError(`Douyin detail request timed out before navigation`);
+  }
+
   const videoPageUrl = `https://www.douyin.com/video/${id}`;
   try {
     await page.goto(videoPageUrl);
@@ -44,17 +52,31 @@ export async function fetchAwemeDetailFromPage(
     );
   }
 
-  // Bounded wait: OpenCLI sleep/wait takes seconds
-  if (typeof page.wait === 'function') {
-    await page.wait({ time: waitTime });
-  } else if (typeof page.sleep === 'function') {
-    await page.sleep(waitTime);
+  const remAfterGoto = getRemainingMs();
+  if (remAfterGoto <= 0) {
+    throw new TimeoutError(`Douyin detail request timed out after page navigation`);
   }
 
+  // Bound wait by remaining budget
+  const actualWaitTime = Math.min(waitTime, Math.max(0, remAfterGoto / 1000));
+  if (actualWaitTime > 0) {
+    if (typeof page.wait === 'function') {
+      await page.wait({ time: actualWaitTime });
+    } else if (typeof page.sleep === 'function') {
+      await page.sleep(actualWaitTime);
+    }
+  }
+
+  const remAfterWait = getRemainingMs();
+  if (remAfterWait <= 0) {
+    throw new TimeoutError(`Douyin detail request timed out waiting for page stability`);
+  }
+
+  const fetchTimeout = Math.max(1, Math.floor(remAfterWait));
   const js = `
     (async () => {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), ${Number(timeoutMs)});
+      const timer = setTimeout(() => controller.abort(), ${fetchTimeout});
       try {
         const query = new URLSearchParams({
           aid: '6383',

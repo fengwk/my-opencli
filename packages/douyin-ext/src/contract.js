@@ -111,10 +111,7 @@ export function normalizeDownloadArgs(kwargs = {}) {
   validateTargetFormat(rawTarget);
 
   const rawQuality = String(kwargs.quality ?? 'best').trim().toLowerCase();
-  if (!rawQuality) {
-    throw new ArgumentError('Quality cannot be empty');
-  }
-  if (rawQuality !== 'best' && !/^\d+p$/i.test(rawQuality) && !SUPPORTED_QUALITIES.includes(rawQuality)) {
+  if (!SUPPORTED_QUALITIES.includes(rawQuality)) {
     throw new ArgumentError(
       `Invalid quality "${rawQuality}". Supported choices: ${SUPPORTED_QUALITIES.join(', ')}`
     );

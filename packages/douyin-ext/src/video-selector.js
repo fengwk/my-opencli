@@ -102,33 +102,47 @@ export function isAudioOnlyStream(item) {
  * Determine resolution label and numeric dimension value.
  * Prioritizes gear_name / definition tags before dimension thresholds.
  */
-function deriveResolution(minDim, gearName, definition) {
-  const text = `${gearName || ''} ${definition || ''}`.toLowerCase();
+/**
+ * Determine resolution label and numeric dimension value.
+ * Strictly prioritizes explicit definition / gear tags before falling back to physical dimensions.
+ */
+function deriveResolution(minDim, gearName, definition, extraDefinition) {
+  const text = `${definition || ''} ${extraDefinition || ''} ${gearName || ''}`.toLowerCase();
 
-  if (text.includes('2160') || text.includes('4k') || minDim >= 2160) {
+  // Priority 1: Explicit definition / gear tag
+  if (text.includes('2160') || text.includes('4k')) {
     return { quality: '2160p', resolution: 2160 };
   }
-  if (text.includes('1440') || text.includes('2k') || minDim >= 1440) {
+  if (text.includes('1440') || text.includes('2k')) {
     return { quality: '1440p', resolution: 1440 };
   }
-  if (text.includes('1080') || minDim >= 1080) {
+  if (text.includes('1080')) {
     return { quality: '1080p', resolution: 1080 };
   }
-  if (text.includes('720') || minDim >= 720) {
+  if (text.includes('720')) {
     return { quality: '720p', resolution: 720 };
   }
-  if (text.includes('540') || minDim >= 540) {
+  if (text.includes('540')) {
     return { quality: '540p', resolution: 540 };
   }
-  if (text.includes('480') || minDim >= 480) {
+  if (text.includes('480')) {
     return { quality: '480p', resolution: 480 };
   }
-  if (text.includes('360') || minDim >= 360) {
+  if (text.includes('360')) {
     return { quality: '360p', resolution: 360 };
   }
 
+  // Priority 2: Fallback to physical dimensions
+  if (minDim >= 2160) return { quality: '2160p', resolution: 2160 };
+  if (minDim >= 1440) return { quality: '1440p', resolution: 1440 };
+  if (minDim >= 1080) return { quality: '1080p', resolution: 1080 };
+  if (minDim >= 720) return { quality: '720p', resolution: 720 };
+  if (minDim >= 540) return { quality: '540p', resolution: 540 };
+  if (minDim >= 480) return { quality: '480p', resolution: 480 };
+  if (minDim >= 360) return { quality: '360p', resolution: 360 };
+
   return {
-    quality: minDim > 0 ? `${minDim}p` : 'default',
+    quality: minDim > 0 ? `${minDim}p` : 'unknown',
     resolution: minDim > 0 ? minDim : 0,
   };
 }
@@ -136,16 +150,31 @@ function deriveResolution(minDim, gearName, definition) {
 /**
  * Derive codec strictly from evidence without fabricating h264.
  */
-function deriveCodec(item, fallbackName) {
-  const extra = parseVideoExtra(item?.video_extra);
-  const extraCodec = String(extra.codec_type || extra.format || '').toLowerCase();
+function deriveCodec(item, fallbackName, extra) {
+  const extraCodec = String(
+    extra?.codec || extra?.video_codec || extra?.codec_type || item?.codec_type || ''
+  ).toLowerCase();
   const gear = String(item?.gear_name || fallbackName || '').toLowerCase();
 
-  if (item?.is_h265 === 1 || item?.is_h265 === true || gear.includes('265') || gear.includes('hevc') || extraCodec.includes('265') || extraCodec.includes('hevc')) {
+  if (
+    item?.is_h265 === 1 ||
+    item?.is_h265 === true ||
+    gear.includes('265') ||
+    gear.includes('hevc') ||
+    extraCodec.includes('265') ||
+    extraCodec.includes('hevc')
+  ) {
     return 'h265';
   }
 
-  if (fallbackName === 'play_addr_h264' || item?.is_h265 === 0 || gear.includes('264') || gear.includes('avc') || extraCodec.includes('264') || extraCodec.includes('avc')) {
+  if (
+    fallbackName === 'play_addr_h264' ||
+    item?.is_h265 === 0 ||
+    gear.includes('264') ||
+    gear.includes('avc') ||
+    extraCodec.includes('264') ||
+    extraCodec.includes('avc')
+  ) {
     return 'h264';
   }
 
@@ -153,14 +182,16 @@ function deriveCodec(item, fallbackName) {
 }
 
 function createVariant({ item, urls, width, height, fallbackName = '' }) {
+  const extra = parseVideoExtra(item?.video_extra);
   const minDim = Math.min(Number(width || 0), Number(height || 0));
   const { quality, resolution } = deriveResolution(
     minDim,
     item?.gear_name || fallbackName,
-    item?.definition
+    item?.definition,
+    extra?.definition
   );
   const bitrate = Number(item?.bit_rate ?? item?.bitrate ?? 0);
-  const codec = deriveCodec(item, fallbackName);
+  const codec = deriveCodec(item, fallbackName, extra);
 
   return {
     quality,

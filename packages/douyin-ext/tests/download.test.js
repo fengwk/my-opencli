@@ -1,7 +1,8 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ArgumentError, CommandExecutionError } from '@jackwener/opencli/errors';
+import { ArgumentError } from '@jackwener/opencli/errors';
 import { Strategy } from '@jackwener/opencli/registry';
 import { downloadCommand } from '../download.js';
 
@@ -15,14 +16,16 @@ function createDummyMp4Buffer(size = 2048) {
 }
 
 describe('douyin-ext download (validation, contract, and overall deadline)', () => {
-  const testDir = path.resolve('.tmp-test-douyin-command');
+  let testDir;
 
   beforeEach(() => {
-    fs.mkdirSync(testDir, { recursive: true });
+    testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'douyin-cmd-test-'));
   });
 
   afterEach(() => {
-    fs.rmSync(testDir, { recursive: true, force: true });
+    if (testDir) {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
@@ -40,6 +43,10 @@ describe('douyin-ext download (validation, contract, and overall deadline)', () 
     expect(() => downloadCommand.validateArgs({ target: '7701962254330128228', timeout: 12.5 })).toThrow(
       ArgumentError
     );
+    // Unsupported quality rejected
+    expect(() => downloadCommand.validateArgs({ target: '7701962254330128228', quality: '123p' })).toThrow(
+      ArgumentError
+    );
   });
 
   it('registers with the expected OpenCLI command contracts', () => {
@@ -55,27 +62,37 @@ describe('douyin-ext download (validation, contract, and overall deadline)', () 
     expect(downloadCommand.defaultFormat).toBe('json');
   });
 
-  // Defect check: overall deadline halts downstream phases when exhausted
-  it('enforces shared overall timeout deadline across execution phases', async () => {
+  // Verify controlled deadline exhaustion using vi.spyOn(Date, 'now')
+  it('enforces overall timeout deadline and avoids downstream evaluate/fetch when budget expires', async () => {
+    let currentTime = 1000000;
+    vi.spyOn(Date, 'now').mockImplementation(() => currentTime);
+
+    const mockFetch = vi.fn();
+    vi.stubGlobal('fetch', mockFetch);
+
     const page = {
-      goto: vi.fn(async () => {}),
-      wait: vi.fn(async () => {
-        // Simulate delay that exhausts timeout budget
-        await new Promise((resolve) => setTimeout(resolve, 50));
+      goto: vi.fn(async () => {
+        // Advance time beyond the 30-second budget during navigation
+        currentTime += 35000;
       }),
+      wait: vi.fn(async () => {}),
+      sleep: vi.fn(async () => {}),
       evaluate: vi.fn(async () => {
-        throw new Error('Should not reach evaluate if timed out');
+        return { __kind: 'ok', data: { status_code: 0, aweme_detail: {} } };
       }),
     };
 
-    // Very short timeout
     await expect(
       downloadCommand.func(page, {
         target: '7701962254330128228',
         output: testDir,
-        timeout: 1, // 1 second
+        timeout: 30,
       })
-    ).rejects.toThrow();
+    ).rejects.toThrow(/timed out|exceeded overall timeout/i);
+
+    // Verify evaluate and stream fetch were never invoked because timeout checked eagerly
+    expect(page.evaluate).not.toHaveBeenCalled();
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 
   it('executes full download workflow and returns structured row with hostname source', async () => {
