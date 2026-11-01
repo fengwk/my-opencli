@@ -124,7 +124,7 @@ export function normalizeDownloadArgs(kwargs = {}) {
     );
   }
 
-  const output = String(kwargs.output ?? '.').trim() || '.';
+  const output = String(kwargs.op ?? '.').trim() || '.';
 
   return {
     target: rawTarget,

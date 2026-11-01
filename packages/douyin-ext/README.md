@@ -29,7 +29,7 @@ Only download videos you own or are authorized to save.
 opencli douyin-ext download "https://v.douyin.com/xxxx/"
 
 # Specify target output directory and quality
-opencli douyin-ext download 7701962254330128228 --output ./downloads --quality 1080p
+opencli douyin-ext download 7701962254330128228 --op ./downloads --quality 1080p
 
 # Set custom overall timeout in seconds
 opencli douyin-ext download "https://www.douyin.com/video/7701962254330128228" --timeout 120
@@ -40,7 +40,7 @@ opencli douyin-ext download "https://www.douyin.com/video/7701962254330128228" -
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `<target>` | String (positional) | *required* | Numeric ID, official video URL, or `v.douyin.com` share link |
-| `--output` | String | `.` | Target directory on CLI execution host |
+| `--op` | String | `.` | Target directory on CLI execution host for downloaded video |
 | `--quality` | String | `best` | `best`, `2160p`, `1440p`, `1080p`, `720p`, `540p`, `480p`, `360p` |
 | `--timeout` | Integer | `60` | Overall timeout in seconds shared across target resolution, API fetch, and stream download |
 

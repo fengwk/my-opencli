@@ -133,8 +133,8 @@ Notes:
 opencli utils scrape https://example.com --only-main-content true --window background
 
 # Douyin video download (short link, official URL, or numeric ID)
-opencli douyin-ext download "https://v.douyin.com/xxxx/" --output ./videos --quality best
-opencli douyin-ext download 7701962254330128228 --output ./videos --quality 1080p --timeout 60
+opencli douyin-ext download "https://v.douyin.com/xxxx/" --op ./videos --quality best
+opencli douyin-ext download 7701962254330128228 --op ./videos --quality 1080p --timeout 60
 
 # text
 opencli chatgpt-agent ask '用一句话说明今天天气如何' --timeout 180

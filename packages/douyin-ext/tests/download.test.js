@@ -47,6 +47,10 @@ describe('douyin-ext download (validation, contract, and overall deadline)', () 
     expect(() => downloadCommand.validateArgs({ target: '7701962254330128228', quality: '123p' })).toThrow(
       ArgumentError
     );
+    // Allow valid op
+    expect(() =>
+      downloadCommand.validateArgs({ target: '7701962254330128228', op: './v1' })
+    ).not.toThrow();
   });
 
   it('registers with the expected OpenCLI command contracts', () => {
@@ -60,6 +64,14 @@ describe('douyin-ext download (validation, contract, and overall deadline)', () 
     expect(downloadCommand.navigateBefore).toBe(false);
     expect(downloadCommand.defaultWindowMode).toBe('background');
     expect(downloadCommand.defaultFormat).toBe('json');
+
+    const argNames = downloadCommand.args.map((a) => a.name);
+    expect(argNames).toContain('op');
+    expect(argNames).not.toContain('output');
+
+    const opArg = downloadCommand.args.find((a) => a.name === 'op');
+    expect(opArg.valueRequired).toBe(true);
+    expect(opArg.default).toBeUndefined();
   });
 
   // Verify controlled deadline exhaustion using vi.spyOn(Date, 'now')
@@ -85,7 +97,7 @@ describe('douyin-ext download (validation, contract, and overall deadline)', () 
     await expect(
       downloadCommand.func(page, {
         target: '7701962254330128228',
-        output: testDir,
+        op: testDir,
         timeout: 30,
       })
     ).rejects.toThrow(/timed out|exceeded overall timeout/i);
@@ -154,7 +166,7 @@ describe('douyin-ext download (validation, contract, and overall deadline)', () 
 
     const rows = await downloadCommand.func(page, {
       target: targetId,
-      output: testDir,
+      op: testDir,
       quality: 'best',
       timeout: 30,
     });
@@ -166,5 +178,75 @@ describe('douyin-ext download (validation, contract, and overall deadline)', () 
     expect(result.quality).toBe('1080p');
     expect(result.codec).toBe('h264');
     expect(result.source).toBe('v26-web.douyinvod.com');
+    expect(result.path).toContain(testDir);
+    expect(fs.existsSync(result.path)).toBe(true);
+  });
+
+  it('executes download workflow when output directory passed via --op', async () => {
+    const targetId = '7701962254330128228';
+    const cdnUrl = 'https://v26-web.douyinvod.com/video/tos-cn-v/fullflow.mp4';
+    const dummyBuffer = createDummyMp4Buffer(2048);
+
+    const page = {
+      goto: vi.fn(async () => {}),
+      wait: vi.fn(async () => {}),
+      sleep: vi.fn(async () => {}),
+      evaluate: vi.fn(async () => ({
+        __kind: 'ok',
+        data: {
+          status_code: 0,
+          aweme_detail: {
+            aweme_id: targetId,
+            desc: 'Op test video',
+            author: { nickname: 'Tester' },
+            video: {
+              width: 1080,
+              height: 1920,
+              bit_rate: [
+                {
+                  gear_name: 'normal_1080_0',
+                  is_h265: 0,
+                  play_addr: {
+                    width: 1080,
+                    height: 1920,
+                    url_list: [cdnUrl],
+                  },
+                },
+              ],
+            },
+          },
+        },
+      })),
+    };
+
+    const mockFetch = vi.fn().mockImplementation(() =>
+      Promise.resolve({
+        status: 200,
+        headers: new Headers({
+          'content-type': 'video/mp4',
+          'content-length': String(dummyBuffer.length),
+        }),
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array(dummyBuffer));
+            controller.close();
+          },
+        }),
+      })
+    );
+    vi.stubGlobal('fetch', mockFetch);
+
+    const opDir = path.join(testDir, 'op-target');
+    const rows = await downloadCommand.func(page, {
+      target: targetId,
+      op: opDir,
+      quality: 'best',
+      timeout: 30,
+    });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe('ok');
+    expect(rows[0].path).toContain('op-target');
+    expect(fs.existsSync(rows[0].path)).toBe(true);
   });
 });

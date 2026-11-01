@@ -53,7 +53,7 @@ export const canvasV0DownloadCommand = cli({
       help: `Video definition to fetch (default ${V0_DEFAULT_VIDEO_DEFINITION}; falls back to the best available and reports it)`,
     },
     {
-      name: 'output',
+      name: 'op',
       valueRequired: true,
       help: 'Download directory (default: ~/Downloads/jimeng-agent)',
     },

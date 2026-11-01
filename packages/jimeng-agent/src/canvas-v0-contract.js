@@ -73,7 +73,7 @@ const V0_DOWNLOAD_INPUT_KEYS = Object.freeze([
   'asset_id',
   'record_id',
   'definition',
-  'output',
+  'op',
 ]);
 const CANONICAL_ASK_KEYS = Object.freeze([
   'canvas',
@@ -600,7 +600,7 @@ export function normalizeCanvasV0DownloadArgs(kwargs = {}) {
     recordId,
     assetId,
     definition,
-    outputDir: normalizeCanvasV0OutputDir(kwargs.output),
+    outputDir: normalizeCanvasV0OutputDir(kwargs.op),
   };
 }
 
@@ -657,8 +657,8 @@ function normalizeCanvasV0OutputDir(raw) {
   }
   if (typeof raw !== 'string') {
     throw new ArgumentError(
-      `Invalid 'output': expected string, got ${describeType(raw)}`,
-      'Pass --output as a directory path.',
+      `Invalid 'op': expected string, got ${describeType(raw)}`,
+      'Pass --op as a directory path.',
     );
   }
   return path.resolve(raw.trim());

@@ -518,8 +518,11 @@ describe('jimeng-agent canvas-v0 read-back contract', () => {
     const defaults = normalizeCanvasV0DownloadArgs({ canvas: '17883546906892' });
     expect(defaults).toMatchObject({ recordId: '', assetId: '', definition: '720p' });
     expect(defaults.outputDir).toMatch(/Downloads[/\\]jimeng-agent$/);
-    expect(normalizeCanvasV0DownloadArgs({ canvas: '17883546906892', output: '/tmp/v0-dl' }))
-      .toMatchObject({ outputDir: '/tmp/v0-dl' });
+    expect(normalizeCanvasV0DownloadArgs({ canvas: '17883546906892', op: '/tmp/v0-op' }))
+      .toMatchObject({ outputDir: '/tmp/v0-op' });
+    expect(() => normalizeCanvasV0DownloadArgs({ canvas: '17883546906892', op: 12345 })).toThrow(ArgumentError);
+    expect(normalizeCanvasV0DownloadArgs({ canvas: '17883546906892', op: '   ' }).outputDir)
+      .toMatch(/Downloads[/\\]jimeng-agent$/);
     expect(() => normalizeCanvasV0DownloadArgs({
       canvas: '17883546906892',
       record_id: '39441026984460',

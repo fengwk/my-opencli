@@ -26,7 +26,7 @@ export function normalizeStatusArgs(kwargs = {}) {
   const limit = normalizePositiveInt(kwargs.limit, 1, 'limit');
   const maxPages = normalizePositiveInt(kwargs.max_pages, 5, 'max_pages');
   const type = normalizeTaskType(kwargs.type);
-  const outputDir = normalizeOutputDir(kwargs.output);
+  const outputDir = normalizeOutputDir(kwargs.op);
 
   return {
     workspace,
@@ -82,8 +82,8 @@ function normalizeOutputDir(raw) {
   }
   if (typeof raw !== 'string') {
     throw new ArgumentError(
-      `Invalid output: expected string, got ${describeType(raw)}`,
-      'Pass --output as a directory path.',
+      `Invalid 'op': expected string, got ${describeType(raw)}`,
+      'Pass --op as a directory path.',
     );
   }
   return path.resolve(raw.trim());
