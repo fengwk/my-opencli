@@ -52,8 +52,8 @@ non-invasively through CDP — the page's own `fetch`/XHR are never patched.
 
 | Host | Minimum | Current verified release |
 |------|---------|--------------------------|
-| `@jackwener/opencli` (fork) | `>=1.8.8-fengwk.2` | local build `1.8.8-fengwk.2` (not published) |
-| Browser Bridge / Extension | **`>=1.0.35`** | paired Extension **`1.0.35`** (local build, not published) |
+| `@jackwener/opencli` (fork) | `>=1.8.8-fengwk.3` | `2.0.2-fengwk.2` (`fork-v2.0.2-fengwk.2`) |
+| Browser Bridge / Extension | **`>=1.0.35`** | paired Extension **`1.0.37`** |
 
 Needs fork APIs: `page.startSseCapture` / `page.readSseCapture` (HTTP stream capture) and `page.startWsCapture` / `page.readWsCapture` (WebSocket capture), hardened `page.setFileInput`, and optional `Arg.repeatable` for multi `--file`. The CLI/CLI-extension pair must both ship HTTP stream capture: the extension arms it per request and the CLI drains it, so a mismatched pair fails the turn before the prompt is sent.
 

@@ -2,6 +2,10 @@
 
 Douyin video downloader plugin for OpenCLI.
 
+Requires the forked OpenCLI CLI `>=2.0.2-fengwk.1`; use CLI
+`2.0.2-fengwk.2` with Browser Bridge `1.0.37` for the current Hub release.
+Only download videos you own or are authorized to save.
+
 ## Strategy Note
 
 - **Strategy**: `PAGE_FETCH`, `internal-unstable`
@@ -53,3 +57,9 @@ opencli douyin-ext download "https://www.douyin.com/video/7701962254330128228" -
 | `path` | Absolute filesystem path on CLI execution host |
 | `bytes` | Total downloaded file size in bytes |
 | `source` | Verified CDN hostname (e.g. `v26-web.douyinvod.com`) without signatures or path tokens |
+
+`quality` is the platform's rendition label, not a guarantee of exact pixel dimensions.
+For example, the verified `540p` rendition was 1024×576. An end-to-end check saved
+7,866,605 bytes for video `7701287709930835226`; `ffprobe` confirmed H.264 video,
+AAC audio, and 74.91 seconds of duration. This check used the local browser's
+existing login state, not a deployed Hub instance.

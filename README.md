@@ -19,12 +19,12 @@ These plugins **require an OpenCLI fork**, not stock upstream alone:
 | Component | Minimum | Current verified release | Why |
 |-----------|---------|--------------------------|-----|
 | Node.js | **`>=20.18.1`** | `24.14.0` | Matches OpenCLI and Cheerio runtime engines |
-| CLI (`@jackwener/opencli`) | **`>=1.8.7`** (shared baseline) | package `1.8.7-fengwk.11` (git tag `fork-v1.8.7-fengwk.11`) | Browser window/session controls, network/frame APIs, WS capture, hardened file input, `Arg.repeatable` |
-| Browser Bridge / Extension | **`>=1.0.32`** (shared baseline) | paired Extension **`1.0.32`** | Browser/frame/CDP/WS capture, tab-scoped downloads, and ephemeral warm-tab reuse must match the CLI |
+| CLI (`@jackwener/opencli`) | **`>=1.8.7`** (shared baseline; per-plugin floors below) | package `2.0.2-fengwk.2` (git tag `fork-v2.0.2-fengwk.2`) | Browser window/session controls, network/frame APIs, SSE/WS capture, hardened file input, `Arg.repeatable`, full Hub catalog export |
+| Browser Bridge / Extension | **`>=1.0.32`** (shared baseline) | paired Extension **`1.0.37`** | Browser/frame/CDP/SSE/WS capture, tab-scoped downloads, and context-scoped adapter tab reclamation |
 
-`chatgpt-agent ask` additionally requires local fork CLI `1.8.8-fengwk.2` and paired Extension `1.0.35` for HTTP SSE capture. This pair has not been published as a fork Release. `douyin-ext download` requires fork CLI `>=2.0.2-fengwk.1` and paired Browser Bridge `1.0.37`; note that CLI `2.0.2-fengwk.1` and Bridge `1.0.37` are currently in preparation for upcoming release and not yet published. Other plugins retain the shared baseline; each plugin's manifest entry declares its own minimum.
+`chatgpt-agent ask` requires fork CLI `>=1.8.8-fengwk.3` and Browser Bridge `>=1.0.35` for HTTP SSE capture and scoped composer submission. `douyin-ext download` requires CLI `>=2.0.2-fengwk.1`; use the current paired release above for OpenCLI Hub, which additionally requires `list --manifest`. Other plugins retain their existing compatibility floors; each manifest entry declares its own minimum.
 
-Minimum ranges are the compatibility floor; the verified columns name the paired fork Release that has been published and checked. Package version (`1.8.7-fengwk.11`) and git tag (`fork-v1.8.7-fengwk.11`) are related but not the same string — do not treat the package version as a tag name.
+Minimum ranges are the compatibility floor; the verified columns name the paired fork Release used for repository checks. Package version (`2.0.2-fengwk.2`) and git tag (`fork-v2.0.2-fengwk.2`) are related but not the same string — do not treat the package version as a tag name.
 
 Install and reload **both** the forked CLI and its matching Browser Bridge / Extension. Mismatched CLI/extension pairs will fail at runtime even if the plugin installs cleanly.
 `gemini-agent` specifically requires Browser Bridge `1.0.30` for raw CDP input, network capture, hardened file input, and download lifecycle support.

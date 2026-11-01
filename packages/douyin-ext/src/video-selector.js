@@ -100,10 +100,6 @@ export function isAudioOnlyStream(item) {
 
 /**
  * Determine resolution label and numeric dimension value.
- * Prioritizes gear_name / definition tags before dimension thresholds.
- */
-/**
- * Determine resolution label and numeric dimension value.
  * Strictly prioritizes explicit definition / gear tags before falling back to physical dimensions.
  */
 function deriveResolution(minDim, gearName, definition, extraDefinition) {
