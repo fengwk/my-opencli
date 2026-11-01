@@ -454,7 +454,7 @@ export function modernImageExtractorScript(messageIds = null) {
 
       const isExcluded = (node) => {
         let curr = node;
-        while (curr && curr !== document.body && curr !== document.documentElement) {
+        while (curr) {
           if (curr.hidden || curr.hasAttribute('hidden')) return true;
           if (curr.hasAttribute('inert')) return true;
           if (curr.getAttribute('aria-hidden') === 'true') return true;

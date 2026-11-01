@@ -580,6 +580,9 @@ export const askCommand = cli({
           // placeholder for the generated image).
           reloadConversation: conversationUrl && /\/(?:g\/g-p-[^/]+\/)?c\/[A-Za-z0-9_-]{8,}/.test(conversationUrl)
             ? async () => {
+              // goto(currentUrl) is a no-op on a loaded tab. Leave the persisted
+              // conversation first so the retry really remounts its image gallery.
+              await page.goto(CHATGPT_URL, { settleMs: 500 });
               await openChatGPTConversation(page, conversationUrl);
               await page.sleep(2);
             }
