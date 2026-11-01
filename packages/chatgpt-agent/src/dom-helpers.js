@@ -411,3 +411,98 @@ export function previewCheckScript(basenames, minCount) {
     })()
   `;
 }
+
+/**
+ * Modern ChatGPT generated-image gallery extractor script.
+ *
+ * Targets:
+ *   main [data-testid="generated-image-gallery"] [data-testid="generated-image-preview"] img
+ *
+ * Rules:
+ * 1. Checks strictly for presence of modern gallery within main / transcript scope.
+ *    If none exists, returns { modern: false, urls: [] } to trigger explicit legacy fallback.
+ * 2. When messageIds are provided (array, even if empty):
+ *    Strictly matches the nearest gallery.closest('[data-chatgpt-search-message-ids]') container.
+ *    Does not ascend further to broader ancestral containers.
+ *    If messageIds array is provided but contains no valid IDs, fails closed: returns { modern: true, urls: [] }.
+ *    If messageIds are omitted (null/undefined), collects all loaded modern gallery images (e.g. beforeUrls snapshot).
+ * 3. Does NOT require bounding rect dimensions > 0 (preview / img layout can be 0x0).
+ * 4. Strictly requires loaded, reasonable natural dimensions (naturalWidth >= 128 && naturalHeight >= 128).
+ * 5. Single upward traversal on img to body checks hidden, inert, aria-hidden="true", display:none, visibility:hidden.
+ * 6. Strictly excludes composer and user turn scopes.
+ */
+export function modernImageExtractorScript(messageIds = null) {
+  const idsJson = Array.isArray(messageIds)
+    ? JSON.stringify(messageIds.map((id) => String(id || '').trim()).filter(Boolean))
+    : 'null';
+  const hasFilter = Array.isArray(messageIds);
+
+  return `
+    (() => {
+      const main = document.querySelector('main') || document.querySelector('[role="main"]');
+      if (!main) return { modern: false, urls: [] };
+
+      const galleries = Array.from(main.querySelectorAll('[data-testid="generated-image-gallery"]'));
+      if (galleries.length === 0) return { modern: false, urls: [] };
+
+      const matchRequired = ${hasFilter};
+      const targetIds = ${idsJson};
+      if (matchRequired && (!targetIds || targetIds.length === 0)) {
+        return { modern: true, urls: [] };
+      }
+      const targetSet = targetIds ? new Set(targetIds) : null;
+
+      const isExcluded = (node) => {
+        let curr = node;
+        while (curr && curr !== document.body && curr !== document.documentElement) {
+          if (curr.hidden || curr.hasAttribute('hidden')) return true;
+          if (curr.hasAttribute('inert')) return true;
+          if (curr.getAttribute('aria-hidden') === 'true') return true;
+          const st = window.getComputedStyle(curr);
+          if (st.display === 'none' || st.visibility === 'hidden') return true;
+          curr = curr.parentElement;
+        }
+        return false;
+      };
+
+      const isComposerOrUserScope = (node) => {
+        if (node.closest('form[data-chatgpt-composer], [data-chatgpt-composer], #prompt-textarea, [data-testid="prompt-textarea"]')) {
+          return true;
+        }
+        if (node.closest('[data-message-author-role="user"], [data-conversation-role="user"], [data-turn="user"], [data-chatgpt-search-unit-key*=":user"]')) {
+          return true;
+        }
+        return false;
+      };
+
+      const urls = [];
+      const seen = new Set();
+
+      for (const gallery of galleries) {
+        if (matchRequired) {
+          const container = gallery.closest('[data-chatgpt-search-message-ids]');
+          if (!container) continue;
+          const raw = container.getAttribute('data-chatgpt-search-message-ids') || '';
+          const tokens = raw.trim().split(/[\\s,]+/);
+          if (!tokens.some((t) => t && targetSet.has(t))) continue;
+        }
+
+        const imgs = Array.from(gallery.querySelectorAll('[data-testid="generated-image-preview"] img'));
+        for (const img of imgs) {
+          if (img.complete === false) continue;
+          const nw = img.naturalWidth || 0;
+          const nh = img.naturalHeight || 0;
+          if (nw < 128 || nh < 128) continue;
+          if (isExcluded(img) || isComposerOrUserScope(img)) continue;
+
+          const src = (img.currentSrc || img.src || '').trim();
+          if (!src || seen.has(src)) continue;
+          seen.add(src);
+          urls.push(src);
+        }
+      }
+
+      return { modern: true, urls };
+    })()
+  `;
+}
