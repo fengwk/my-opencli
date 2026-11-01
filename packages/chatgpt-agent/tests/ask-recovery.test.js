@@ -435,6 +435,32 @@ describe('chatgpt-agent/ask recovery execution flow', () => {
     expect(JSON.parse(result[0].downloads)[0].path).toBe('/tmp/pictures/image.png');
   });
 
+  // The host skips goto(currentUrl). A retry must leave that route before
+  // reopening the persisted conversation, and retain the protocol image scope.
+  it('really remounts the conversation for a scoped image-export retry', async () => {
+    const page = fakePage();
+    const order = [];
+    page.goto = vi.fn(async () => { order.push('leave'); });
+    openChatGPTConversation.mockImplementation(async () => { order.push('reopen'); });
+    resolveArtifacts.mockResolvedValue({
+      text: '',
+      files: [],
+      images: [{ id: 'img-1', messageId: 'image-tool-message' }],
+    });
+    exportNewImagesLikeOfficial.mockImplementationOnce(async (_page, options) => {
+      expect(options.messageIds).toEqual(['image-tool-message']);
+      expect(options.canRetry()).toBe(true);
+      await options.reloadConversation();
+      return [{ kind: 'image-export', downloaded: true, path: '/tmp/pictures/image.png' }];
+    });
+
+    const result = await askCommand.func(page, { prompt: 'draw a cat' });
+    expect(page.goto).toHaveBeenCalledWith('https://chatgpt.com', { settleMs: 500 });
+    expect(openChatGPTConversation).toHaveBeenCalledWith(page, 'https://chatgpt.com/c/c-test-123');
+    expect(order).toEqual(['leave', 'reopen']);
+    expect(JSON.parse(result[0].downloads)[0].downloaded).toBe(true);
+  });
+
   // Post-image cleanup is best-effort and must not discard successfully exported images.
   it('preserves image output even if post-image cleanup throws an error', async () => {
     const page = fakePage();
