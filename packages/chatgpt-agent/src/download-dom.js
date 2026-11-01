@@ -46,6 +46,8 @@ function normalizeFileName(value) {
   name = name.replace(/^sandbox:\/(?:mnt\/data\/)?/i, '');
   // Strip trailing markdown/URL delimiters only (keep legal filename chars like ).
   name = name.replace(/[)\]"'\\]+$/g, (tail) => {
+    // If the whole basename is wrapped, drop trailing wrappers; do not strip
+    // internal punctuation from names like report(2024).json mid-string.
     return /[)\]"'\\]/.test(tail) ? '' : tail;
   });
   // Literal first, then percent-decoded — first successful name wins.
@@ -57,6 +59,7 @@ function normalizeFileName(value) {
     const m = base.match(FILE_NAME_TAIL_RE);
     if (!m) continue;
     let name = m[1].trim();
+    // If we only matched a percent-encoded basename, decode to human name.
     if (/%[0-9A-Fa-f]{2}/.test(name)) {
       const d = tryDecodeURIComponent(name);
       if (d !== name) {
@@ -79,6 +82,7 @@ function normalizeFileName(value) {
 export function collectExpectedFileNames(artifacts) {
   const names = new Set();
 
+  // Protocol fileRefs that already carry sandbox paths
   for (const f of artifacts?.files || []) {
     const path = String(f?.sandboxPath || '');
     if (!/\/mnt\/data\//.test(path) && !/^sandbox:/i.test(path)) continue;
@@ -86,6 +90,7 @@ export function collectExpectedFileNames(artifacts) {
     if (n) names.add(n);
   }
 
+  // Stream text must contain sandbox protocol (literal first, then decoded).
   const text = String(artifacts?.text || '');
   const sandboxRes = [
     /sandbox:\/(?:mnt\/data\/)?([^\s)\]"'<>]+)/gi,
@@ -94,6 +99,7 @@ export function collectExpectedFileNames(artifacts) {
   for (const re of sandboxRes) {
     for (const m of text.matchAll(re)) {
       const raw = m[1];
+      // 1) try as-is  2) try decodeURIComponent — first successful name wins per match
       const n = normalizeFileName(raw) || normalizeFileName(tryDecodeURIComponent(raw));
       if (n) names.add(n);
     }
@@ -153,6 +159,7 @@ export async function downloadFilesViaDomClick(page, fileNames, opts = {}) {
       clicked: false,
       downloaded: false,
     };
+    let waitPromise = null;
 
     try {
       // 1) First attempt: modern resource-row with dedicated Download file button
@@ -163,10 +170,11 @@ export async function downloadFilesViaDomClick(page, fileNames, opts = {}) {
       const directInfo = unwrapEvaluateResult(rawDirect);
 
       if (directInfo?.found) {
-        // Arm download waiter BEFORE clicking to eliminate race condition
-        const waitPromise = typeof page.waitForDownload === 'function'
-          ? page.waitForDownload(name, timeoutMs)
-          : null;
+        // Arm download waiter BEFORE clicking to eliminate race condition. Catch-wrapped to avoid unhandled rejections.
+        waitPromise = typeof page.waitForDownload === 'function'
+          ? page.waitForDownload(name, timeoutMs).catch((e) => ({ downloaded: false, error: String(e?.message || e) }))
+          : Promise.resolve({ downloaded: false, error: 'waitForDownload unavailable' });
+
         if (typeof page.sleep === 'function') {
           await page.sleep(0.1);
         }
@@ -184,113 +192,120 @@ export async function downloadFilesViaDomClick(page, fileNames, opts = {}) {
 
         if (!clickRes?.ok) {
           entry.error = clickRes?.reason || 'resource-row-click-failed';
-          results.push(entry);
-          continue;
         }
 
-        // Wait strictly for this single download event; do not open preview, do not poll flyout
-        const waitResult = waitPromise
-          ? await waitPromise.catch((e) => ({ downloaded: false, error: String(e?.message || e) }))
-          : { downloaded: false, error: 'waitForDownload unavailable' };
+        // Always await armed waiter to eliminate dangling promises
+        const waitResult = await waitPromise;
+        waitPromise = null;
 
-        entry.downloaded = !!waitResult?.downloaded;
-        entry.path = waitResult?.filename || waitResult?.path || waitResult?.url || '';
-        entry.state = waitResult?.state || '';
-        if (!entry.downloaded) {
-          entry.error = waitResult?.error || 'download-not-completed';
+        if (clickRes?.ok) {
+          entry.downloaded = !!waitResult?.downloaded;
+          entry.path = waitResult?.filename || waitResult?.path || waitResult?.url || '';
+          entry.state = waitResult?.state || '';
+          if (!entry.downloaded) {
+            entry.error = waitResult?.error || 'download-not-completed';
+          }
         }
         results.push(entry);
-        continue;
-      }
-
-      // 2) Fallback: legacy preview -> flyout panel or chip-direct link route
-      const rawChip = await page.evaluate(`(() => {
-        ${chipScript()}
-        return findFileChip(${JSON.stringify(name)});
-      })()`);
-      const chip = unwrapEvaluateResult(rawChip);
-      if (!chip?.found) {
-        entry.error = 'no-file-chip';
-        results.push(entry);
-        continue;
-      }
-
-      // Arm waiter BEFORE clicking any chip that might directly trigger a download
-      const waitPromise = typeof page.waitForDownload === 'function'
-        ? page.waitForDownload(name, timeoutMs)
-        : null;
-
-      const rawOpenMeta = await page.evaluate(`(() => {
-        ${chipScript()}
-        return clickFileChip(${JSON.stringify(name)});
-      })()`);
-      const openMeta = unwrapEvaluateResult(rawOpenMeta);
-      entry.opened = !!openMeta?.ok;
-      entry.openMeta = openMeta;
-      if (!openMeta?.ok) {
-        entry.error = openMeta?.reason || 'chip-click-failed';
-        results.push(entry);
-        continue;
-      }
-
-      // Poll flyout (legacy previewable files)
-      let panelState = { hasFlyout: false, hasDownload: false };
-      for (let i = 0; i < 24; i += 1) {
-        await page.sleep(0.25);
-        const rawPanelState = await page.evaluate(`(() => {
-          ${panelScript()}
-          return inspectFlyout(${JSON.stringify(name)});
-        })()`);
-        panelState = unwrapEvaluateResult(rawPanelState) || { hasFlyout: false, hasDownload: false };
-        if (panelState?.hasDownload) break;
-        if (panelState?.hasFlyout && i < 20) continue;
-      }
-
-      let panelClicked = { ok: false, reason: 'no-flyout' };
-      if (panelState?.hasDownload) {
-        const rawPanelClicked = await page.evaluate(`(() => {
-          ${panelScript()}
-          return clickFlyoutDownload(${JSON.stringify(name)});
-        })()`);
-        panelClicked = unwrapEvaluateResult(rawPanelClicked) || { ok: false, reason: 'panel-click-failed' };
-        entry.panel = panelClicked;
-        entry.clicked = !!panelClicked?.ok;
-        entry.clickMeta = { mode: 'panel', ...panelClicked };
-      } else if (panelState?.hasFlyout) {
-        entry.panel = { ok: false, reason: 'flyout-without-download', ...panelState };
-        entry.clicked = false;
-        entry.error = 'flyout-without-download';
       } else {
-        // No flyout appeared: direct download from chip
-        entry.clicked = true;
-        entry.clickMeta = { mode: 'chip-direct', ...openMeta };
-        entry.panel = { ok: false, reason: 'no-flyout' };
+        // 2) Fallback: legacy preview -> flyout panel or chip-direct link route
+        const rawChip = await page.evaluate(`(() => {
+          ${chipScript()}
+          return findFileChip(${JSON.stringify(name)});
+        })()`);
+        const chip = unwrapEvaluateResult(rawChip);
+        if (!chip?.found) {
+          entry.error = 'no-file-chip';
+          results.push(entry);
+        } else {
+          // Arm waiter BEFORE clicking any chip that might directly trigger a download. Catch-wrapped.
+          waitPromise = typeof page.waitForDownload === 'function'
+            ? page.waitForDownload(name, timeoutMs).catch((e) => ({ downloaded: false, error: String(e?.message || e) }))
+            : Promise.resolve({ downloaded: false, error: 'waitForDownload unavailable' });
+
+          const rawOpenMeta = await page.evaluate(`(() => {
+            ${chipScript()}
+            return clickFileChip(${JSON.stringify(name)});
+          })()`);
+          const openMeta = unwrapEvaluateResult(rawOpenMeta);
+          entry.opened = !!openMeta?.ok;
+          entry.openMeta = openMeta;
+
+          if (!openMeta?.ok) {
+            entry.error = openMeta?.reason || 'chip-click-failed';
+          } else {
+            // Poll flyout (legacy previewable files)
+            let panelState = { hasFlyout: false, hasDownload: false };
+            for (let i = 0; i < 24; i += 1) {
+              await page.sleep(0.25);
+              const rawPanelState = await page.evaluate(`(() => {
+                ${panelScript()}
+                return inspectFlyout(${JSON.stringify(name)});
+              })()`);
+              panelState = unwrapEvaluateResult(rawPanelState) || { hasFlyout: false, hasDownload: false };
+              if (panelState?.hasDownload) break;
+              if (panelState?.hasFlyout && i < 20) continue;
+            }
+
+            let panelClicked = { ok: false, reason: 'no-flyout' };
+            if (panelState?.hasDownload) {
+              const rawPanelClicked = await page.evaluate(`(() => {
+                ${panelScript()}
+                return clickFlyoutDownload(${JSON.stringify(name)});
+              })()`);
+              panelClicked = unwrapEvaluateResult(rawPanelClicked) || { ok: false, reason: 'panel-click-failed' };
+              entry.panel = panelClicked;
+              entry.clicked = !!panelClicked?.ok;
+              entry.clickMeta = { mode: 'panel', ...panelClicked };
+            } else if (panelState?.hasFlyout) {
+              entry.panel = { ok: false, reason: 'flyout-without-download', ...panelState };
+              entry.clicked = false;
+              entry.error = 'flyout-without-download';
+            } else {
+              // No flyout appeared: direct download from chip
+              entry.clicked = true;
+              entry.clickMeta = { mode: 'chip-direct', ...openMeta };
+              entry.panel = { ok: false, reason: 'no-flyout' };
+            }
+          }
+
+          // Always await armed waiter to eliminate dangling promises
+          const waitResult = await waitPromise;
+          waitPromise = null;
+
+          if (entry.clicked) {
+            entry.downloaded = !!waitResult?.downloaded;
+            entry.path = waitResult?.filename || waitResult?.path || waitResult?.url || '';
+            entry.state = waitResult?.state || '';
+            if (!entry.downloaded && !entry.error) {
+              entry.error = waitResult?.error || 'download-not-completed';
+            }
+          }
+
+          // Close legacy flyout if open
+          const rawClosed = await page.evaluate(`(() => {
+            ${panelScript()}
+            return closeFlyout(${JSON.stringify(name)});
+          })()`).catch(() => ({ ok: false }));
+          const closed = unwrapEvaluateResult(rawClosed);
+          entry.closed = !!closed?.ok;
+          entry.closeMeta = closed;
+
+          results.push(entry);
+        }
       }
-
-      const waitResult = waitPromise
-        ? await waitPromise.catch((e) => ({ downloaded: false, error: String(e?.message || e) }))
-        : { downloaded: false, error: 'waitForDownload unavailable' };
-
-      entry.downloaded = !!waitResult?.downloaded;
-      entry.path = waitResult?.filename || waitResult?.path || waitResult?.url || '';
-      entry.state = waitResult?.state || '';
-      if (!entry.downloaded && !entry.error) {
-        entry.error = waitResult?.error || 'download-not-completed';
+    } catch (err) {
+      entry.error = err instanceof Error ? err.message : String(err);
+      results.push(entry);
+    } finally {
+      if (waitPromise) {
+        await waitPromise.catch(() => ({}));
+        waitPromise = null;
       }
-
-      // Close legacy flyout if open
-      const rawClosed = await page.evaluate(`(() => {
-        ${panelScript()}
-        return closeFlyout(${JSON.stringify(name)});
-      })()`).catch(() => ({ ok: false }));
-      const closed = unwrapEvaluateResult(rawClosed);
-      entry.closed = !!closed?.ok;
-      entry.closeMeta = closed;
-
-      results.push(entry);
-    } catch (e) {
-      entry.error = String(e?.message || e);
-      results.push(entry);
+      // Fixed gap between files so multi-download is not a zero-interval click burst
+      if (fileIndex < names.length - 1) {
+        await page.sleep(0.4);
+      }
     }
   }
 
@@ -298,43 +313,64 @@ export async function downloadFilesViaDomClick(page, fileNames, opts = {}) {
 }
 
 /**
- * Click-to-download for visual export images in the last assistant turn.
+ * Download generated images from the last assistant turn (human-like).
+ * Data-driven: only call when THIS turn's protocol collected image pointers.
+ * Clicks Download controls in the last assistant message; uses waitForDownload.
+ *
+ * @param {object} page
+ * @param {{ timeoutMs?: number, expectedCount?: number }} opts
  */
 export async function downloadImagesViaDomClick(page, opts = {}) {
-  const timeoutMs = opts.timeoutMs ?? 15_000;
-  const count = opts.count ?? 1;
+  const timeoutMs = opts.timeoutMs ?? 20_000;
+  const expectedCount = Math.max(1, opts.expectedCount || 1);
   const results = [];
 
-  for (let i = 0; i < count; i += 1) {
-    const waitPromise = typeof page.waitForDownload === 'function'
-      ? page.waitForDownload('', timeoutMs)
-      : null;
-    await page.sleep(0.1);
+  // Brief settle for image tiles / download affordances to mount.
+  await page.sleep(1.0);
 
-    const rawClickMeta = await page.evaluate(`(() => {
-      ${imageDownloadScript()}
-      return clickNextImageDownload(${i});
-    })()`);
-    const clickMeta = unwrapEvaluateResult(rawClickMeta);
-
-    if (!clickMeta?.ok) {
-      results.push({ index: i, clicked: false, downloaded: false, error: clickMeta?.reason || 'no-button' });
-      break;
-    }
-
-    const waitResult = waitPromise
-      ? await waitPromise.catch((e) => ({ downloaded: false, error: String(e?.message || e) }))
-      : { downloaded: false, error: 'waitForDownload unavailable' };
-
-    results.push({
+  for (let i = 0; i < expectedCount; i += 1) {
+    const entry = {
+      kind: 'image',
       index: i,
-      clicked: true,
-      downloaded: !!waitResult?.downloaded,
-      path: waitResult?.filename || waitResult?.path || waitResult?.url || '',
-      state: waitResult?.state || '',
-      error: waitResult?.error,
-    });
-    await page.sleep(0.5);
+      clicked: false,
+      downloaded: false,
+    };
+    try {
+      const waitPromise = typeof page.waitForDownload === 'function'
+        ? page.waitForDownload('', timeoutMs)
+        : null;
+
+      const rawClickMeta = await page.evaluate(`(() => {
+        ${imageDownloadScript()}
+        return clickNextImageDownload(${i});
+      })()`);
+      const clickMeta = unwrapEvaluateResult(rawClickMeta);
+
+      entry.clickMeta = clickMeta;
+      entry.clicked = !!clickMeta?.ok;
+      if (!clickMeta?.ok) {
+        entry.error = clickMeta?.reason || 'image-download-click-failed';
+        results.push(entry);
+        // No more buttons — stop trying further indices.
+        break;
+      }
+
+      let waitResult = waitPromise
+        ? await waitPromise.catch((e) => ({ downloaded: false, error: String(e?.message || e) }))
+        : { downloaded: false, error: 'waitForDownload unavailable' };
+
+      entry.downloaded = !!waitResult?.downloaded;
+      entry.path = waitResult?.filename || waitResult?.path || waitResult?.url || '';
+      entry.state = waitResult?.state || '';
+      if (!entry.downloaded) {
+        entry.error = waitResult?.error || 'download-not-completed';
+      }
+      results.push(entry);
+      await page.sleep(0.4);
+    } catch (err) {
+      entry.error = err instanceof Error ? err.message : String(err);
+      results.push(entry);
+    }
   }
 
   return results;
@@ -356,6 +392,7 @@ function imageDownloadScript() {
       }
       return document.body;
     };
+    // Prefer Download / 下载 on image tiles. Avoid "生成下载文件" (sandbox file tool).
     const listImageDownloadButtons = () => {
       const root = lastAssistantRoot();
       if (!root) return [];
@@ -367,6 +404,7 @@ function imageDownloadScript() {
         const text = ((el.innerText || el.textContent || '') + '').trim();
         const label = (aria + ' ' + text).replace(/\\s+/g, ' ').trim();
         const lower = label.toLowerCase();
+        // Not a file-export / code-interpreter affordance.
         if (/生成下载|create file|download file|导出文件|sandbox|copy link|复制链接|share|分享|edit|编辑|regenerate|重新生成/i.test(lower)) {
           continue;
         }
@@ -379,6 +417,7 @@ function imageDownloadScript() {
           || el.parentElement?.querySelector('img')
           || el.closest('div')?.querySelector('img')
         );
+        // Pure icon buttons next to large imgs also count.
         const imgSibling = el.closest('div, section, article')?.querySelector('img');
         const imgBig = imgSibling && (imgSibling.naturalWidth || imgSibling.width || 0) > 64;
         scored.push({
@@ -390,6 +429,7 @@ function imageDownloadScript() {
         });
       }
       scored.sort((a, b) => b.score - a.score);
+      // If any near-image control exists, drop non-image ones.
       if (scored.some((s) => s.nearImg)) {
         return scored.filter((s) => s.nearImg);
       }
@@ -419,8 +459,12 @@ function panelScript() {
       const st = window.getComputedStyle(el);
       if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return false;
       const r = el.getBoundingClientRect();
+      // Icon buttons may briefly report tiny size while animating; allow 1px.
       return r.width >= 1 && r.height >= 1;
     };
+    // Real DOM (previewable files):
+    //   div[data-testid="stage-thread-flyout"] > section[data-testid="screen-threadFlyOut"][aria-label=name]
+    //   header button[aria-label="Download"] + button[data-testid="close-button"]
     const findFlyout = (fileName) => {
       const byTestId = document.querySelector('section[data-testid="screen-threadFlyOut"]');
       if (byTestId) {
@@ -442,6 +486,7 @@ function panelScript() {
 
     const findDownloadButton = (root) => {
       if (!root) return null;
+      // Prefer exact header control from DOM dump.
       const preferred = root.querySelector(
         'header button[aria-label="Download"], header button[aria-label="下载"], button[aria-label="Download"], button[aria-label="下载"]',
       );
@@ -465,6 +510,11 @@ function panelScript() {
       };
     };
 
+    const hasFlyoutDownload = (fileName) => {
+      const info = inspectFlyout(fileName);
+      return !!info.hasDownload;
+    };
+
     const clickFlyoutDownload = (fileName) => {
       const root = findFlyout(fileName);
       if (!root) return { ok: false, reason: 'no-flyout' };
@@ -482,6 +532,7 @@ function panelScript() {
       };
     };
 
+    // Close flyout: data-testid="close-button" or aria-label="Close"
     const closeFlyout = (fileName) => {
       const root = findFlyout(fileName)
         || document.querySelector('section[data-testid="screen-threadFlyOut"]');

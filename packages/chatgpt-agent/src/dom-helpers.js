@@ -160,18 +160,7 @@ export function lastAssistantTurnSnippet() {
 
 /**
  * Modern resource-row download identification and click snippet.
- * Real DOM structure:
- * <span class="group/resource-row relative">
- *   <button aria-label="Open preview of <file>" ...></button>
- *   <span>
- *     <span title="<file>">...</span>
- *     <span>
- *       <span class="... opacity-0 group-focus-within/resource-row:opacity-100 group-hover/resource-row:opacity-100">
- *         <button type="button" aria-label="Download file">...</button>
- *       </span>
- *     </span>
- *   </span>
- * </span>
+ * Scoped to [class~="group/resource-row"] within last assistant turn.
  */
 export function resourceRowSnippet() {
   return `
@@ -206,34 +195,30 @@ export function resourceRowSnippet() {
       const root = findLastAssistantTurnRoot();
       if (!root) return null;
 
-      const candidates = [...root.querySelectorAll('button, [title], span, a')].filter((el) => {
-        if (!el || !(el instanceof HTMLElement)) return false;
-        if (el.hidden || el.hasAttribute('hidden')) return false;
-        if (el.closest('[inert], [aria-hidden="true"]')) return false;
-        const aria = el.getAttribute('aria-label') || '';
-        const title = el.getAttribute('title') || '';
-        const text = el.innerText || el.textContent || '';
-        return nameMatches(aria, fileName) || nameMatches(title, fileName) || nameMatches(text, fileName);
-      });
+      const rows = [...root.querySelectorAll('[class~="group/resource-row"]')];
+      for (const row of rows) {
+        if (row.querySelectorAll('[class~="group/resource-row"]').length > 0) continue;
 
-      for (const cand of candidates) {
-        const row = cand.closest('.group\\/resource-row, [class*="group/resource-row"], [class*="resource-row"]');
-        if (!row || !root.contains(row)) continue;
+        // Exactly one preview button per row
+        const previewBtns = [...row.querySelectorAll('button')].filter((b) => {
+          const aria = (b.getAttribute('aria-label') || '').trim();
+          return /preview|预览/i.test(aria);
+        });
+        if (previewBtns.length !== 1) continue;
+        const previewBtn = previewBtns[0];
 
-        // Ensure row does not encompass multiple sibling resource rows
-        const nestedRows = row.querySelectorAll('.group\\/resource-row, [class*="group/resource-row"], [class*="resource-row"]');
-        if (nestedRows.length > 1) continue;
-
-        let previewBtn = row.querySelector('button[aria-label*="preview" i], button[aria-label*="预览" i]');
-        if (!previewBtn) {
-          const rowBtns = [...row.querySelectorAll('button')].filter((b) => !isDownloadAffordance(b));
-          previewBtn = rowBtns.find((b) => nameMatches(b.getAttribute('aria-label'), fileName)) || rowBtns[0] || null;
+        // Filename matches preview affordance itself (aria-label or contained title)
+        const previewAria = previewBtn.getAttribute('aria-label') || '';
+        const titleEl = row.querySelector('[title]');
+        const titleText = titleEl ? (titleEl.getAttribute('title') || '') : '';
+        if (!nameMatches(previewAria, fileName) && !nameMatches(titleText, fileName)) {
+          continue;
         }
 
-        const dlBtn = [...row.querySelectorAll('button')].find((b) => b !== previewBtn && isDownloadAffordance(b));
-        if (dlBtn) {
-          return { row, previewBtn, dlBtn };
-        }
+        const dlBtns = [...row.querySelectorAll('button')].filter((b) => b !== previewBtn && isDownloadAffordance(b));
+        if (dlBtns.length !== 1) continue;
+
+        return { row, previewBtn, dlBtn: dlBtns[0] };
       }
 
       return null;

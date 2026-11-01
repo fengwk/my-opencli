@@ -403,6 +403,88 @@ describe('DOM Regression: End-to-End Download Order and Race Elimination (fakePa
     const chipClickIdx = callTrace.findIndex((c) => c.isChipClick);
     expect(waitIdx).toBeLessThan(chipClickIdx);
   });
+
+  it('preserves 0.4s gap between files and awaits waiter on click failure', async () => {
+    const html = `
+      <div data-conversation-role="assistant" data-chatgpt-search-unit-key="fallback-turn-0:1:assistant">
+        <!-- Row 1: file1.csv -->
+        <span class="group/resource-row relative">
+          <button aria-label="Open preview of file1.csv" type="button"></button>
+          <span><button type="button" aria-label="Download file"></button></span>
+        </span>
+        <!-- Row 2: file2.csv -->
+        <span class="group/resource-row relative">
+          <button aria-label="Open preview of file2.csv" type="button"></button>
+          <span><button type="button" aria-label="Download file"></button></span>
+        </span>
+      </div>
+    `;
+    const { runScript } = createDomSandbox(html);
+
+    let waiterResolved = false;
+    const sleeps = [];
+    let clickCount = 0;
+
+    const fakePage = {
+      evaluate: async (script) => {
+        if (script.includes('return clickResourceRowDownload')) {
+          clickCount += 1;
+          if (clickCount === 1) {
+            // First file click fails
+            return { ok: false, reason: 'forced-failure' };
+          }
+        }
+        return runScript(script);
+      },
+      waitForDownload: () => {
+        return new Promise((resolve) => {
+          setTimeout(() => {
+            waiterResolved = true;
+            resolve({ downloaded: false, error: 'timed out' });
+          }, 10);
+        });
+      },
+      sleep: async (sec) => {
+        sleeps.push(sec);
+      },
+    };
+
+    const results = await downloadFilesViaDomClick(fakePage, ['file1.csv', 'file2.csv']);
+
+    expect(results).toHaveLength(2);
+    // File 1 failed but waiter was awaited and did not hang
+    expect(results[0].clicked).toBe(false);
+    expect(waiterResolved).toBe(true);
+    // File 2 succeeded
+    expect(results[1].clicked).toBe(true);
+    // Verified 0.4s gap was executed between file 1 and file 2
+    expect(sleeps).toContain(0.4);
+  });
+
+  it('rejects row when ancestor text contains filename but preview button belongs to different file', () => {
+    const html = `
+      <div data-conversation-role="assistant" data-chatgpt-search-unit-key="fallback-turn-0:1:assistant">
+        <!-- Ancestor container mentions file_x.csv in prose -->
+        <div class="prose-wrapper">
+          <p>We are discussing file_x.csv</p>
+          <!-- The resource-row itself belongs to file_y.csv -->
+          <span class="group/resource-row relative">
+            <button aria-label="Open preview of file_y.csv" type="button"></button>
+            <span><button type="button" aria-label="Download file"></button></span>
+          </span>
+        </div>
+      </div>
+    `;
+    const { runScript } = createDomSandbox(html);
+
+    const foundX = runScript(`(() => {
+      ${resourceRowSnippet()}
+      return findResourceRowDownload('file_x.csv');
+    })()`);
+
+    // Must NOT match row of file_y just because parent text mentions file_x!
+    expect(foundX.found).toBe(false);
+  });
 });
 
 describe('DOM Regression: Strict Sandbox Link Evidence Protection', () => {
