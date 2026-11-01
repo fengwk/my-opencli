@@ -27,6 +27,7 @@ import {
   domVisibilitySnippet,
   fileChipSnippet,
   lastAssistantTurnSnippet,
+  modernImageExtractorScript,
   previewCheckScript,
   resourceRowSnippet,
   unwrapEvaluateResult,
@@ -110,13 +111,50 @@ function createDomSandbox(html, { origin = 'https://chatgpt.com', href = 'https:
       if (/display\s*:\s*none|visibility\s*:\s*hidden/i.test(style)) {
         return { width: 0, height: 0, top: 0, left: 0, right: 0, bottom: 0 };
       }
-      const width = Number(node.attribs?.width) || 100;
-      const height = Number(node.attribs?.height) || 50;
+      const swMatch = style.match(/(?:^|;)\s*width\s*:\s*(\d+)(?:px)?/i);
+      const shMatch = style.match(/(?:^|;)\s*height\s*:\s*(\d+)(?:px)?/i);
+      const width = swMatch ? Number(swMatch[1]) : (node.attribs?.width !== undefined ? Number(node.attribs.width) : 100);
+      const height = shMatch ? Number(shMatch[1]) : (node.attribs?.height !== undefined ? Number(node.attribs.height) : 50);
       return { width, height, top: 0, left: 0, right: width, bottom: height };
     };
     el.scrollIntoView = () => {};
     el.focus = () => { el._focused = true; };
     el.click = () => { el._clicked = true; };
+
+    if (el.tagName === 'IMG') {
+      Object.defineProperties(el, {
+        naturalWidth: {
+          get() {
+            if ('natural-width' in (node.attribs || {})) return Number(node.attribs['natural-width']);
+            if ('naturalwidth' in (node.attribs || {})) return Number(node.attribs.naturalwidth);
+            return Number(node.attribs?.width || 0);
+          },
+        },
+        naturalHeight: {
+          get() {
+            if ('natural-height' in (node.attribs || {})) return Number(node.attribs['natural-height']);
+            if ('naturalheight' in (node.attribs || {})) return Number(node.attribs.naturalheight);
+            return Number(node.attribs?.height || 0);
+          },
+        },
+        complete: {
+          get() {
+            if ('data-complete' in (node.attribs || {})) return node.attribs['data-complete'] === 'true';
+            return true;
+          },
+        },
+        currentSrc: {
+          get() {
+            return node.attribs?.src || '';
+          },
+        },
+        src: {
+          get() {
+            return node.attribs?.src || '';
+          },
+        },
+      });
+    }
 
     nodeMap.set(node, el);
     return el;
@@ -699,5 +737,325 @@ describe('DOM Regression: Modern Composer File Input Routing', () => {
 
     expect(matched).toBe('Attach files');
     expect(matched).not.toBe('Take a photo');
+  });
+});
+
+describe('DOM Regression: Modern ChatGPT Generated-Image Gallery Extractor', () => {
+  // Verifies that a generated image with 0x0 layout rect but loaded 1254x1254 natural size
+  // in the current turn is successfully extracted by URL.
+  it('extracts loaded 1254x1254 image even when layout width/height is 0x0', () => {
+    const html = `
+      <main>
+        <div data-chatgpt-search-message-ids="msg-current-1">
+          <div data-testid="generated-image-gallery">
+            <button data-testid="generated-image-preview" aria-hidden="false" style="width:0;height:0">
+              <img src="blob:https://chatgpt.com/current-uuid-1" naturalwidth="1254" naturalheight="1254" style="width:0;height:0" />
+            </button>
+          </div>
+        </div>
+      </main>
+    `;
+    const { runScript, sandbox } = createDomSandbox(html);
+    const preview = sandbox.document.querySelector('[data-testid="generated-image-preview"]');
+    const img = sandbox.document.querySelector('[data-testid="generated-image-preview"] img');
+    expect(preview.getBoundingClientRect().width).toBe(0);
+    expect(preview.getBoundingClientRect().height).toBe(0);
+    expect(img.getBoundingClientRect().width).toBe(0);
+    expect(img.getBoundingClientRect().height).toBe(0);
+    expect(img.naturalWidth).toBe(1254);
+    expect(img.naturalHeight).toBe(1254);
+
+    const result = runScript(modernImageExtractorScript(['msg-current-1']));
+
+    expect(result.modern).toBe(true);
+    expect(result.urls).toEqual(['blob:https://chatgpt.com/current-uuid-1']);
+  });
+
+  // Verifies that historical conversation image turns are strictly isolated and rejected
+  // when matching against the current turn messageId.
+  it('strictly rejects historical turns and only matches the specified current turn messageId', () => {
+    const html = `
+      <main>
+        <div data-chatgpt-search-message-ids="msg-history-old">
+          <div data-testid="generated-image-gallery">
+            <button data-testid="generated-image-preview" aria-hidden="false">
+              <img src="blob:https://chatgpt.com/history-uuid" naturalwidth="1254" naturalheight="1254" />
+            </button>
+          </div>
+        </div>
+        <div data-chatgpt-search-message-ids="msg-current-2">
+          <div data-testid="generated-image-gallery">
+            <button data-testid="generated-image-preview" aria-hidden="false">
+              <img src="blob:https://chatgpt.com/current-uuid-2" naturalwidth="1254" naturalheight="1254" />
+            </button>
+          </div>
+        </div>
+      </main>
+    `;
+    const { runScript } = createDomSandbox(html);
+    const result = runScript(modernImageExtractorScript(['msg-current-2']));
+
+    expect(result.modern).toBe(true);
+    expect(result.urls).toEqual(['blob:https://chatgpt.com/current-uuid-2']);
+  });
+
+  // Verifies that matching is strictly scoped to the nearest gallery.closest container
+  // and does NOT ascend to broader ancestral containers.
+  it('strictly rejects when nearest container does not match even if a higher ancestor contains the target id', () => {
+    const html = `
+      <main>
+        <div data-chatgpt-search-message-ids="msg-broad-ancestor">
+          <div data-chatgpt-search-message-ids="msg-immediate-unmatched">
+            <div data-testid="generated-image-gallery">
+              <button data-testid="generated-image-preview" aria-hidden="false">
+                <img src="blob:https://chatgpt.com/ancestor-leak-img" naturalwidth="1254" naturalheight="1254" />
+              </button>
+            </div>
+          </div>
+        </div>
+      </main>
+    `;
+    const { runScript } = createDomSandbox(html);
+    const result = runScript(modernImageExtractorScript(['msg-broad-ancestor']));
+
+    expect(result.modern).toBe(true);
+    expect(result.urls).toEqual([]);
+  });
+
+  // Verifies token matching when data-chatgpt-search-message-ids contains multiple tokens delimited by space/comma.
+  it('matches target message ID within multi-token whitespace and comma delimited attribute', () => {
+    const html = `
+      <main>
+        <div data-chatgpt-search-message-ids="token-a, token-b token-c">
+          <div data-testid="generated-image-gallery">
+            <button data-testid="generated-image-preview" aria-hidden="false">
+              <img src="blob:https://chatgpt.com/multi-token-img" naturalwidth="1254" naturalheight="1254" />
+            </button>
+          </div>
+        </div>
+      </main>
+    `;
+    const { runScript } = createDomSandbox(html);
+    const result = runScript(modernImageExtractorScript(['token-b']));
+
+    expect(result.modern).toBe(true);
+    expect(result.urls).toEqual(['blob:https://chatgpt.com/multi-token-img']);
+  });
+
+  // Verifies that images placed inside user turn scope are strictly excluded from generated image exports.
+  it('excludes images within user turn scope even if gallery markers are present', () => {
+    const html = `
+      <main>
+        <div data-message-author-role="user" data-chatgpt-search-message-ids="msg-user">
+          <div data-testid="generated-image-gallery">
+            <button data-testid="generated-image-preview" aria-hidden="false">
+              <img src="blob:https://chatgpt.com/user-upload.png" naturalwidth="1254" naturalheight="1254" />
+            </button>
+          </div>
+        </div>
+      </main>
+    `;
+    const { runScript } = createDomSandbox(html);
+    const result = runScript(modernImageExtractorScript(['msg-user']));
+
+    expect(result.modern).toBe(true);
+    expect(result.urls).toEqual([]);
+  });
+
+  // Verifies that images inside composer scope (e.g. preview drafts or attachment chips) are excluded.
+  it('excludes images inside composer scope', () => {
+    const html = `
+      <main>
+        <form data-chatgpt-composer="true" data-chatgpt-search-message-ids="msg-composer">
+          <div data-testid="generated-image-gallery">
+            <button data-testid="generated-image-preview" aria-hidden="false">
+              <img src="blob:https://chatgpt.com/composer-preview.png" naturalwidth="1254" naturalheight="1254" />
+            </button>
+          </div>
+        </form>
+      </main>
+    `;
+    const { runScript } = createDomSandbox(html);
+    const result = runScript(modernImageExtractorScript(['msg-composer']));
+
+    expect(result.modern).toBe(true);
+    expect(result.urls).toEqual([]);
+  });
+
+  // Verifies that hidden/inert/aria-hidden/display:none/visibility:hidden images and ancestors are rejected.
+  it('strictly excludes hidden, inert, aria-hidden="true", and styled hidden images', () => {
+    const html = `
+      <main>
+        <div data-chatgpt-search-message-ids="msg-hidden-test">
+          <!-- Hidden by hidden attribute on gallery -->
+          <div data-testid="generated-image-gallery" hidden>
+            <button data-testid="generated-image-preview" aria-hidden="false">
+              <img src="blob:https://chatgpt.com/hidden-1" naturalwidth="1254" naturalheight="1254" />
+            </button>
+          </div>
+          <!-- Hidden by inert ancestor -->
+          <div inert>
+            <div data-testid="generated-image-gallery">
+              <button data-testid="generated-image-preview" aria-hidden="false">
+                <img src="blob:https://chatgpt.com/hidden-2" naturalwidth="1254" naturalheight="1254" />
+              </button>
+            </div>
+          </div>
+          <!-- Hidden by aria-hidden="true" on preview -->
+          <div data-testid="generated-image-gallery">
+            <button data-testid="generated-image-preview" aria-hidden="true">
+              <img src="blob:https://chatgpt.com/hidden-3" naturalwidth="1254" naturalheight="1254" />
+            </button>
+          </div>
+          <!-- Hidden by display:none ancestor -->
+          <div style="display:none">
+            <div data-testid="generated-image-gallery">
+              <button data-testid="generated-image-preview" aria-hidden="false">
+                <img src="blob:https://chatgpt.com/hidden-4" naturalwidth="1254" naturalheight="1254" />
+              </button>
+            </div>
+          </div>
+          <!-- Hidden by visibility:hidden ancestor -->
+          <div style="visibility:hidden">
+            <div data-testid="generated-image-gallery">
+              <button data-testid="generated-image-preview" aria-hidden="false">
+                <img src="blob:https://chatgpt.com/hidden-5" naturalwidth="1254" naturalheight="1254" />
+              </button>
+            </div>
+          </div>
+        </div>
+      </main>
+    `;
+    const { runScript } = createDomSandbox(html);
+    const result = runScript(modernImageExtractorScript(['msg-hidden-test']));
+
+    expect(result.modern).toBe(true);
+    expect(result.urls).toEqual([]);
+  });
+
+  // Verifies that unrendered or tiny placeholders with natural width/height < 128 are rejected.
+  it('excludes images whose natural dimensions are < 128 (loading or small icon)', () => {
+    const html = `
+      <main>
+        <div data-chatgpt-search-message-ids="msg-unloaded">
+          <div data-testid="generated-image-gallery">
+            <button data-testid="generated-image-preview" aria-hidden="false">
+              <img src="blob:https://chatgpt.com/zero-dim" naturalwidth="0" naturalheight="0" />
+            </button>
+            <button data-testid="generated-image-preview" aria-hidden="false">
+              <img src="blob:https://chatgpt.com/small-icon" naturalwidth="64" naturalheight="64" />
+            </button>
+          </div>
+        </div>
+      </main>
+    `;
+    const { runScript } = createDomSandbox(html);
+    const result = runScript(modernImageExtractorScript(['msg-unloaded']));
+
+    expect(result.modern).toBe(true);
+    expect(result.urls).toEqual([]);
+  });
+
+  // Verifies that incomplete images (complete === false) are rejected even if natural dimensions exist.
+  it('excludes images whose complete status is false', () => {
+    const html = `
+      <main>
+        <div data-chatgpt-search-message-ids="msg-loading">
+          <div data-testid="generated-image-gallery">
+            <button data-testid="generated-image-preview" aria-hidden="false">
+              <img src="blob:https://chatgpt.com/loading-img" naturalwidth="1254" naturalheight="1254" data-complete="false" />
+            </button>
+          </div>
+        </div>
+      </main>
+    `;
+    const { runScript } = createDomSandbox(html);
+    const result = runScript(modernImageExtractorScript(['msg-loading']));
+
+    expect(result.modern).toBe(true);
+    expect(result.urls).toEqual([]);
+  });
+
+  // Verifies that external search thumbnails and canvas elements outside gallery markers are ignored.
+  it('ignores search thumbnails and canvas elements that lack gallery preview markers', () => {
+    const html = `
+      <main>
+        <div data-chatgpt-search-message-ids="msg-search-results">
+          <div class="search-card">
+            <img src="https://images.openai.com/static-rsc-4/thumb.jpg" naturalwidth="256" naturalheight="256" />
+            <canvas width="512" height="512"></canvas>
+          </div>
+        </div>
+      </main>
+    `;
+    const { runScript } = createDomSandbox(html);
+    const result = runScript(modernImageExtractorScript(['msg-search-results']));
+
+    expect(result.modern).toBe(false);
+    expect(result.urls).toEqual([]);
+  });
+
+  // Verifies fail-closed behavior: when messageIds is provided as an empty array, returns [] without leak.
+  it('fails closed and returns [] when messageIds is provided as an empty array', () => {
+    const html = `
+      <main>
+        <div data-chatgpt-search-message-ids="msg-any">
+          <div data-testid="generated-image-gallery">
+            <button data-testid="generated-image-preview" aria-hidden="false">
+              <img src="blob:https://chatgpt.com/any-image" naturalwidth="1254" naturalheight="1254" />
+            </button>
+          </div>
+        </div>
+      </main>
+    `;
+    const { runScript } = createDomSandbox(html);
+    const result = runScript(modernImageExtractorScript([]));
+
+    expect(result.modern).toBe(true);
+    expect(result.urls).toEqual([]);
+  });
+
+  // Verifies that when messageIds is omitted (beforeUrls snapshot mode), all loaded modern gallery images are returned.
+  it('collects all loaded modern gallery images when messageIds is omitted (beforeUrls snapshot)', () => {
+    const html = `
+      <main>
+        <div data-chatgpt-search-message-ids="msg-turn-1">
+          <div data-testid="generated-image-gallery">
+            <button data-testid="generated-image-preview" aria-hidden="false">
+              <img src="blob:https://chatgpt.com/img-1" naturalwidth="1254" naturalheight="1254" />
+            </button>
+          </div>
+        </div>
+        <div data-chatgpt-search-message-ids="msg-turn-2">
+          <div data-testid="generated-image-gallery">
+            <button data-testid="generated-image-preview" aria-hidden="false">
+              <img src="blob:https://chatgpt.com/img-2" naturalwidth="1254" naturalheight="1254" />
+            </button>
+          </div>
+        </div>
+      </main>
+    `;
+    const { runScript } = createDomSandbox(html);
+    const result = runScript(modernImageExtractorScript());
+
+    expect(result.modern).toBe(true);
+    expect(result.urls).toEqual(['blob:https://chatgpt.com/img-1', 'blob:https://chatgpt.com/img-2']);
+  });
+
+  // Verifies legacy fallback flag: returns modern: false when no modern gallery markers exist in main.
+  it('returns modern: false when main has no modern gallery markers', () => {
+    const html = `
+      <main>
+        <article data-turn="assistant">
+          <p>Legacy text response without modern gallery</p>
+          <img src="https://chatgpt.com/legacy-img.png" width="200" height="200" />
+        </article>
+      </main>
+    `;
+    const { runScript } = createDomSandbox(html);
+    const result = runScript(modernImageExtractorScript(['msg-legacy']));
+
+    expect(result.modern).toBe(false);
+    expect(result.urls).toEqual([]);
   });
 });

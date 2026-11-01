@@ -558,9 +558,17 @@ export const askCommand = cli({
       }
 
       if ((artifacts.images || []).length > 0 && remainingMs() >= 3_000) {
+        const imageMessageIds = Array.from(
+          new Set(
+            (artifacts.images || [])
+              .map((img) => (img && typeof img.messageId === 'string' ? img.messageId.trim() : ''))
+              .filter(Boolean),
+          ),
+        );
         const imgDl = await exportNewImagesLikeOfficial(page, {
           beforeUrls: beforeImageUrls,
           expectedCount: artifacts.images.length,
+          messageIds: imageMessageIds,
           outputDir: managedOutputDir,
           settleMs: 1200,
           pollIterations: 60,

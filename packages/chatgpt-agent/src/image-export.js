@@ -14,10 +14,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { saveBase64ToFile } from '@jackwener/opencli/utils';
+import { modernImageExtractorScript, unwrapEvaluateResult } from './dom-helpers.js';
 import {
   getChatGPTImageAssets,
   getChatGPTVisibleImageUrls,
-  unwrapEvaluateResult,
 } from './host-chatgpt.js';
 
 const DEFAULT_POLL_ITERATIONS = 12;
@@ -103,16 +103,55 @@ function nextAvailablePath(dir, baseName, ext) {
 }
 
 /**
- * Snapshot visible image URLs (call before send).
+ * Snapshot visible image URLs (call before send or during polling).
+ *
+ * For modern ChatGPT DOM (containing [data-testid="generated-image-gallery"]),
+ * extracts loaded images from the gallery preview elements without requiring
+ * rect dimensions > 0.
+ *
+ * When `messageIds` is provided (array of UUIDs):
+ *   Only returns images whose ancestor [data-chatgpt-search-message-ids] matches.
+ *   If the modern DOM is present but no matching images exist (or messageIds is empty),
+ *   returns [] without falling back to legacy/full-page URLs (fail-closed against history leakage).
+ *
+ * Falls back to legacy host `getChatGPTVisibleImageUrls` ONLY when no modern gallery
+ * markers exist on the page.
+ *
  * @param {object} page
+ * @param {string[] | null} [messageIds]
  * @returns {Promise<string[]>}
  */
-export async function snapshotVisibleImageUrls(page) {
-  try {
-    return await getChatGPTVisibleImageUrls(page);
-  } catch {
+export async function snapshotVisibleImageUrls(page, messageIds) {
+  if (!page || typeof page.evaluate !== 'function') {
     return [];
   }
+
+  let res;
+  try {
+    const raw = await page.evaluate(modernImageExtractorScript(messageIds));
+    res = unwrapEvaluateResult(raw);
+  } catch {
+    // Fail closed on evaluate error: do NOT fall back to legacy history extractor
+    return [];
+  }
+
+  // Explicit legacy fallback: only when the page affirmatively confirms absence
+  // of modern gallery markers (res.modern === false).
+  if (res && typeof res === 'object' && res.modern === false) {
+    try {
+      return await getChatGPTVisibleImageUrls(page);
+    } catch {
+      return [];
+    }
+  }
+
+  // Modern path: must be a valid object with modern === true and urls array.
+  if (res && typeof res === 'object' && res.modern === true && Array.isArray(res.urls)) {
+    return res.urls;
+  }
+
+  // Malformed result: fail closed.
+  return [];
 }
 
 // --- Sparse-placeholder detection (page-side canvas inspection) ------------------
@@ -450,6 +489,7 @@ export async function runImageExportAttempt(deps) {
  * @param {{
  *   beforeUrls?: string[],
  *   expectedCount?: number,
+ *   messageIds?: string[],
  *   outputDir?: string,
  *   settleMs?: number,
  *   pollIterations?: number,
@@ -462,6 +502,7 @@ export async function runImageExportAttempt(deps) {
 export async function exportNewImagesLikeOfficial(page, opts = {}) {
   const beforeSet = new Set(opts.beforeUrls || []);
   const expectedCount = Math.max(1, opts.expectedCount || 1);
+  const messageIds = opts.messageIds;
   const outputDir = resolveImageOutputDir(opts.outputDir);
   const settleMs = opts.settleMs ?? 1500;
   const pollIterations = opts.pollIterations ?? DEFAULT_POLL_ITERATIONS;
@@ -478,7 +519,7 @@ export async function exportNewImagesLikeOfficial(page, opts = {}) {
 
   const baseDeps = {
     sleep: (seconds) => page.sleep(seconds),
-    snapshotUrls: () => snapshotVisibleImageUrls(page),
+    snapshotUrls: () => snapshotVisibleImageUrls(page, messageIds),
     fetchAssets: (urls) => getChatGPTImageAssets(page, urls),
     saveBase64: (base64, filePath) => saveBase64ToFile(base64, filePath),
     inspectPlaceholder,

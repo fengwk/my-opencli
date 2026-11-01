@@ -26,7 +26,12 @@ import * as path from 'node:path';
 const getChatGPTVisibleImageUrls = vi.fn();
 const getChatGPTImageAssets = vi.fn();
 const saveBase64ToFile = vi.fn(async () => undefined);
-const unwrapEvaluateResult = vi.fn((payload) => payload);
+const unwrapEvaluateResult = vi.fn((payload) => {
+  if (payload && !Array.isArray(payload) && typeof payload === 'object' && 'session' in payload && 'data' in payload) {
+    return payload.data;
+  }
+  return payload;
+});
 
 vi.mock('../src/host-chatgpt.js', () => ({
   getChatGPTVisibleImageUrls: (...args) => getChatGPTVisibleImageUrls(...args),
@@ -43,6 +48,7 @@ const {
   isContinueAllowed,
   makeInspectPlaceholder,
   runImageExportAttempt,
+  snapshotVisibleImageUrls,
 } = await import('../src/image-export.js');
 
 const temps = [];
@@ -70,10 +76,15 @@ const SPARSE_PLACEHOLDER_DATA_URL = 'data:image/png;base64,PLACEHOLDER_DATA';
 const VALID_IMAGE_DATA_URL = 'data:image/png;base64,VALID_IMAGE_DATA';
 const OPAQUE_BLACK_DATA_URL = 'data:image/png;base64,OPAQUE_BLACK_DATA';
 
-function pageReturningInspection(envelope) {
+function pageReturningInspection(envelope, { modern = false, modernUrls = [] } = {}) {
   return {
     sleep: vi.fn(async () => {}),
-    evaluate: vi.fn(async () => envelope),
+    evaluate: vi.fn(async (script) => {
+      if (typeof script === 'string' && script.includes('generated-image-gallery')) {
+        return { modern, urls: modernUrls };
+      }
+      return envelope;
+    }),
   };
 }
 
@@ -306,7 +317,15 @@ describe('exportNewImagesLikeOfficial', () => {
 
   it('fails open and still saves the asset when page-side evaluation throws', async () => {
     const outputDir = tmpOutputDir();
-    const page = pageThrowingEvaluation();
+    const page = {
+      sleep: vi.fn(async () => {}),
+      evaluate: vi.fn(async (script) => {
+        if (typeof script === 'string' && script.includes('generated-image-gallery')) {
+          return { modern: false, urls: [] };
+        }
+        throw new Error('bridge disconnected during placeholder inspect');
+      }),
+    };
     getChatGPTVisibleImageUrls.mockResolvedValue([VALID_IMAGE_DATA_URL]);
     getChatGPTImageAssets.mockResolvedValue([{
       url: VALID_IMAGE_DATA_URL,
@@ -329,10 +348,17 @@ describe('exportNewImagesLikeOfficial', () => {
 
   it('performs one controlled reload/retry that turns a sparse placeholder into a saved asset', async () => {
     const outputDir = tmpOutputDir();
-    const page = pageReturningInspection(null); // overridden per call below
-    page.evaluate
-      .mockResolvedValueOnce(SPARSE_STATS)
-      .mockResolvedValueOnce(OPAQUE_STATS);
+    let inspectCount = 0;
+    const page = {
+      sleep: vi.fn(async () => {}),
+      evaluate: vi.fn(async (script) => {
+        if (typeof script === 'string' && script.includes('generated-image-gallery')) {
+          return { modern: false, urls: [] };
+        }
+        inspectCount += 1;
+        return inspectCount === 1 ? SPARSE_STATS : OPAQUE_STATS;
+      }),
+    };
 
     getChatGPTVisibleImageUrls
       .mockResolvedValueOnce([SPARSE_PLACEHOLDER_DATA_URL])
@@ -365,7 +391,7 @@ describe('exportNewImagesLikeOfficial', () => {
     });
 
     expect(reloadConversation).toHaveBeenCalledTimes(1);
-    expect(page.evaluate).toHaveBeenCalledTimes(2);
+    expect(page.evaluate).toHaveBeenCalledTimes(4); // 2 DOM queries + 2 placeholder inspections
     expect(getChatGPTVisibleImageUrls).toHaveBeenCalledTimes(2);
     expect(getChatGPTImageAssets).toHaveBeenCalledTimes(2);
     expect(saveBase64ToFile).toHaveBeenCalledTimes(1);
@@ -399,7 +425,7 @@ describe('exportNewImagesLikeOfficial', () => {
     expect(results[0].downloaded).toBe(true);
     expect(saveBase64ToFile).toHaveBeenCalledTimes(1);
     expect(reloadConversation).not.toHaveBeenCalled();
-    expect(page.evaluate).toHaveBeenCalledTimes(1);
+    expect(page.evaluate).toHaveBeenCalledTimes(2); // 1 DOM query + 1 placeholder inspect
     expect(getChatGPTVisibleImageUrls).toHaveBeenCalledTimes(1);
     expect(getChatGPTImageAssets).toHaveBeenCalledTimes(1);
   });
@@ -431,7 +457,7 @@ describe('exportNewImagesLikeOfficial', () => {
     expect(results[0].error).toBe('sparse-placeholder-rejected');
     expect(reloadConversation).not.toHaveBeenCalled();
     expect(saveBase64ToFile).not.toHaveBeenCalled();
-    expect(page.evaluate).toHaveBeenCalledTimes(1);
+    expect(page.evaluate).toHaveBeenCalledTimes(2); // 1 DOM query + 1 placeholder inspect
   });
 
   it('treats a throwing canRetry callback as disallowed (no reload, gate error swallowed)', async () => {
@@ -642,6 +668,86 @@ describe('exportNewImagesLikeOfficial', () => {
     expect(pollCount).toBe(0);
     expect(canContinue).toHaveBeenCalledTimes(1);
     expect(saveBase64ToFile).not.toHaveBeenCalled();
+  });
+});
+
+describe('snapshotVisibleImageUrls', () => {
+  // Verifies that when modern extractor evaluates with modern: true, matching URLs are returned
+  // and legacy host getChatGPTVisibleImageUrls is never called.
+  it('returns modern URLs when modern extractor succeeds and does not call legacy host', async () => {
+    const page = {
+      evaluate: vi.fn(async () => ({ modern: true, urls: ['blob:https://chatgpt.com/asset-1'] })),
+    };
+    const urls = await snapshotVisibleImageUrls(page, ['msg-1']);
+    expect(urls).toEqual(['blob:https://chatgpt.com/asset-1']);
+    expect(getChatGPTVisibleImageUrls).not.toHaveBeenCalled();
+  });
+
+  // Verifies that when modern DOM is detected but yields no matches for the current turn,
+  // it returns [] and does NOT fall back to legacy history extractor (prevents history leak).
+  it('returns [] when modern is true but no matching URLs exist and never calls legacy host', async () => {
+    const page = {
+      evaluate: vi.fn(async () => ({ modern: true, urls: [] })),
+    };
+    const urls = await snapshotVisibleImageUrls(page, ['msg-current']);
+    expect(urls).toEqual([]);
+    expect(getChatGPTVisibleImageUrls).not.toHaveBeenCalled();
+  });
+
+  // Verifies unwrapEvaluateResult compatibility when page.evaluate returns { session, data } envelope.
+  it('unwraps { session, data } envelopes returned from page.evaluate', async () => {
+    const page = {
+      evaluate: vi.fn(async () => ({
+        session: 'tab-lease-session-1',
+        data: { modern: true, urls: ['blob:https://chatgpt.com/unwrapped-asset'] },
+      })),
+    };
+    const urls = await snapshotVisibleImageUrls(page, ['msg-2']);
+    expect(urls).toEqual(['blob:https://chatgpt.com/unwrapped-asset']);
+    expect(getChatGPTVisibleImageUrls).not.toHaveBeenCalled();
+  });
+
+  // Verifies explicit legacy fallback: legacy extractor is called ONLY when modern is explicitly false.
+  it('calls legacy host getChatGPTVisibleImageUrls ONLY when modern is explicitly false', async () => {
+    const page = {
+      evaluate: vi.fn(async () => ({ modern: false, urls: [] })),
+    };
+    getChatGPTVisibleImageUrls.mockResolvedValueOnce(['https://chatgpt.com/legacy-img.png']);
+    const urls = await snapshotVisibleImageUrls(page, ['msg-legacy']);
+    expect(urls).toEqual(['https://chatgpt.com/legacy-img.png']);
+    expect(getChatGPTVisibleImageUrls).toHaveBeenCalledTimes(1);
+  });
+
+  // Verifies fail-closed behavior: evaluation exceptions return [] and never call legacy host.
+  it('fails closed and returns [] on evaluate exceptions without calling legacy host', async () => {
+    const page = {
+      evaluate: vi.fn(async () => {
+        throw new Error('Bridge execution failed');
+      }),
+    };
+    const urls = await snapshotVisibleImageUrls(page, ['msg-fail']);
+    expect(urls).toEqual([]);
+    expect(getChatGPTVisibleImageUrls).not.toHaveBeenCalled();
+  });
+
+  // Verifies fail-closed behavior on malformed evaluate return (null, empty object, or non-boolean modern).
+  it('fails closed and returns [] on malformed evaluate payload without calling legacy host', async () => {
+    const malformedPayloads = [null, undefined, {}, { modern: 'true' }, { modern: null }, { foo: 'bar' }];
+    for (const payload of malformedPayloads) {
+      const page = {
+        evaluate: vi.fn(async () => payload),
+      };
+      const urls = await snapshotVisibleImageUrls(page, ['msg-malformed']);
+      expect(urls).toEqual([]);
+      expect(getChatGPTVisibleImageUrls).not.toHaveBeenCalled();
+    }
+  });
+
+  // Verifies fail-closed behavior when page or page.evaluate is missing.
+  it('returns [] when page or page.evaluate is invalid', async () => {
+    expect(await snapshotVisibleImageUrls(null)).toEqual([]);
+    expect(await snapshotVisibleImageUrls({})).toEqual([]);
+    expect(getChatGPTVisibleImageUrls).not.toHaveBeenCalled();
   });
 });
 
