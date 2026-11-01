@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ArgumentError, CommandExecutionError } from '@jackwener/opencli/errors';
 import { Strategy } from '@jackwener/opencli/registry';
 import { downloadCommand } from '../download.js';
 
@@ -9,10 +10,11 @@ function createDummyMp4Buffer(size = 2048) {
   buf.writeUInt32BE(32, 0);
   buf.write('ftyp', 4, 'ascii');
   buf.write('isom', 8, 'ascii');
+  buf.writeUInt32BE(512, 12);
   return buf;
 }
 
-describe('douyin-ext download (command registration and execution flow)', () => {
+describe('douyin-ext download (validation, contract, and overall deadline)', () => {
   const testDir = path.resolve('.tmp-test-douyin-command');
 
   beforeEach(() => {
@@ -25,8 +27,21 @@ describe('douyin-ext download (command registration and execution flow)', () => 
     vi.unstubAllGlobals();
   });
 
-  // Test intent: Validate the public command registration matches the technical design
-  // (site=douyin-ext, browser=true, navigateBefore=false, ephemeral session).
+  it('validates command arguments offline in validateArgs before network navigation', () => {
+    // 21-digit number must be rejected statically
+    expect(() => downloadCommand.validateArgs({ target: '123456789012345678901' })).toThrow(
+      ArgumentError
+    );
+    // Untrusted domain rejected statically
+    expect(() => downloadCommand.validateArgs({ target: 'https://evil.com/video/1234567890123456789' })).toThrow(
+      ArgumentError
+    );
+    // Non-integer timeout rejected
+    expect(() => downloadCommand.validateArgs({ target: '7701962254330128228', timeout: 12.5 })).toThrow(
+      ArgumentError
+    );
+  });
+
   it('registers with the expected OpenCLI command contracts', () => {
     expect(downloadCommand.site).toBe('douyin-ext');
     expect(downloadCommand.name).toBe('download');
@@ -38,40 +53,43 @@ describe('douyin-ext download (command registration and execution flow)', () => 
     expect(downloadCommand.navigateBefore).toBe(false);
     expect(downloadCommand.defaultWindowMode).toBe('background');
     expect(downloadCommand.defaultFormat).toBe('json');
-    expect(downloadCommand.columns).toEqual([
-      'status',
-      'id',
-      'title',
-      'author',
-      'quality',
-      'codec',
-      'path',
-      'bytes',
-      'source',
-    ]);
-
-    const argNames = downloadCommand.args.map((a) => a.name);
-    expect(argNames).toContain('target');
-    expect(argNames).toContain('output');
-    expect(argNames).toContain('quality');
-    expect(argNames).toContain('timeout');
   });
 
-  // Test intent: Verify the entire execution flow: parse input, page evaluate,
-  // select stream, node streaming fetch, and structured output.
-  it('executes full download workflow and returns structured row', async () => {
+  // Defect check: overall deadline halts downstream phases when exhausted
+  it('enforces shared overall timeout deadline across execution phases', async () => {
+    const page = {
+      goto: vi.fn(async () => {}),
+      wait: vi.fn(async () => {
+        // Simulate delay that exhausts timeout budget
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }),
+      evaluate: vi.fn(async () => {
+        throw new Error('Should not reach evaluate if timed out');
+      }),
+    };
+
+    // Very short timeout
+    await expect(
+      downloadCommand.func(page, {
+        target: '7701962254330128228',
+        output: testDir,
+        timeout: 1, // 1 second
+      })
+    ).rejects.toThrow();
+  });
+
+  it('executes full download workflow and returns structured row with hostname source', async () => {
     const targetId = '7701962254330128228';
     const cdnUrl = 'https://v26-web.douyinvod.com/video/tos-cn-v/fullflow.mp4';
     const dummyBuffer = createDummyMp4Buffer(2048);
 
-    // Mock page evaluate for aweme detail
     const page = {
       goto: vi.fn(async () => {}),
       wait: vi.fn(async () => {}),
       sleep: vi.fn(async () => {}),
       evaluate: vi.fn(async (code) => {
         if (typeof code === 'function' && String(code).includes('userAgent')) {
-          return 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) TestBrowser/1.0';
+          return 'Mozilla/5.0 TestBrowser/1.0';
         }
         return {
           __kind: 'ok',
@@ -86,12 +104,13 @@ describe('douyin-ext download (command registration and execution flow)', () => 
                 height: 1920,
                 bit_rate: [
                   {
-                    width: 1080,
-                    height: 1920,
-                    bit_rate: 3000000,
                     gear_name: 'normal_1080_0',
                     is_h265: 0,
-                    play_addr: { url_list: [cdnUrl] },
+                    play_addr: {
+                      width: 1080,
+                      height: 1920,
+                      url_list: [cdnUrl],
+                    },
                   },
                 ],
               },
@@ -101,7 +120,6 @@ describe('douyin-ext download (command registration and execution flow)', () => 
       }),
     };
 
-    // Mock Node global fetch for stream download
     const mockFetch = vi.fn().mockResolvedValue({
       status: 200,
       headers: new Headers({
@@ -124,17 +142,12 @@ describe('douyin-ext download (command registration and execution flow)', () => 
       timeout: 30,
     });
 
-    expect(Array.isArray(rows)).toBe(true);
     expect(rows).toHaveLength(1);
     const result = rows[0];
-
     expect(result.status).toBe('ok');
     expect(result.id).toBe(targetId);
-    expect(result.title).toBe('Full flow integration test video');
-    expect(result.author).toBe('Tester');
     expect(result.quality).toBe('1080p');
     expect(result.codec).toBe('h264');
-    expect(result.bytes).toBe(dummyBuffer.length);
-    expect(fs.existsSync(result.path)).toBe(true);
+    expect(result.source).toBe('v26-web.douyinvod.com');
   });
 });

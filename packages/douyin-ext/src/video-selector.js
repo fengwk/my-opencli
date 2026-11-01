@@ -1,17 +1,11 @@
 import { ArgumentError, CommandExecutionError } from '@jackwener/opencli/errors';
 
-export const TRUSTED_CDN_SUFFIXES = [
-  'douyinvod.com',
-  'douyin.com',
-  'amemv.com',
-  'bytevcloud.com',
-  'ibytedtos.com',
-  'ixigua.com',
-];
+const PLAY_REDIRECT_PATH_RE = /^\/aweme\/v1\/play(?:\/|$)/;
 
 /**
- * Check whether a URL points to an authorized Douyin CDN or playback endpoint.
- * Strict HTTPS, standard port, no userinfo credentials.
+ * Check whether a URL points to verified Douyin video CDNs:
+ * 1. *.douyinvod.com
+ * 2. www.douyin.com strictly under ^/aweme/v1/play/
  */
 export function isTrustedCdnUrl(urlStr) {
   if (typeof urlStr !== 'string' || !urlStr.trim()) return false;
@@ -22,31 +16,36 @@ export function isTrustedCdnUrl(urlStr) {
     return false;
   }
 
-  if (url.protocol !== 'https:') return false;
-  if (url.port) return false;
-  if (url.username || url.password) return false;
+  if (url.protocol !== 'https:' || url.port || url.username || url.password) {
+    return false;
+  }
 
   const hostname = url.hostname.toLowerCase();
-  return TRUSTED_CDN_SUFFIXES.some(
-    (suffix) => hostname === suffix || hostname.endsWith(`.${suffix}`)
-  );
+
+  // Rule 1: Verified douyinvod CDN
+  if (hostname === 'douyinvod.com' || hostname.endsWith('.douyinvod.com')) {
+    return true;
+  }
+
+  // Rule 2: www.douyin.com strictly on the play endpoint
+  if (hostname === 'www.douyin.com' && PLAY_REDIRECT_PATH_RE.test(url.pathname)) {
+    return true;
+  }
+
+  return false;
 }
 
-/**
- * Check whether a URL is a www.douyin.com/aweme/v1/play/ redirect endpoint.
- */
 export function isPlayRedirectUrl(urlStr) {
   try {
     const url = new URL(urlStr);
-    return url.hostname.includes('douyin.com') && url.pathname.includes('/aweme/v1/play');
+    return url.hostname === 'www.douyin.com' && PLAY_REDIRECT_PATH_RE.test(url.pathname);
   } catch {
     return false;
   }
 }
 
 /**
- * Preserve the original order of URLs in url_list, but place /aweme/v1/play redirect
- * endpoints after direct CDN endpoints.
+ * Preserve the original order of CDN URLs but place /aweme/v1/play redirects after direct CDNs.
  */
 export function orderUrls(urlList) {
   if (!Array.isArray(urlList)) return [];
@@ -56,9 +55,6 @@ export function orderUrls(urlList) {
   return [...direct, ...playRedirects];
 }
 
-/**
- * Parse video_extra JSON string safely.
- */
 function parseVideoExtra(extra) {
   if (!extra) return {};
   if (typeof extra === 'object') return extra;
@@ -69,14 +65,10 @@ function parseVideoExtra(extra) {
   }
 }
 
-/**
- * Check if a candidate item is a DASH stream.
- */
 export function isDashStream(item) {
   if (!item || typeof item !== 'object') return false;
 
-  if (item.format === 'dash') return true;
-  if (item.is_dash === true || item.is_dash === 1) return true;
+  if (item.format === 'dash' || item.is_dash === true || item.is_dash === 1) return true;
 
   const extra = parseVideoExtra(item.video_extra);
   if (extra.format && String(extra.format).toLowerCase() === 'dash') return true;
@@ -85,8 +77,10 @@ export function isDashStream(item) {
   const gear = String(item.gear_name ?? '').toLowerCase();
   if (gear.includes('dash')) return true;
 
-  // Check URL signatures
-  const urls = item.play_addr?.url_list ?? [];
+  const urls = [
+    ...(item.play_addr?.url_list ?? []),
+    ...(item.url_list ?? []),
+  ];
   if (urls.some((u) => typeof u === 'string' && (u.includes('.mpd') || u.includes('/dash/')))) {
     return true;
   }
@@ -94,58 +88,83 @@ export function isDashStream(item) {
   return false;
 }
 
-/**
- * Check if an item is audio-only (no video picture track).
- */
 export function isAudioOnlyStream(item) {
   if (!item || typeof item !== 'object') return false;
-  const width = Number(item.width ?? 0);
-  const height = Number(item.height ?? 0);
-  if (width === 0 && height === 0 && (item.audio_quality != null || item.audio_type != null)) {
+  const w = Number(item.play_addr?.width ?? item.width ?? 0);
+  const h = Number(item.play_addr?.height ?? item.height ?? 0);
+  if (w === 0 && h === 0 && (item.audio_quality != null || item.audio_type != null)) {
     return true;
   }
   return false;
 }
 
 /**
- * Normalize resolution label and numeric short dimension.
+ * Determine resolution label and numeric dimension value.
+ * Prioritizes gear_name / definition tags before dimension thresholds.
  */
-function deriveQualityLabel(minDim, gearName) {
-  const gear = String(gearName ?? '').toLowerCase();
-  if (gear.includes('1080') || minDim >= 1080) return '1080p';
-  if (gear.includes('720') || minDim >= 720) return '720p';
-  if (gear.includes('540') || minDim >= 540) return '540p';
-  if (gear.includes('480') || minDim >= 480) return '480p';
-  if (gear.includes('360') || minDim >= 360) return '360p';
-  return minDim > 0 ? `${minDim}p` : 'default';
+function deriveResolution(minDim, gearName, definition) {
+  const text = `${gearName || ''} ${definition || ''}`.toLowerCase();
+
+  if (text.includes('2160') || text.includes('4k') || minDim >= 2160) {
+    return { quality: '2160p', resolution: 2160 };
+  }
+  if (text.includes('1440') || text.includes('2k') || minDim >= 1440) {
+    return { quality: '1440p', resolution: 1440 };
+  }
+  if (text.includes('1080') || minDim >= 1080) {
+    return { quality: '1080p', resolution: 1080 };
+  }
+  if (text.includes('720') || minDim >= 720) {
+    return { quality: '720p', resolution: 720 };
+  }
+  if (text.includes('540') || minDim >= 540) {
+    return { quality: '540p', resolution: 540 };
+  }
+  if (text.includes('480') || minDim >= 480) {
+    return { quality: '480p', resolution: 480 };
+  }
+  if (text.includes('360') || minDim >= 360) {
+    return { quality: '360p', resolution: 360 };
+  }
+
+  return {
+    quality: minDim > 0 ? `${minDim}p` : 'default',
+    resolution: minDim > 0 ? minDim : 0,
+  };
 }
 
 /**
- * Extract codec information without fabricating metadata.
+ * Derive codec strictly from evidence without fabricating h264.
  */
 function deriveCodec(item, fallbackName) {
-  if (item?.is_h265 === 1 || item?.is_h265 === true) return 'h265';
+  const extra = parseVideoExtra(item?.video_extra);
+  const extraCodec = String(extra.codec_type || extra.format || '').toLowerCase();
   const gear = String(item?.gear_name || fallbackName || '').toLowerCase();
-  if (gear.includes('265') || gear.includes('hevc')) return 'h265';
-  if (gear.includes('264') || gear.includes('avc')) return 'h264';
-  if (item?.is_h265 === 0) return 'h264';
-  return 'h264'; // Default conventional MP4 video codec
+
+  if (item?.is_h265 === 1 || item?.is_h265 === true || gear.includes('265') || gear.includes('hevc') || extraCodec.includes('265') || extraCodec.includes('hevc')) {
+    return 'h265';
+  }
+
+  if (fallbackName === 'play_addr_h264' || item?.is_h265 === 0 || gear.includes('264') || gear.includes('avc') || extraCodec.includes('264') || extraCodec.includes('avc')) {
+    return 'h264';
+  }
+
+  return 'unknown';
 }
 
-/**
- * Build a structured variant descriptor.
- */
 function createVariant({ item, urls, width, height, fallbackName = '' }) {
-  const w = Number(width ?? item?.width ?? 0);
-  const h = Number(height ?? item?.height ?? 0);
-  const minDim = Math.min(w, h);
-  const quality = deriveQualityLabel(minDim, item?.gear_name || fallbackName);
+  const minDim = Math.min(Number(width || 0), Number(height || 0));
+  const { quality, resolution } = deriveResolution(
+    minDim,
+    item?.gear_name || fallbackName,
+    item?.definition
+  );
   const bitrate = Number(item?.bit_rate ?? item?.bitrate ?? 0);
   const codec = deriveCodec(item, fallbackName);
 
   return {
     quality,
-    resolution: minDim,
+    resolution,
     bitrate,
     codec,
     urls,
@@ -153,12 +172,6 @@ function createVariant({ item, urls, width, height, fallbackName = '' }) {
   };
 }
 
-/**
- * Comparator for video variants:
- * 1. Higher resolution first
- * 2. Higher bitrate first
- * 3. H264 preference as tie-breaker for identical resolution/bitrate
- */
 export function compareVariants(a, b) {
   if (b.resolution !== a.resolution) {
     return b.resolution - a.resolution;
@@ -169,24 +182,42 @@ export function compareVariants(a, b) {
   if (a.codec !== b.codec) {
     if (a.codec === 'h264') return -1;
     if (b.codec === 'h264') return 1;
+    if (a.codec === 'h265' && b.codec === 'unknown') return -1;
+    if (b.codec === 'h265' && a.codec === 'unknown') return 1;
   }
   return 0;
 }
 
-/**
- * Extract all valid, non-dash, merged MP4 video variants from the video object.
- */
 export function extractVideoVariants(video) {
   if (!video || typeof video !== 'object') return [];
 
   const variants = [];
+  const knownDashUrls = new Set();
 
-  // Source A: video.bit_rate array
+  // Pass 1: Collect DASH URLs to prevent them from being reintroduced via direct keys
+  const collectDashUrls = (list) => {
+    if (Array.isArray(list)) {
+      for (const u of list) {
+        if (typeof u === 'string') knownDashUrls.add(u);
+      }
+    }
+  };
+
+  if (Array.isArray(video.bit_rate)) {
+    for (const item of video.bit_rate) {
+      if (isDashStream(item)) {
+        collectDashUrls(item.play_addr?.url_list);
+        collectDashUrls(item.play_addr_h264?.url_list);
+        collectDashUrls(item.play_addr_265?.url_list);
+      }
+    }
+  }
+
+  // Pass 2: Extract from video.bit_rate
   if (Array.isArray(video.bit_rate) && video.bit_rate.length > 0) {
     for (const item of video.bit_rate) {
       if (!item || typeof item !== 'object') continue;
-      if (isDashStream(item)) continue;
-      if (isAudioOnlyStream(item)) continue;
+      if (isDashStream(item) || isAudioOnlyStream(item)) continue;
 
       const rawUrls =
         item.play_addr?.url_list ??
@@ -196,44 +227,58 @@ export function extractVideoVariants(video) {
       const urls = orderUrls(rawUrls);
       if (urls.length === 0) continue;
 
+      // Crucial: dimensions must come from item.play_addr width/height, not video.width/height
+      const itemW =
+        item.play_addr?.width ??
+        item.play_addr_h264?.width ??
+        item.play_addr_265?.width ??
+        item.width ??
+        0;
+      const itemH =
+        item.play_addr?.height ??
+        item.play_addr_h264?.height ??
+        item.play_addr_265?.height ??
+        item.height ??
+        0;
+
       variants.push(
         createVariant({
           item,
           urls,
-          width: item.width || video.width,
-          height: item.height || video.height,
+          width: itemW,
+          height: itemH,
         })
       );
     }
   }
 
-  // Source B: Direct play_addr entries as fallback or supplement
+  // Pass 3: Direct play_addr entries (only if not DASH, not audio, and URLs not known DASH)
   const directEntries = [
-    { key: 'play_addr_h264', obj: video.play_addr_h264, defaultCodec: 'h264' },
-    { key: 'play_addr_265', obj: video.play_addr_265, defaultCodec: 'h265' },
-    { key: 'play_addr', obj: video.play_addr, defaultCodec: 'h264' },
+    { key: 'play_addr_h264', obj: video.play_addr_h264 },
+    { key: 'play_addr_265', obj: video.play_addr_265 },
+    { key: 'play_addr', obj: video.play_addr },
   ];
 
-  for (const { key, obj, defaultCodec } of directEntries) {
+  for (const { key, obj } of directEntries) {
     if (!obj || typeof obj !== 'object') continue;
-    const urls = orderUrls(obj.url_list);
+    if (isDashStream(obj) || isAudioOnlyStream(obj)) continue;
+
+    const rawUrls = obj.url_list ?? [];
+    if (rawUrls.some((u) => knownDashUrls.has(u))) continue;
+
+    const urls = orderUrls(rawUrls);
     if (urls.length === 0) continue;
 
-    // Check if this URL list is already captured in variants
     const alreadyCaptured = variants.some((v) =>
       v.urls.some((u) => urls.includes(u))
     );
     if (!alreadyCaptured) {
       variants.push(
         createVariant({
-          item: {
-            ...obj,
-            is_h265: defaultCodec === 'h265' ? 1 : 0,
-            gear_name: obj.gear_name || key,
-          },
+          item: obj,
           urls,
-          width: obj.width || video.width,
-          height: obj.height || video.height,
+          width: obj.width || video.width || 0,
+          height: obj.height || video.height || 0,
           fallbackName: key,
         })
       );
@@ -243,12 +288,6 @@ export function extractVideoVariants(video) {
   return variants;
 }
 
-/**
- * Select the best matching video variant according to the requested quality.
- *
- * If requested quality is not 'best' and not available, explicitly throws ArgumentError.
- * Never silently downgrades quality.
- */
 export function selectVideoVariant(video, requestedQuality = 'best') {
   const variants = extractVideoVariants(video);
   if (variants.length === 0) {
@@ -258,12 +297,10 @@ export function selectVideoVariant(video, requestedQuality = 'best') {
   const quality = String(requestedQuality || 'best').trim().toLowerCase();
 
   if (quality === 'best') {
-    // Sort all variants by resolution desc, bitrate desc, h264 preference
     const sorted = [...variants].sort(compareVariants);
     return sorted[0];
   }
 
-  // Exact quality filter (e.g. '1080p', '720p')
   const matching = variants.filter((v) => v.quality.toLowerCase() === quality);
   if (matching.length === 0) {
     const availableQualities = Array.from(new Set(variants.map((v) => v.quality)));

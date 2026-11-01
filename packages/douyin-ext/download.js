@@ -8,6 +8,7 @@
  *   does not depend on Chrome downloads or third-party extensions.
  */
 
+import { CommandExecutionError } from '@jackwener/opencli/errors';
 import { cli, Strategy } from '@jackwener/opencli/registry';
 import {
   DEFAULT_TIMEOUT_SECONDS,
@@ -69,27 +70,37 @@ export const downloadCommand = cli({
   func: async (page, kwargs) => {
     const args = normalizeDownloadArgs(kwargs);
 
-    // Resolve target to video ID before navigation; invalid inputs throw ArgumentError here
-    const { id } = await resolveTargetToId(args.target);
+    // Track overall deadline across all phases
+    const overallDeadline = Date.now() + args.timeoutMs;
+    const getRemainingTimeoutMs = () => {
+      const remaining = overallDeadline - Date.now();
+      if (remaining <= 0) {
+        throw new CommandExecutionError(`Operation exceeded overall timeout of ${args.timeoutSeconds}s`);
+      }
+      return remaining;
+    };
 
-    // Obtain dynamic browser userAgent to avoid hardcoding outdated UA strings
+    // Phase 1: Resolve target input to video ID before page navigation
+    const hopSignal = AbortSignal.timeout(Math.min(getRemainingTimeoutMs(), 10000));
+    const { id } = await resolveTargetToId(args.target, { timeoutSignal: hopSignal });
+
+    // Phase 2: Read-only in-page fetch for video detail
+    const detail = await fetchAwemeDetailFromPage(page, id, {
+      timeoutMs: getRemainingTimeoutMs(),
+    });
+
+    // Obtain dynamic browser UA after navigation if available; omit if not
     let userAgent;
     try {
       userAgent = await page.evaluate(() => navigator.userAgent);
     } catch {
-      userAgent =
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36';
+      userAgent = undefined;
     }
 
-    // Step 1: Read-only in-page fetch for video detail
-    const detail = await fetchAwemeDetailFromPage(page, id, {
-      timeoutMs: args.timeoutMs,
-    });
-
-    // Step 2: Extract variants and select requested quality
+    // Phase 3: Extract variants and select requested quality
     const variant = selectVideoVariant(detail.video, args.quality);
 
-    // Step 3: Stream download video to local file
+    // Phase 4: Stream download video to local execution host file
     const title = detail.desc || detail.title || id;
     const author = detail.author?.nickname || '';
 
@@ -100,7 +111,7 @@ export const downloadCommand = cli({
       variant,
       outputDir: args.output,
       userAgent,
-      timeoutMs: args.timeoutMs,
+      timeoutMs: getRemainingTimeoutMs(),
     });
 
     return [downloadResult];

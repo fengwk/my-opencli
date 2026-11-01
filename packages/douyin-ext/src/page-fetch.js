@@ -28,29 +28,29 @@ function isAuthLikeMessage(code, msg) {
 
 /**
  * Fetch aweme video detail from within the page context.
- *
- * Runs a read-only fetch against /aweme/v1/web/aweme/detail/ with credentials: 'include'.
- * Does not mutate the DOM or click any elements.
+ * Strictly read-only, does not mutate DOM or click elements.
  */
-export async function fetchAwemeDetailFromPage(page, id, { timeoutMs = 30000, waitTime = 2.5 } = {}) {
-  // Step 1: Navigate to the official video page
+export async function fetchAwemeDetailFromPage(
+  page,
+  id,
+  { timeoutMs = 30000, waitTime = 2.5 } = {}
+) {
   const videoPageUrl = `https://www.douyin.com/video/${id}`;
   try {
     await page.goto(videoPageUrl);
   } catch (err) {
     throw new CommandExecutionError(
-      `Failed to navigate to Douyin video page (${videoPageUrl}): ${err instanceof Error ? err.message : String(err)}`
+      `Failed to navigate to Douyin video page: ${err instanceof Error ? err.message : String(err)}`
     );
   }
 
-  // Step 2: Bounded wait for page readiness
+  // Bounded wait: OpenCLI sleep/wait takes seconds
   if (typeof page.wait === 'function') {
     await page.wait({ time: waitTime });
   } else if (typeof page.sleep === 'function') {
-    await page.sleep(Math.round(waitTime * 1000));
+    await page.sleep(waitTime);
   }
 
-  // Step 3: Read-only in-page fetch using safely serialized parameters
   const js = `
     (async () => {
       const controller = new AbortController();
@@ -65,9 +65,7 @@ export async function fetchAwemeDetailFromPage(page, id, { timeoutMs = 30000, wa
           method: 'GET',
           credentials: 'include',
           signal: controller.signal,
-          headers: {
-            'Accept': 'application/json'
-          }
+          headers: { 'Accept': 'application/json' }
         });
         const text = await res.text();
         if (!text.trim()) {
@@ -79,21 +77,17 @@ export async function fetchAwemeDetailFromPage(page, id, { timeoutMs = 30000, wa
             return {
               __kind: 'http_error',
               status: res.status,
-              msg: json?.status_msg || json?.message || 'HTTP error ' + res.status
+              msg: json?.status_msg || json?.message || 'HTTP ' + res.status
             };
           }
           return { __kind: 'ok', data: json };
-        } catch (parseErr) {
-          return {
-            __kind: 'non_json',
-            status: res.status,
-            snippet: text.slice(0, 300)
-          };
+        } catch {
+          return { __kind: 'non_json', status: res.status };
         }
-      } catch (fetchErr) {
+      } catch (err) {
         return {
           __kind: 'fetch_error',
-          message: String(fetchErr && fetchErr.message || fetchErr)
+          message: String(err && err.message || err)
         };
       } finally {
         clearTimeout(timer);
@@ -106,33 +100,29 @@ export async function fetchAwemeDetailFromPage(page, id, { timeoutMs = 30000, wa
     evalRaw = await page.evaluate(js);
   } catch (err) {
     throw new CommandExecutionError(
-      `In-page evaluate failed for Douyin detail (${id}): ${err instanceof Error ? err.message : String(err)}`
+      `In-page evaluate failed for video ${id}: ${err instanceof Error ? err.message : String(err)}`
     );
   }
 
   const result = unwrapEvaluateResult(evalRaw);
   if (!result || typeof result !== 'object') {
-    throw new CommandExecutionError(
-      `Malformed in-page evaluate response for video ${id}`
-    );
+    throw new CommandExecutionError(`Malformed in-page evaluate response for video ${id}`);
   }
 
   if (result.__kind === 'fetch_error') {
-    throw new CommandExecutionError(
-      `In-page fetch request failed for video ${id}: ${result.message}`
-    );
+    throw new CommandExecutionError(`In-page fetch request failed for video ${id}: ${result.message}`);
   }
 
   if (result.__kind === 'non_json') {
     throw new CommandExecutionError(
-      `Douyin detail API returned non-JSON response for video ${id} (HTTP ${result.status}). The page may require login, verification, or is blocked: ${result.snippet}`
+      `Douyin detail API returned non-JSON response for video ${id} (HTTP ${result.status}). The page may require login, verification, or is restricted.`
     );
   }
 
   if (result.__kind === 'empty') {
     throw new EmptyResultError(
       'douyin-ext',
-      `Douyin detail endpoint returned an empty body for video ${id} (HTTP ${result.status}). Video may be restricted, deleted, or requires login verification.`
+      `Douyin detail endpoint returned empty body for video ${id} (HTTP ${result.status}). Video may be restricted, deleted, or requires login verification.`
     );
   }
 
@@ -143,9 +133,7 @@ export async function fetchAwemeDetailFromPage(page, id, { timeoutMs = 30000, wa
         `Douyin detail request requires authentication (HTTP ${result.status}): ${result.msg}`
       );
     }
-    throw new CommandExecutionError(
-      `Douyin detail API returned HTTP ${result.status}: ${result.msg}`
-    );
+    throw new CommandExecutionError(`Douyin detail API returned HTTP ${result.status}: ${result.msg}`);
   }
 
   const data = result.data;
@@ -153,7 +141,6 @@ export async function fetchAwemeDetailFromPage(page, id, { timeoutMs = 30000, wa
     throw new CommandExecutionError(`Douyin detail returned invalid JSON for video ${id}`);
   }
 
-  // Check API status_code
   if ('status_code' in data && data.status_code !== 0) {
     const code = data.status_code;
     const msg = data.status_msg || data.message || 'unknown error';
@@ -180,21 +167,18 @@ export async function fetchAwemeDetailFromPage(page, id, { timeoutMs = 30000, wa
     throw new CommandExecutionError(`Invalid aweme_detail payload for video ${id}`);
   }
 
-  // Strict aweme_id equality check
   if (String(detail.aweme_id) !== String(id)) {
     throw new CommandExecutionError(
       `Detail aweme_id mismatch: requested ${id}, received ${detail.aweme_id}`
     );
   }
 
-  // Reject image collections (图集)
   if (detail.images && Array.isArray(detail.images) && detail.images.length > 0) {
     throw new CommandExecutionError(
       `Target ${id} is an image collection (图集, ${detail.images.length} images). douyin-ext download only supports videos.`
     );
   }
 
-  // Ensure video object exists
   if (!detail.video || typeof detail.video !== 'object') {
     throw new CommandExecutionError(
       `No video stream metadata found for ${id}. Video may be unavailable or unplayable.`

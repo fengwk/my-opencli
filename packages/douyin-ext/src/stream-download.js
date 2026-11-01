@@ -1,77 +1,131 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { Readable, Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { CommandExecutionError } from '@jackwener/opencli/errors';
 import { isTrustedCdnUrl } from './video-selector.js';
 
 export const MIN_VALID_VIDEO_BYTES = 1024;
 
 /**
- * Sanitize URL for output and logging by omitting query parameters that may
- * contain sensitive authentication tokens or signatures.
+ * Validate standard MP4 ftyp container header:
+ * - Must accumulate at least 16 bytes
+ * - Big-endian 32-bit box size between 12 and 1024
+ * - Offset 4..8 must be ASCII 'ftyp'
+ * - Offset 8..12 must be a printable ASCII major brand, not HTML/JSON
  */
-export function sanitizeUrlForLog(urlStr) {
-  if (typeof urlStr !== 'string' || !urlStr.trim()) return '';
-  try {
-    const u = new URL(urlStr);
-    return `${u.origin}${u.pathname}`;
-  } catch {
-    return '';
+export function validateMp4HeaderBuffer(buffer) {
+  if (!buffer || buffer.length < 16) {
+    return false;
   }
+
+  const boxSize = buffer.readUInt32BE(0);
+  if (boxSize < 12 || boxSize > 1024) {
+    return false;
+  }
+
+  const tag = buffer.toString('ascii', 4, 8);
+  if (tag !== 'ftyp') {
+    return false;
+  }
+
+  const majorBrand = buffer.toString('ascii', 8, 12);
+  // Major brand must be printable ASCII and cannot be HTML/JSON markers
+  if (!/^[ -~]{4}$/.test(majorBrand) || /^(<!DO|<htm|{"st)/i.test(majorBrand)) {
+    return false;
+  }
+
+  return true;
 }
 
 /**
- * Verify if the first bytes match a standard MP4 container header (ftyp box).
+ * Create a Transform stream that accumulates at least 16 bytes to strictly validate the MP4 header
+ * before streaming data through without full buffering.
  */
-export function isValidMp4Header(buffer) {
-  if (!buffer || buffer.length < 8) return false;
+function createMp4HeaderValidator() {
+  let accumulated = Buffer.alloc(0);
+  let verified = false;
 
-  // Standard MP4: 4 bytes length + 'ftyp' (0x66, 0x74, 0x79, 0x70)
-  const isFtypAt4 =
-    buffer[4] === 0x66 &&
-    buffer[5] === 0x74 &&
-    buffer[6] === 0x79 &&
-    buffer[7] === 0x70;
-  if (isFtypAt4) return true;
+  return new Transform({
+    transform(chunk, encoding, callback) {
+      if (verified) {
+        return callback(null, chunk);
+      }
 
-  // Direct ftyp at 0
-  const isFtypAt0 =
-    buffer[0] === 0x66 &&
-    buffer[1] === 0x74 &&
-    buffer[2] === 0x79 &&
-    buffer[3] === 0x70;
-  if (isFtypAt0) return true;
+      accumulated = Buffer.concat([accumulated, chunk]);
+      if (accumulated.length < 16) {
+        return callback();
+      }
 
-  // Search first 64 bytes for ftyp or moov markers
-  const sliceStr = buffer.slice(0, Math.min(buffer.length, 64)).toString('binary');
-  return sliceStr.includes('ftyp') || sliceStr.includes('moov');
+      if (!validateMp4HeaderBuffer(accumulated)) {
+        return callback(
+          new CommandExecutionError(
+            'Downloaded stream does not contain a valid MP4 header (ftyp box invalid or missing)'
+          )
+        );
+      }
+
+      verified = true;
+      const pass = accumulated;
+      accumulated = Buffer.alloc(0);
+      callback(null, pass);
+    },
+    flush(callback) {
+      if (!verified) {
+        return callback(
+          new CommandExecutionError(
+            'Stream ended before sufficient data for MP4 header verification'
+          )
+        );
+      }
+      callback();
+    },
+  });
 }
 
 /**
- * Clean illegal characters for file systems across Windows/Linux/macOS.
+ * Sanitize filename strictly:
+ * - Strips NUL and control characters (0x00-0x1F, 0x7F)
+ * - Strips path separators and illegal filesystem characters
+ * - Strips leading/trailing dots and whitespace
  */
 export function sanitizeFilename(name) {
   const cleaned = String(name ?? '')
-    .replace(/[\\/:*?"<>|\r\n\t]/g, '_')
+    .replace(/\0/g, '')
+    .replace(/[\x00-\x1f\x7f]/g, '')
+    .replace(/[\\/:*?"<>|]/g, '_')
     .replace(/\s+/g, ' ')
+    .replace(/^[\.\s]+|[\.\s]+$/g, '')
     .trim();
   return cleaned.slice(0, 80);
 }
 
 /**
- * Generate a non-colliding file path to ensure existing files are never overwritten.
+ * Atomically create a destination file using hardlink + unlink loop.
+ * Guarantees zero overwrite even under concurrent execution on POSIX filesystems.
  */
-export function findNonCollidingPath(outputDir, baseName, ext = '.mp4') {
-  let targetPath = path.join(outputDir, `${baseName}${ext}`);
-  let counter = 1;
-  while (fs.existsSync(targetPath)) {
-    targetPath = path.join(outputDir, `${baseName} (${counter})${ext}`);
-    counter += 1;
+export async function atomicNoOverwriteLink(tmpFilePath, outputDir, baseName, ext = '.mp4') {
+  let counter = 0;
+  while (true) {
+    const candidateName = counter === 0 ? `${baseName}${ext}` : `${baseName} (${counter})${ext}`;
+    const candidatePath = path.join(outputDir, candidateName);
+
+    try {
+      await fs.promises.link(tmpFilePath, candidatePath);
+      await fs.promises.unlink(tmpFilePath).catch(() => {});
+      return candidatePath;
+    } catch (err) {
+      if (err && err.code === 'EEXIST') {
+        counter += 1;
+        continue;
+      }
+      throw err;
+    }
   }
-  return targetPath;
 }
 
 /**
- * Follow redirects step-by-step with SSRF validation on every hop.
+ * Follow redirects with SSRF check on every hop.
  */
 async function fetchStreamWithHops(initialUrl, { userAgent, timeoutSignal, fetchFn = fetch, maxHops = 6 }) {
   let currentUrl = initialUrl;
@@ -79,9 +133,7 @@ async function fetchStreamWithHops(initialUrl, { userAgent, timeoutSignal, fetch
 
   for (let hop = 0; hop < maxHops; hop++) {
     if (!isTrustedCdnUrl(currentUrl)) {
-      throw new CommandExecutionError(
-        `Untrusted CDN URL encountered during download: ${sanitizeUrlForLog(currentUrl)}`
-      );
+      throw new CommandExecutionError('Encountered untrusted CDN URL in download sequence');
     }
 
     if (visited.has(currentUrl)) {
@@ -89,27 +141,28 @@ async function fetchStreamWithHops(initialUrl, { userAgent, timeoutSignal, fetch
     }
     visited.add(currentUrl);
 
+    const headers = { Referer: 'https://www.douyin.com/' };
+    if (userAgent && typeof userAgent === 'string') {
+      headers['User-Agent'] = userAgent;
+    }
+
     let res;
     try {
       res = await fetchFn(currentUrl, {
         method: 'GET',
         redirect: 'manual',
         signal: timeoutSignal,
-        headers: {
-          Referer: 'https://www.douyin.com/',
-          'User-Agent': userAgent,
-          // Explicitly omit cookies/tokens to prevent credential leakage to CDNs
-        },
+        headers,
       });
     } catch (err) {
       throw new CommandExecutionError(
-        `Network error downloading video stream from ${sanitizeUrlForLog(currentUrl)}: ${err instanceof Error ? err.message : String(err)}`
+        `Network error during stream download: ${err instanceof Error ? err.message : String(err)}`
       );
     }
 
     if ([301, 302, 303, 307, 308].includes(res.status)) {
       const location = res.headers.get('location');
-      await res.body?.cancel();
+      await res.body?.cancel().catch(() => {});
       if (!location) {
         throw new CommandExecutionError('Redirect response missing Location header');
       }
@@ -122,35 +175,28 @@ async function fetchStreamWithHops(initialUrl, { userAgent, timeoutSignal, fetch
       }
 
       if (!isTrustedCdnUrl(nextUrl)) {
-        throw new CommandExecutionError(
-          `Redirected to untrusted domain during video download: ${sanitizeUrlForLog(nextUrl)}`
-        );
+        throw new CommandExecutionError('Redirected to untrusted domain during video download');
       }
       currentUrl = nextUrl;
       continue;
     }
 
     if (res.status === 206) {
-      await res.body?.cancel();
+      await res.body?.cancel().catch(() => {});
       throw new CommandExecutionError(
         'Server returned HTTP 206 (Partial Content); partial video downloads are rejected'
       );
     }
 
     if (res.status !== 200) {
-      await res.body?.cancel();
-      throw new CommandExecutionError(
-        `Failed to download video stream, server returned HTTP ${res.status}`
-      );
+      await res.body?.cancel().catch(() => {});
+      throw new CommandExecutionError(`Failed to download video stream, server returned HTTP ${res.status}`);
     }
 
-    // Verify MIME content-type
     const contentType = (res.headers.get('content-type') || '').toLowerCase();
     if (contentType.includes('text/html') || contentType.includes('application/json')) {
-      await res.body?.cancel();
-      throw new CommandExecutionError(
-        `Unexpected content-type "${contentType}", expected binary video stream`
-      );
+      await res.body?.cancel().catch(() => {});
+      throw new CommandExecutionError(`Unexpected content-type "${contentType}", expected binary video stream`);
     }
 
     return { response: res, finalUrl: currentUrl };
@@ -168,7 +214,7 @@ export async function downloadVideoToFile({
   author = '',
   variant,
   outputDir = '.',
-  userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
+  userAgent,
   timeoutMs = 60000,
   fetchFn = fetch,
 }) {
@@ -176,84 +222,69 @@ export async function downloadVideoToFile({
   fs.mkdirSync(resolvedOutputDir, { recursive: true });
 
   const timeoutSignal = AbortSignal.timeout(timeoutMs);
-
   let lastError = null;
-  const candidateUrls = variant.urls ?? [];
 
-  for (const candidateUrl of candidateUrls) {
+  for (const candidateUrl of variant.urls ?? []) {
     const tmpFileName = `.tmp_douyin_${id}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.mp4`;
     const tmpFilePath = path.join(resolvedOutputDir, tmpFileName);
 
-    let writeStream = null;
+    let res = null;
     try {
-      const { response: res, finalUrl } = await fetchStreamWithHops(candidateUrl, {
+      const hopResult = await fetchStreamWithHops(candidateUrl, {
         userAgent,
         timeoutSignal,
         fetchFn,
       });
+      res = hopResult.response;
+      const finalUrl = hopResult.finalUrl;
 
       if (!res.body) {
         throw new CommandExecutionError('Response body is empty or unavailable');
       }
 
-      writeStream = fs.createWriteStream(tmpFilePath);
+      // Exclusive open write stream
+      const writeStream = fs.createWriteStream(tmpFilePath, { flags: 'wx' });
+      const validator = createMp4HeaderValidator();
 
       let writtenBytes = 0;
-      let headerChecked = false;
-      const reader = res.body.getReader();
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        if (!headerChecked && value && value.length > 0) {
-          const headerBuffer = Buffer.from(value.buffer, value.byteOffset, Math.min(value.length, 64));
-          if (!isValidMp4Header(headerBuffer)) {
-            await reader.cancel();
-            throw new CommandExecutionError(
-              'Downloaded stream does not contain a valid MP4 header (possible HTML error page or corrupted stream)'
-            );
-          }
-          headerChecked = true;
-        }
-
-        writtenBytes += value.length;
-        if (!writeStream.write(value)) {
-          await new Promise((resolve, reject) => {
-            writeStream.once('drain', resolve);
-            writeStream.once('error', reject);
-          });
-        }
-      }
-
-      await new Promise((resolve, reject) => {
-        writeStream.end((err) => (err ? reject(err) : resolve()));
+      const byteCounter = new Transform({
+        transform(chunk, encoding, callback) {
+          writtenBytes += chunk.length;
+          callback(null, chunk);
+        },
       });
 
-      // Verification A: Size check
+      // Unified stream pipeline with automatic error/abort handling
+      await pipeline(
+        Readable.fromWeb(res.body),
+        validator,
+        byteCounter,
+        writeStream,
+        { signal: timeoutSignal }
+      );
+
+      // Verify file size thresholds
       if (writtenBytes < MIN_VALID_VIDEO_BYTES) {
         throw new CommandExecutionError(
-          `Downloaded file size is suspiciously small (${writtenBytes} bytes), likely incomplete or corrupted`
+          `Downloaded file size is suspiciously small (${writtenBytes} bytes)`
         );
       }
 
-      // Verification B: Content-Length check if available
-      const rawContentLength = res.headers.get('content-length');
-      if (rawContentLength) {
-        const expectedLength = parseInt(rawContentLength, 10);
+      // Verify Content-Length if available
+      const rawLength = res.headers.get('content-length');
+      if (rawLength) {
+        const expectedLength = parseInt(rawLength, 10);
         if (Number.isFinite(expectedLength) && expectedLength > 0 && writtenBytes !== expectedLength) {
           throw new CommandExecutionError(
-            `Downloaded size mismatch: expected ${expectedLength} bytes from header, received ${writtenBytes} bytes`
+            `Downloaded size mismatch: expected ${expectedLength} bytes, received ${writtenBytes} bytes`
           );
         }
       }
 
-      // Safe non-overwriting rename
+      // Atomic, non-overwriting rename via hardlink + unlink
       const cleanTitle = sanitizeFilename(title);
       const baseName = cleanTitle ? `${cleanTitle}_${id}` : String(id);
-      const finalTargetPath = findNonCollidingPath(resolvedOutputDir, baseName, '.mp4');
-
-      fs.renameSync(tmpFilePath, finalTargetPath);
+      const finalTargetPath = await atomicNoOverwriteLink(tmpFilePath, resolvedOutputDir, baseName, '.mp4');
 
       return {
         status: 'ok',
@@ -264,15 +295,14 @@ export async function downloadVideoToFile({
         codec: variant.codec,
         path: finalTargetPath,
         bytes: writtenBytes,
-        source: sanitizeUrlForLog(finalUrl),
+        source: new URL(finalUrl).hostname,
       };
     } catch (err) {
-      if (writeStream) {
-        writeStream.destroy();
+      if (res?.body) {
+        await res.body.cancel().catch(() => {});
       }
       fs.rmSync(tmpFilePath, { force: true });
       lastError = err;
-      // If aborted by overall timeout, break immediately
       if (timeoutSignal.aborted) {
         throw new CommandExecutionError(
           `Video download timed out after ${Math.round(timeoutMs / 1000)} seconds`

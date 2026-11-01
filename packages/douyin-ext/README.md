@@ -13,10 +13,10 @@ Douyin video downloader plugin for OpenCLI.
 
 - **No Third-Party Chrome Extension**: Operates independently without requiring "抖音超级助手" or calling its services.
 - **Target Resolution**: Supports 16–20 digit numeric video IDs, full official HTTPS Douyin video URLs (`/video/<id>`, `/share/video/<id>`, `modal_id`), and `v.douyin.com` short share links with redirect loop detection and hop bounds.
-- **SSRF & Security**: Strict HTTPS, standard port, and domain validation on all input and redirect hops. URL tokens and signatures are stripped from logs and structured output.
+- **SSRF & Security**: Strict HTTPS, standard port, and domain validation. CDN allowlist strictly restricted to `*.douyinvod.com` and `www.douyin.com/aweme/v1/play/`. Query signatures and path tokens are stripped from output; `source` reports verified CDN hostname only.
 - **Format Filtering**: Rejects DASH and audio-only streams; selects verified merged MP4 variants.
-- **Quality Selection**: Chooses between `best`, `1080p`, `720p`, `540p`, `480p`, `360p`. If a requested quality is not present, throws an explicit error rather than silently degrading.
-- **Reliable Local Download**: Streams directly to a unique temporary file, checks MIME, MP4 magic header, and Content-Length. Automatically handles name collision to avoid overwriting existing files.
+- **Quality Selection**: Supports `best`, `2160p`, `1440p`, `1080p`, `720p`, `540p`, `480p`, `360p`. If a requested quality is not present, throws an explicit error rather than silently degrading.
+- **Reliable Local Download**: Streams via `pipeline` with chunk-accumulated MP4 `ftyp` box verification (rejecting HTML error pages). Employs atomic `link + unlink` hardlink loop to guarantee existing files are never overwritten even under concurrency.
 
 ## Usage
 
@@ -27,7 +27,7 @@ opencli douyin-ext download "https://v.douyin.com/xxxx/"
 # Specify target output directory and quality
 opencli douyin-ext download 7701962254330128228 --output ./downloads --quality 1080p
 
-# Set custom timeout in seconds
+# Set custom overall timeout in seconds
 opencli douyin-ext download "https://www.douyin.com/video/7701962254330128228" --timeout 120
 ```
 
@@ -37,5 +37,19 @@ opencli douyin-ext download "https://www.douyin.com/video/7701962254330128228" -
 |---|---|---|---|
 | `<target>` | String (positional) | *required* | Numeric ID, official video URL, or `v.douyin.com` share link |
 | `--output` | String | `.` | Target directory on CLI execution host |
-| `--quality` | String | `best` | `best`, `1080p`, `720p`, `540p`, `480p`, `360p` |
-| `--timeout` | Integer | `60` | Overall timeout in seconds for API fetch and stream download |
+| `--quality` | String | `best` | `best`, `2160p`, `1440p`, `1080p`, `720p`, `540p`, `480p`, `360p` |
+| `--timeout` | Integer | `60` | Overall timeout in seconds shared across target resolution, API fetch, and stream download |
+
+## Output Fields
+
+| Column | Description |
+|---|---|
+| `status` | Execution status (`ok`) |
+| `id` | Douyin aweme numeric ID |
+| `title` | Cleaned video title or description |
+| `author` | Creator nickname |
+| `quality` | Resolved quality tag (e.g. `1080p`, `720p`) |
+| `codec` | Video codec (`h264`, `h265`, or `unknown`) |
+| `path` | Absolute filesystem path on CLI execution host |
+| `bytes` | Total downloaded file size in bytes |
+| `source` | Verified CDN hostname (e.g. `v26-web.douyinvod.com`) without signatures or path tokens |
