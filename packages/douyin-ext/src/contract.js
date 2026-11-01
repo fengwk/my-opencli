@@ -147,6 +147,5 @@ export function normalizeDownloadArgs(kwargs = {}) {
     timeoutSeconds: rawTimeout,
     timeoutMs: rawTimeout * 1000,
     output,
-    op: output,
   };
 }
