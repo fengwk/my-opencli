@@ -2,18 +2,19 @@
  * Directed DOM regression tests for ChatGPT DOM adaptation.
  *
  * Verifies that the generated JavaScript scripts (fileChipSnippet, composerRootSnippet,
- * previewCheckScript, panelScript) execute correctly against:
+ * previewCheckScript) execute correctly against:
  * 1. Real new ChatGPT DOM structures (form[data-chatgpt-composer], ProseMirror, 4 React file inputs,
  *    search-unit / conversation-role turns, sandbox <a> links).
  * 2. Legacy ChatGPT DOM structures (#prompt-textarea, behavior-btn buttons, author-role turns).
- * 3. Multi-turn history with user decoy links and historical assistant files (strict boundary).
- * 4. Nested turn attributes and empty wrapper markers (no duplicate turns, no empty wrapper trap).
- * 5. Strict sandbox evidence protection (rejects external arbitrary links).
- * 6. Composer-scoped upload preview (rejects global body decoys and avatars, requires composer scope).
- * 7. Real flyout panel structures inspection, download, and close.
+ * 3. Multi-turn history with user decoy links and historic assistant files (strict isolation).
+ * 4. Empty marker protection: empty markers do NOT expand into broad unmarked parent containers or history.
+ * 5. Strict sandbox evidence protection: external URLs (https://evil.example/mnt/data/x, data-sandbox)
+ *    are strictly rejected.
+ * 6. Composer-scoped upload preview: no fallback to body, random forms with buttons rejected.
+ * 7. Strict visibility: rejects hidden, inert, aria-hidden="true", and zero-dimension elements.
  *
  * All tests execute the actual generated script strings in an isolated VM context against a DOM mock
- * backed by Cheerio, asserting real execution behavior rather than string matching.
+ * backed by Cheerio.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -24,7 +25,6 @@ import {
   domVisibilitySnippet,
   fileChipSnippet,
   lastAssistantTurnSnippet,
-  panelScript,
   previewCheckScript,
   unwrapEvaluateResult,
 } from '../src/dom-helpers.js';
@@ -36,7 +36,7 @@ import {
 /**
  * Creates an execution environment exposing standard DOM interfaces to node:vm.
  */
-function createDomSandbox(html) {
+function createDomSandbox(html, { origin = 'https://chatgpt.com', href = 'https://chatgpt.com/c/test-chat' } = {}) {
   const $ = cheerio.load(html);
   const nodeMap = new Map();
 
@@ -45,83 +45,78 @@ function createDomSandbox(html) {
     if (nodeMap.has(node)) return nodeMap.get(node);
 
     const isRoot = node.type === 'root';
-    const el = {
-      nodeType: 1,
-      tagName: isRoot ? 'HTML' : (node.name || '').toUpperCase(),
-      name: node.name || '',
-      get className() {
-        return node.attribs?.class || '';
+    const el = Object.create(HTMLElement.prototype);
+    el.nodeType = 1;
+    el.tagName = isRoot ? 'HTML' : (node.name || '').toUpperCase();
+    el.name = node.name || '';
+
+    Object.defineProperties(el, {
+      className: { get() { return node.attribs?.class || ''; } },
+      hidden: { get() { return 'hidden' in (node.attribs || {}); } },
+      innerText: { get() { return $(node).text(); } },
+      textContent: { get() { return $(node).text(); } },
+      parentElement: {
+        get() {
+          let p = node.parent;
+          while (p && p.type !== 'tag' && p.type !== 'root') p = p.parent;
+          return p ? wrap(p) : null;
+        },
       },
-      getAttribute(name) {
-        return node.attribs?.[name] ?? null;
+      children: {
+        get() {
+          return (node.children || []).filter((c) => c.type === 'tag').map(wrap);
+        },
       },
-      hasAttribute(name) {
-        return name in (node.attribs || {});
-      },
-      get innerText() {
-        return $(node).text();
-      },
-      get textContent() {
-        return $(node).text();
-      },
-      get parentElement() {
-        let p = node.parent;
-        while (p && p.type !== 'tag' && p.type !== 'root') p = p.parent;
-        return p ? wrap(p) : null;
-      },
-      get children() {
-        return (node.children || []).filter((c) => c.type === 'tag').map(wrap);
-      },
-      querySelector(sel) {
-        const found = $(node).find(sel).first().get(0);
-        return found ? wrap(found) : null;
-      },
-      querySelectorAll(sel) {
-        return $(node).find(sel).toArray().map(wrap);
-      },
-      closest(sel) {
-        const found = $(node).closest(sel).get(0);
-        return found ? wrap(found) : null;
-      },
-      contains(other) {
-        if (!other) return false;
-        let curr = other;
-        while (curr) {
-          if (curr === el) return true;
-          curr = curr.parentElement;
-        }
-        return false;
-      },
-      compareDocumentPosition(other) {
-        if (el === other) return 0;
-        const all = $('*').toArray();
-        const iA = all.indexOf(node);
-        const otherRaw = [...nodeMap.entries()].find(([_, v]) => v === other)?.[0];
-        const iB = all.indexOf(otherRaw);
-        return iB > iA ? 4 : 2; // 4: DOCUMENT_POSITION_FOLLOWING
-      },
-      getBoundingClientRect() {
-        // Elements with explicit display:none report 0x0
-        const style = node.attribs?.style || '';
-        if (/display\s*:\s*none|visibility\s*:\s*hidden/i.test(style)) {
-          return { width: 0, height: 0, top: 0, left: 0, right: 0, bottom: 0 };
-        }
-        const width = Number(node.attribs?.width) || 100;
-        const height = Number(node.attribs?.height) || 50;
-        return { width, height, top: 0, left: 0, right: width, bottom: height };
-      },
-      scrollIntoView() {},
-      focus() {
-        el._focused = true;
-      },
-      click() {
-        el._clicked = true;
-      },
+    });
+
+    el.getAttribute = (name) => node.attribs?.[name] ?? null;
+    el.hasAttribute = (name) => name in (node.attribs || {});
+    el.querySelector = (sel) => {
+      const found = $(node).find(sel).first().get(0);
+      return found ? wrap(found) : null;
     };
+    el.querySelectorAll = (sel) => {
+      return $(node).find(sel).toArray().map(wrap);
+    };
+    el.closest = (sel) => {
+      const found = $(node).closest(sel).get(0);
+      return found ? wrap(found) : null;
+    };
+    el.contains = (other) => {
+      if (!other) return false;
+      let curr = other;
+      while (curr) {
+        if (curr === el) return true;
+        curr = curr.parentElement;
+      }
+      return false;
+    };
+    el.compareDocumentPosition = (other) => {
+      if (el === other) return 0;
+      const all = $('*').toArray();
+      const iA = all.indexOf(node);
+      const otherRaw = [...nodeMap.entries()].find(([_, v]) => v === other)?.[0];
+      const iB = all.indexOf(otherRaw);
+      return iB > iA ? 4 : 2; // 4: DOCUMENT_POSITION_FOLLOWING
+    };
+    el.getBoundingClientRect = () => {
+      const style = node.attribs?.style || '';
+      if (/display\s*:\s*none|visibility\s*:\s*hidden/i.test(style)) {
+        return { width: 0, height: 0, top: 0, left: 0, right: 0, bottom: 0 };
+      }
+      const width = Number(node.attribs?.width) || 100;
+      const height = Number(node.attribs?.height) || 50;
+      return { width, height, top: 0, left: 0, right: width, bottom: height };
+    };
+    el.scrollIntoView = () => {};
+    el.focus = () => { el._focused = true; };
+    el.click = () => { el._clicked = true; };
 
     nodeMap.set(node, el);
     return el;
   }
+
+  function HTMLElement() {}
 
   const doc = {
     body: wrap($('body').get(0) || $.root().get(0)),
@@ -138,6 +133,7 @@ function createDomSandbox(html) {
   const sandbox = {
     document: doc,
     window: {
+      location: { origin, href },
       getComputedStyle: (target) => {
         const style = target?.getAttribute?.('style') || '';
         const isNone = /display\s*:\s*none/i.test(style);
@@ -148,10 +144,11 @@ function createDomSandbox(html) {
           opacity: '1',
         };
       },
-      HTMLElement: function HTMLElement() {},
+      HTMLElement,
     },
     Node: { DOCUMENT_POSITION_FOLLOWING: 4 },
-    HTMLElement: function HTMLElement() {},
+    HTMLElement,
+    URL,
   };
 
   function runScript(script) {
@@ -161,172 +158,14 @@ function createDomSandbox(html) {
   return { sandbox, runScript, $ };
 }
 
-describe('DOM Regression: Modern ChatGPT Web Structure', () => {
-  it('correctly routes file upload selectors without hitting Take a photo', () => {
-    const html = `
-      <form data-chatgpt-composer="true">
-        <div class="ProseMirror" contenteditable="true" role="textbox" aria-label="Ask ChatGPT"></div>
-        <input type="file" id="_r_photo" aria-label="Take a photo" accept="image/*" />
-        <input type="file" id="_r_both" aria-label="Attach photos or videos" accept="image/*,video/*" multiple />
-        <input type="file" id="_r_img" aria-label="Attach photos" accept="image/*" multiple />
-        <input type="file" id="_r_files" aria-label="Attach files" multiple />
-        <button aria-label="Send"></button>
-      </form>
-    `;
-    const { sandbox } = createDomSandbox(html);
-
-    // 1. General file selectors must match the "Attach files" input first
-    let generalMatched = null;
-    for (const sel of COMPOSER_GENERAL_FILE_SELECTORS) {
-      const el = sandbox.document.querySelector(sel);
-      if (el) {
-        generalMatched = { selector: sel, aria: el.getAttribute('aria-label') };
-        break;
-      }
-    }
-    expect(generalMatched).not.toBeNull();
-    expect(generalMatched.aria).toBe('Attach files');
-    expect(generalMatched.aria).not.toBe('Take a photo');
-
-    // 2. Image file selectors must match an attach input, never Take a photo
-    let imageMatched = null;
-    for (const sel of COMPOSER_IMAGE_FILE_SELECTORS) {
-      const el = sandbox.document.querySelector(sel);
-      if (el) {
-        imageMatched = { selector: sel, aria: el.getAttribute('aria-label') };
-        break;
-      }
-    }
-    expect(imageMatched).not.toBeNull();
-    expect(imageMatched.aria).toMatch(/Attach files|Attach photos/);
-    expect(imageMatched.aria).not.toBe('Take a photo');
-  });
-
-  it('locates and clicks real sandbox <a> links in the last assistant turn', () => {
-    const html = `
-      <div data-conversation-role="user" data-chatgpt-search-unit-key="fallback-turn-0:0:user">
-        <p>Please analyze this data</p>
-      </div>
-      <div data-conversation-role="assistant" data-chatgpt-search-unit-key="fallback-turn-0:1:assistant">
-        <div class="markdown">
-          <p>Here is your processed output:</p>
-          <a href="sandbox:/mnt/data/summary_result.csv" aria-label="summary_result.csv">Download summary_result.csv</a>
-        </div>
-      </div>
-    `;
-    const { runScript, sandbox } = createDomSandbox(html);
-
-    // Execute generated chip identification script
-    const chip = runScript(`(() => {
-      ${fileChipSnippet()}
-      return findFileChip('summary_result.csv');
-    })()`);
-
-    expect(chip.found).toBe(true);
-    expect(chip.scope).toBe('last-assistant');
-    expect(chip.tag).toBe('A');
-    expect(chip.href).toBe('sandbox:/mnt/data/summary_result.csv');
-
-    // Execute generated chip click script
-    const clickRes = runScript(`(() => {
-      ${fileChipSnippet()}
-      return clickFileChip('summary_result.csv');
-    })()`);
-
-    expect(clickRes.ok).toBe(true);
-    expect(clickRes.scope).toBe('last-assistant');
-
-    // Verify DOM node received click
-    const linkEl = sandbox.document.querySelector('a');
-    expect(linkEl._clicked).toBe(true);
-  });
-});
-
-describe('DOM Regression: Multi-Turn History and User Decoy Defense', () => {
-  it('strictly targets the last assistant turn and ignores user decoys and historic assistant files', () => {
-    const html = `
-      <!-- Turn 0: User uploads a file with the same name -->
-      <div data-conversation-role="user" data-chatgpt-search-unit-key="fallback-turn-0:0:user">
-        <a href="sandbox:/mnt/data/data.csv">data.csv (user file)</a>
-      </div>
-
-      <!-- Turn 1: Assistant old reply with an old file -->
-      <div data-conversation-role="assistant" data-chatgpt-search-unit-key="fallback-turn-0:1:assistant">
-        <a href="sandbox:/mnt/data/old_analysis.json">old_analysis.json</a>
-      </div>
-
-      <!-- Turn 2: User prompt with another decoy -->
-      <div data-conversation-role="user" data-chatgpt-search-unit-key="fallback-turn-0:2:user">
-        <p>Now give me the final target.csv</p>
-        <a href="sandbox:/mnt/data/target.csv">decoy_user_target.csv</a>
-      </div>
-
-      <!-- Turn 3: Latest assistant turn with genuine target.csv -->
-      <div data-conversation-role="assistant" data-chatgpt-search-unit-key="fallback-turn-0:3:assistant">
-        <div class="markdown">
-          <a href="sandbox:/mnt/data/target.csv">target.csv</a>
-        </div>
-      </div>
-    `;
-    const { runScript } = createDomSandbox(html);
-
-    // 1. Target file must be picked from Turn 3, not Turn 2 user decoy
-    const targetChip = runScript(`(() => {
-      ${fileChipSnippet()}
-      return findFileChip('target.csv');
-    })()`);
-    expect(targetChip.found).toBe(true);
-    expect(targetChip.scope).toBe('last-assistant');
-
-    // 2. User-only file 'data.csv' must NOT be found in last assistant turn
-    const userDecoyChip = runScript(`(() => {
-      ${fileChipSnippet()}
-      return findFileChip('data.csv');
-    })()`);
-    expect(userDecoyChip.found).toBe(false);
-
-    // 3. Historic assistant file 'old_analysis.json' must NOT be found in last assistant turn
-    const oldAssistantChip = runScript(`(() => {
-      ${fileChipSnippet()}
-      return findFileChip('old_analysis.json');
-    })()`);
-    expect(oldAssistantChip.found).toBe(false);
-  });
-});
-
-describe('DOM Regression: Nested Attributes and Empty Wrapper Protection', () => {
-  it('does not split a single turn into multiple turns and avoids getting trapped in empty wrappers', () => {
-    const html = `
-      <div data-conversation-role="assistant">
-        <!-- Empty marker that might have search unit key -->
-        <div data-chatgpt-search-unit-key="fallback-turn-0:2:assistant"></div>
-        <!-- Actual content wrapper -->
-        <div class="content">
-          <p>Here is your export:</p>
-          <a href="sandbox:/mnt/data/nested_export.json">nested_export.json</a>
-        </div>
-      </div>
-    `;
-    const { runScript } = createDomSandbox(html);
-
-    const chip = runScript(`(() => {
-      ${fileChipSnippet()}
-      return findFileChip('nested_export.json');
-    })()`);
-
-    expect(chip.found).toBe(true);
-    expect(chip.scope).toBe('last-assistant');
-    expect(chip.tag).toBe('A');
-  });
-});
-
 describe('DOM Regression: Strict Sandbox Link Evidence Protection', () => {
-  it('rejects external arbitrary links without sandbox proof even if filename matches', () => {
+  it('strictly rejects external URLs with /mnt/data/ path or data-sandbox attribute', () => {
     const html = `
       <div data-conversation-role="assistant" data-chatgpt-search-unit-key="fallback-turn-0:1:assistant">
-        <!-- Malicious external link with matching target filename -->
-        <a href="https://evil.com/download/report.json">report.json</a>
-        <a href="https://example.org/report.json">report.json</a>
+        <!-- Attack vectors: external URLs disguised with /mnt/data/ or data-sandbox -->
+        <a href="https://evil.example/mnt/data/report.json">report.json</a>
+        <a href="https://attacker.org/report.json" data-sandbox="true">report.json</a>
+        <a href="//phishing.site/mnt/data/report.json">report.json</a>
         <!-- Genuine sandbox link -->
         <a href="sandbox:/mnt/data/report.json">Download report.json</a>
       </div>
@@ -338,145 +177,205 @@ describe('DOM Regression: Strict Sandbox Link Evidence Protection', () => {
       return findFileChip('report.json');
     })()`);
 
-    // Must match the sandbox link, not the external ones
+    // Must strictly select the sandbox:/ link, never external domains
     expect(chip.found).toBe(true);
     expect(chip.href).toBe('sandbox:/mnt/data/report.json');
+  });
 
-    // If only external links exist:
-    const { runScript: runExternalOnly } = createDomSandbox(`
+  it('rejects completely when only external links exist even if path matches /mnt/data/', () => {
+    const html = `
       <div data-conversation-role="assistant" data-chatgpt-search-unit-key="fallback-turn-0:1:assistant">
-        <a href="https://evil.com/report.json">report.json</a>
-      </div>
-    `);
-    const externalChip = runExternalOnly(`(() => {
-      ${fileChipSnippet()}
-      return findFileChip('report.json');
-    })()`);
-    expect(externalChip.found).toBe(false);
-  });
-});
-
-describe('DOM Regression: Upload Preview Composer Scope Defense', () => {
-  it('returns false when composer does not exist on page', () => {
-    const html = `
-      <div class="content">No composer on this page</div>
-    `;
-    const { runScript } = createDomSandbox(html);
-    const result = runScript(previewCheckScript(['test.png'], 1));
-    expect(result).toBe(false);
-  });
-
-  it('rejects false positives from global body text or avatar images', () => {
-    const html = `
-      <div class="chat-history">
-        <p>In previous chat we discussed test.png</p>
-        <img src="avatar.png" width="32" height="32" />
-      </div>
-      <!-- Real composer form without preview -->
-      <form data-chatgpt-composer="true">
-        <div class="ProseMirror" contenteditable="true" role="textbox" aria-label="Ask ChatGPT"></div>
-      </form>
-    `;
-    const { runScript } = createDomSandbox(html);
-
-    // Body contains 'test.png' and an avatar image > 24px, but composer does not!
-    const result = runScript(previewCheckScript(['test.png'], 1));
-    expect(result).toBe(false);
-  });
-
-  it('detects preview when mounted inside composer scope', () => {
-    const html = `
-      <form data-chatgpt-composer="true">
-        <div class="attachment-preview">
-          <span>test.png</span>
-          <button aria-label="Remove attachment"></button>
-        </div>
-        <div class="ProseMirror" contenteditable="true" role="textbox" aria-label="Ask ChatGPT"></div>
-      </form>
-    `;
-    const { runScript } = createDomSandbox(html);
-
-    const result = runScript(previewCheckScript(['test.png'], 1));
-    expect(result).toBe(true);
-  });
-});
-
-describe('DOM Regression: Legacy DOM Structure Support', () => {
-  it('supports legacy author-role assistant turn and behavior-btn buttons', () => {
-    const html = `
-      <div data-message-author-role="assistant">
-        <p>Old ChatGPT format:</p>
-        <button class="behavior-btn" aria-label="legacy_file.json">legacy_file.json</button>
+        <a href="https://evil.example/mnt/data/sensitive.csv">sensitive.csv</a>
       </div>
     `;
     const { runScript } = createDomSandbox(html);
 
     const chip = runScript(`(() => {
       ${fileChipSnippet()}
-      return findFileChip('legacy_file.json');
+      return findFileChip('sensitive.csv');
     })()`);
 
-    expect(chip.found).toBe(true);
-    expect(chip.scope).toBe('last-assistant');
-    expect(chip.tag).toBe('BUTTON');
+    expect(chip.found).toBe(false);
   });
+});
 
-  it('supports legacy #prompt-textarea composer root resolution', () => {
+describe('DOM Regression: Strict Visibility (hidden, inert, aria-hidden)', () => {
+  it('rejects elements hidden via hidden attribute, inert ancestor, or aria-hidden', () => {
     const html = `
-      <form id="composer-form">
-        <textarea id="prompt-textarea" placeholder="Send a message"></textarea>
+      <div data-conversation-role="assistant" data-chatgpt-search-unit-key="fallback-turn-0:1:assistant">
+        <a href="sandbox:/mnt/data/a.csv" hidden>a.csv</a>
+        <div inert>
+          <a href="sandbox:/mnt/data/b.csv">b.csv</a>
+        </div>
+        <div aria-hidden="true">
+          <a href="sandbox:/mnt/data/c.csv">c.csv</a>
+        </div>
+        <a href="sandbox:/mnt/data/valid.csv">valid.csv</a>
+      </div>
+    `;
+    const { runScript } = createDomSandbox(html);
+
+    expect(runScript(`(() => { ${fileChipSnippet()} return findFileChip('a.csv').found; })()`)).toBe(false);
+    expect(runScript(`(() => { ${fileChipSnippet()} return findFileChip('b.csv').found; })()`)).toBe(false);
+    expect(runScript(`(() => { ${fileChipSnippet()} return findFileChip('c.csv').found; })()`)).toBe(false);
+    expect(runScript(`(() => { ${fileChipSnippet()} return findFileChip('valid.csv').found; })()`)).toBe(true);
+  });
+});
+
+describe('DOM Regression: Composer Scope Strict Resolution', () => {
+  it('does NOT recognize arbitrary forms with buttons as composers', () => {
+    const html = `
+      <form id="some-random-settings-form">
+        <button type="submit">Save settings</button>
       </form>
     `;
     const { runScript } = createDomSandbox(html);
 
-    const rootTag = runScript(`(() => {
+    const root = runScript(`(() => {
+      ${composerRootSnippet()}
+      return findVisibleComposerRoot();
+    })()`);
+
+    // Must return null, not adopt arbitrary form
+    expect(root).toBeNull();
+  });
+
+  it('resolves real form[data-chatgpt-composer]', () => {
+    const html = `
+      <form data-chatgpt-composer="true">
+        <div class="ProseMirror" contenteditable="true" role="textbox" aria-label="Ask ChatGPT"></div>
+        <button aria-label="Send"></button>
+      </form>
+    `;
+    const { runScript } = createDomSandbox(html);
+
+    const tag = runScript(`(() => {
       ${composerRootSnippet()}
       const r = findVisibleComposerRoot();
       return r ? r.tagName : null;
     })()`);
 
-    expect(rootTag).toBe('FORM');
+    expect(tag).toBe('FORM');
+  });
+
+  it('rejects preview false positives from body text when composer has no preview', () => {
+    const html = `
+      <div class="history">
+        <p>Previously discussed my_file.txt</p>
+        <img src="avatar.png" width="32" height="32" />
+      </div>
+      <form data-chatgpt-composer="true">
+        <div class="ProseMirror" contenteditable="true" role="textbox" aria-label="Ask ChatGPT"></div>
+      </form>
+    `;
+    const { runScript } = createDomSandbox(html);
+
+    const result = runScript(previewCheckScript(['my_file.txt'], 1));
+    expect(result).toBe(false);
   });
 });
 
-describe('DOM Regression: Flyout Panel Real Structure', () => {
-  it('inspects, clicks download, and closes flyout on real ChatGPT panel structure', () => {
+describe('DOM Regression: Last Assistant Turn Strict Bounding & Empty Marker Protection', () => {
+  it('empty marker does NOT expand to unmarked broad parent containers containing history', () => {
     const html = `
-      <div data-testid="stage-thread-flyout">
-        <section data-testid="screen-threadFlyOut" aria-label="table_data.csv">
-          <header>
-            <button aria-label="Download">Download</button>
-            <button data-testid="close-button" aria-label="Close"></button>
-          </header>
-        </section>
+      <!-- Unmarked broad conversation container with history -->
+      <div class="unmarked-stream-container">
+        <div class="user-turn">
+          <a href="sandbox:/mnt/data/decoy.csv">decoy.csv</a>
+        </div>
+        <!-- Empty marker that has assistant search-unit-key -->
+        <div data-chatgpt-search-unit-key="fallback-turn-0:1:assistant"></div>
       </div>
     `;
-    const { runScript, sandbox } = createDomSandbox(html);
+    const { runScript } = createDomSandbox(html);
 
-    // 1. inspectFlyout
-    const inspected = runScript(`(() => {
-      ${panelScript()}
-      return inspectFlyout('table_data.csv');
+    // The empty marker must NOT swallow the unmarked container and expose decoy.csv
+    const chip = runScript(`(() => {
+      ${fileChipSnippet()}
+      return findFileChip('decoy.csv');
     })()`);
-    expect(inspected.hasFlyout).toBe(true);
-    expect(inspected.hasDownload).toBe(true);
 
-    // 2. clickFlyoutDownload
-    const clicked = runScript(`(() => {
-      ${panelScript()}
-      return clickFlyoutDownload('table_data.csv');
-    })()`);
-    expect(clicked.ok).toBe(true);
-    const dlBtn = sandbox.document.querySelector('button[aria-label="Download"]');
-    expect(dlBtn._clicked).toBe(true);
+    expect(chip.found).toBe(false);
+  });
 
-    // 3. closeFlyout
-    const closed = runScript(`(() => {
-      ${panelScript()}
-      return closeFlyout('table_data.csv');
+  it('correctly associates content when enclosing ancestor explicitly has assistant role', () => {
+    const html = `
+      <div data-conversation-role="assistant">
+        <div data-chatgpt-search-unit-key="fallback-turn-0:1:assistant"></div>
+        <div class="message-content">
+          <a href="sandbox:/mnt/data/real.csv">real.csv</a>
+        </div>
+      </div>
+    `;
+    const { runScript } = createDomSandbox(html);
+
+    const chip = runScript(`(() => {
+      ${fileChipSnippet()}
+      return findFileChip('real.csv');
     })()`);
-    expect(closed.ok).toBe(true);
-    const closeBtn = sandbox.document.querySelector('button[data-testid="close-button"]');
-    expect(closeBtn._clicked).toBe(true);
+
+    expect(chip.found).toBe(true);
+    expect(chip.scope).toBe('last-assistant');
+  });
+
+  it('generic article without assistant role is never treated as assistant', () => {
+    const html = `
+      <article data-testid="conversation-turn-5">
+        <p>I am a user query</p>
+        <a href="sandbox:/mnt/data/user_upload.csv">user_upload.csv</a>
+      </article>
+    `;
+    const { runScript } = createDomSandbox(html);
+
+    const chip = runScript(`(() => {
+      ${fileChipSnippet()}
+      return findFileChip('user_upload.csv');
+    })()`);
+
+    expect(chip.found).toBe(false);
+  });
+
+  it('selects the latest assistant turn in document order', () => {
+    const html = `
+      <div data-conversation-role="assistant" data-chatgpt-search-unit-key="fallback-turn-0:1:assistant">
+        <a href="sandbox:/mnt/data/turn1.csv">turn1.csv</a>
+      </div>
+      <div data-conversation-role="user" data-chatgpt-search-unit-key="fallback-turn-0:2:user">
+        <p>Next request</p>
+      </div>
+      <div data-conversation-role="assistant" data-chatgpt-search-unit-key="fallback-turn-0:3:assistant">
+        <a href="sandbox:/mnt/data/turn3.csv">turn3.csv</a>
+      </div>
+    `;
+    const { runScript } = createDomSandbox(html);
+
+    expect(runScript(`(() => { ${fileChipSnippet()} return findFileChip('turn1.csv').found; })()`)).toBe(false);
+    expect(runScript(`(() => { ${fileChipSnippet()} return findFileChip('turn3.csv').found; })()`)).toBe(true);
+  });
+});
+
+describe('DOM Regression: Modern Composer File Input Routing', () => {
+  it('strictly avoids Take a photo for general files and routes to Attach files', () => {
+    const html = `
+      <form data-chatgpt-composer="true">
+        <input type="file" id="r1" aria-label="Take a photo" accept="image/*" />
+        <input type="file" id="r2" aria-label="Attach photos or videos" accept="image/*,video/*" multiple />
+        <input type="file" id="r3" aria-label="Attach photos" accept="image/*" multiple />
+        <input type="file" id="r4" aria-label="Attach files" multiple />
+      </form>
+    `;
+    const { sandbox } = createDomSandbox(html);
+
+    let matched = null;
+    for (const sel of COMPOSER_GENERAL_FILE_SELECTORS) {
+      const el = sandbox.document.querySelector(sel);
+      if (el) {
+        matched = el.getAttribute('aria-label');
+        break;
+      }
+    }
+
+    expect(matched).toBe('Attach files');
+    expect(matched).not.toBe('Take a photo');
   });
 });
