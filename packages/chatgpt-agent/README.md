@@ -59,6 +59,13 @@ non-invasively through CDP — the page's own `fetch`/XHR are never patched.
   - Race elimination: `page.waitForDownload` is armed before clicking any download trigger across all paths (`resource-row`, `panel`, `chip-direct`).
   - Strict sandbox evidence: arbitrary external links are strictly rejected.
 
+### Generated-image gallery compatibility
+
+- Modern generated-image galleries use loaded image dimensions rather than preview layout size, which can remain `0×0`.
+- Export matches the nearest `data-chatgpt-search-message-ids` container against the current turn's protocol image message IDs. User uploads, unrelated thumbnails, and historical galleries are not modern-path export candidates.
+- Missing message IDs or failed/malformed DOM evaluation fail closed. The legacy visible-image extractor is used only when modern gallery markers are absent.
+- If export initially fails and the timeout budget allows, the dedicated automation tab leaves and reopens the validated persisted conversation once. This really remounts the gallery even when the host skips navigation to the current URL; it never resubmits the prompt.
+
 ## Requirements
 
 | Host | Minimum | Current verified release |

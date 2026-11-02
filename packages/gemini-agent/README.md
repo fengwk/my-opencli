@@ -9,6 +9,12 @@ Protocol-first Gemini web adapter for `https://gemini.google.com/app`:
 
 No DOM transcript fallback. Localized strings such as 发送 / Send are not used.
 
+## Known compatibility limitation (v0.1.65)
+
+This release retains the legacy StreamGenerate collector; it does **not** add support for Gemini's newer `/v1/processSession` WebChannel transport.
+Live requests on the updated site returned `400 FAILED_PRECONDITION` without an assistant answer, including after a fresh page load. The server-side cause and successful protobuf response schema remain unconfirmed.
+WebChannel adaptation is deferred. A newer extension alone does not make the existing collector compatible, and experimental host/extension changes are not shipped with this plugin release.
+
 ## Requirements
 
 | Host | Minimum | Current verified release |

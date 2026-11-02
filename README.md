@@ -2,6 +2,14 @@
 
 Personal OpenCLI plugins, installed via the official plugin mechanism.
 
+## v0.1.65
+
+- Align all five plugin versions at `0.1.65`, retaining the Douyin cursor pagination shipped in `v0.1.64`.
+- Fix ChatGPT modern composer uploads, assistant-turn file scoping, resource-row downloads, and download waiter ordering.
+- Export modern generated-image galleries even when loaded previews have zero layout size. Match protocol message IDs to avoid exporting historical or uploaded images, with one bounded conversation remount retry.
+- Live-verified ChatGPT text, continuation, attachments, CSV downloads, and generated/edited image exports.
+- **Gemini remains on the legacy StreamGenerate implementation.** The newer `processSession` WebChannel is not supported in this release; live requests returned `400 FAILED_PRECONDITION`, so successful response decoding could not be verified. Experimental host/extension changes are not included or required by this release.
+
 ## Plugins
 
 | Name | Path | Description |
