@@ -1,3 +1,4 @@
+import vm from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
 import {
   AuthRequiredError,
@@ -5,7 +6,11 @@ import {
   EmptyResultError,
   TimeoutError,
 } from '@jackwener/opencli/errors';
-import { fetchUserVideosPage } from '../src/user-videos-fetch.js';
+import {
+  buildPageFetchScript,
+  extractVideoItem,
+  fetchUserVideosPage,
+} from '../src/user-videos-fetch.js';
 
 function createMockPage(evaluations = []) {
   let callCount = 0;
@@ -404,5 +409,184 @@ describe('douyin-ext user-videos fetch (in-page PAGE_FETCH pagination primitive)
         timeoutMs: 5000,
       })
     ).rejects.toThrow(TimeoutError);
+  });
+
+  // Test intent: Verify HTTP 401 with empty response body throws AuthRequiredError,
+  // ensuring unauthorized responses are never masked as empty results.
+  it('throws AuthRequiredError on HTTP 401 even when body is completely empty', async () => {
+    const authEmptyPage = createMockPage([
+      {
+        __kind: 'http_error',
+        status: 401,
+        msg: 'HTTP 401',
+      },
+    ]);
+    await expect(
+      fetchUserVideosPage(authEmptyPage, { secUid: targetSecUid, cursor: '0' })
+    ).rejects.toThrow(AuthRequiredError);
+  });
+
+  // Test intent: Ensure comments API returning HTTP 200 with empty body throws EmptyResultError rather than 0 comments.
+  it('throws EmptyResultError when comments API returns empty body, rejecting silent 0 comments', async () => {
+    const emptyCommentPage = createMockPage([
+      {
+        __kind: 'ok',
+        data: {
+          status_code: 0,
+          has_more: 0,
+          max_cursor: '0',
+          aweme_list: [
+            {
+              aweme_id: '7701962254330128201',
+              desc: 'Video 1',
+              video: { duration: 10000 },
+            },
+          ],
+        },
+      },
+      {
+        __kind: 'empty',
+        status: 200,
+      },
+    ]);
+    await expect(
+      fetchUserVideosPage(emptyCommentPage, {
+        secUid: targetSecUid,
+        cursor: '0',
+        commentLimit: 1,
+      })
+    ).rejects.toThrow(EmptyResultError);
+  });
+
+  // Test intent: Reject corrupted comments response where comments field is not an array.
+  it('throws CommandExecutionError when comments payload contains non-array comments field', async () => {
+    const corruptCommentPage = createMockPage([
+      {
+        __kind: 'ok',
+        data: {
+          status_code: 0,
+          has_more: 0,
+          max_cursor: '0',
+          aweme_list: [
+            {
+              aweme_id: '7701962254330128201',
+              desc: 'Video 1',
+              video: { duration: 10000 },
+            },
+          ],
+        },
+      },
+      {
+        __kind: 'ok',
+        data: {
+          status_code: 0,
+          comments: 'invalid_non_array',
+        },
+      },
+    ]);
+    await expect(
+      fetchUserVideosPage(corruptCommentPage, {
+        secUid: targetSecUid,
+        cursor: '0',
+        commentLimit: 1,
+      })
+    ).rejects.toThrow(CommandExecutionError);
+  });
+
+  // Test intent: Execute actual generated in-page fetch script inside a Node VM sandbox
+  // to verify real browser runtime behavior (URL search params, HTTP 401 empty body handling, and abort handling).
+  it('executes in-page fetch script inside VM to verify posts/comments parameters, HTTP 401 empty body, and abort', async () => {
+    // 1. Verify posts query construction and HTTP 401 empty body evaluation
+    const postsScript = buildPageFetchScript({
+      path: '/aweme/v1/web/aweme/post/',
+      query: { aid: '6383', sec_user_id: targetSecUid, max_cursor: '0', count: '20' },
+      timeoutMs: 5000,
+    });
+
+    let capturedUrl = '';
+    let capturedOptions = null;
+    const vmSandbox401 = {
+      URLSearchParams,
+      AbortController,
+      setTimeout,
+      clearTimeout,
+      fetch: vi.fn(async (url, options) => {
+        capturedUrl = url;
+        capturedOptions = options;
+        return {
+          ok: false,
+          status: 401,
+          text: async () => '', // empty body
+        };
+      }),
+    };
+
+    const res401 = await vm.runInNewContext(postsScript, vmSandbox401);
+    expect(capturedUrl).toContain('/aweme/v1/web/aweme/post/?');
+    expect(capturedUrl).toContain(`sec_user_id=${targetSecUid}`);
+    expect(capturedUrl).toContain('max_cursor=0');
+    expect(capturedOptions?.credentials).toBe('include');
+    expect(res401).toEqual({
+      __kind: 'http_error',
+      status: 401,
+      msg: 'HTTP 401',
+    });
+
+    // 2. Verify comments query construction and HTTP 200 JSON parsing
+    const commentsScript = buildPageFetchScript({
+      path: '/aweme/v1/web/comment/list/',
+      query: { aid: '6383', aweme_id: '7701962254330128201', count: '5', cursor: '0' },
+      timeoutMs: 5000,
+    });
+
+    let capturedCommentUrl = '';
+    const vmSandbox200 = {
+      URLSearchParams,
+      AbortController,
+      setTimeout,
+      clearTimeout,
+      fetch: vi.fn(async (url) => {
+        capturedCommentUrl = url;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ status_code: 0, comments: [] }),
+        };
+      }),
+    };
+
+    const res200 = await vm.runInNewContext(commentsScript, vmSandbox200);
+    expect(capturedCommentUrl).toContain('/aweme/v1/web/comment/list/?');
+    expect(capturedCommentUrl).toContain('aweme_id=7701962254330128201');
+    expect(res200).toEqual({
+      __kind: 'ok',
+      data: { status_code: 0, comments: [] },
+    });
+
+    // 3. Verify abort handling produces __kind: 'abort'
+    const abortScript = buildPageFetchScript({
+      path: '/aweme/v1/web/aweme/post/',
+      query: { aid: '6383' },
+      timeoutMs: 50,
+    });
+
+    const vmSandboxAbort = {
+      URLSearchParams,
+      AbortController,
+      setTimeout,
+      clearTimeout,
+      fetch: vi.fn(async (_url, options) => {
+        return new Promise((_, reject) => {
+          options.signal.addEventListener('abort', () => {
+            const err = new Error('The operation was aborted');
+            err.name = 'AbortError';
+            reject(err);
+          });
+        });
+      }),
+    };
+
+    const resAbort = await vm.runInNewContext(abortScript, vmSandboxAbort);
+    expect(resAbort.__kind).toBe('abort');
   });
 });

@@ -86,13 +86,18 @@ export function validateUserVideosTarget(target) {
 /**
  * Validate and normalize cursor.
  * The cursor is an exact digits-string, not a numeric page number.
- * It is never rounded, truncated, or cast to floating point.
+ * Only string types (or null/undefined for default "0") are accepted to prevent numeric rounding.
  */
 export function validateCursor(cursor) {
   if (cursor == null) {
     return '0';
   }
-  const text = String(cursor).trim();
+  if (typeof cursor !== 'string') {
+    throw new ArgumentError(
+      `Invalid cursor type: expected string of digits (default "0"), received ${typeof cursor}`
+    );
+  }
+  const text = cursor.trim();
   if (!DIGITS_ONLY_PATTERN.test(text)) {
     throw new ArgumentError(
       `Invalid cursor: "${text}". Cursor must be a non-empty string of digits (default "0").`
@@ -125,9 +130,7 @@ export function normalizeUserVideosArgs(kwargs = {}) {
   const rawCommentLimit =
     kwargs['comment-limit'] != null
       ? kwargs['comment-limit']
-      : kwargs.commentLimit != null
-        ? kwargs.commentLimit
-        : DEFAULT_COMMENT_LIMIT;
+      : DEFAULT_COMMENT_LIMIT;
   const commentLimit = Number(rawCommentLimit);
   if (
     !Number.isInteger(commentLimit) ||

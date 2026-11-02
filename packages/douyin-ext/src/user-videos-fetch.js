@@ -4,19 +4,7 @@ import {
   EmptyResultError,
   TimeoutError,
 } from '@jackwener/opencli/errors';
-
-export function unwrapEvaluateResult(payload) {
-  if (
-    payload &&
-    typeof payload === 'object' &&
-    !Array.isArray(payload) &&
-    'session' in payload &&
-    'data' in payload
-  ) {
-    return payload.data;
-  }
-  return payload;
-}
+import { unwrapEvaluateResult } from './page-fetch.js';
 
 export function isAuthLikeMessage(code, msg) {
   const text = String(msg ?? '');
@@ -27,6 +15,141 @@ export function isAuthLikeMessage(code, msg) {
       text
     )
   );
+}
+
+/**
+ * Build the in-page fetch script string for execution inside browser evaluate.
+ * Preserves AbortController timeout and evaluates HTTP status before body handling.
+ */
+export function buildPageFetchScript({ path, query, timeoutMs }) {
+  const fetchTimeout = Math.max(1, Math.floor(timeoutMs));
+  return `
+    (async () => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), ${fetchTimeout});
+      try {
+        const queryParams = new URLSearchParams(${JSON.stringify(query)});
+        const url = 'https://www.douyin.com' + ${JSON.stringify(path)} + '?' + queryParams.toString();
+        const res = await fetch(url, {
+          method: 'GET',
+          credentials: 'include',
+          signal: controller.signal,
+          headers: { 'Accept': 'application/json' }
+        });
+        const text = await res.text();
+        if (!res.ok) {
+          let msg = 'HTTP ' + res.status;
+          try {
+            const errJson = JSON.parse(text);
+            msg = errJson?.status_msg || errJson?.message || msg;
+          } catch {}
+          return { __kind: 'http_error', status: res.status, msg };
+        }
+        if (!text.trim()) {
+          return { __kind: 'empty', status: res.status };
+        }
+        try {
+          const json = JSON.parse(text);
+          return { __kind: 'ok', data: json };
+        } catch {
+          return { __kind: 'non_json', status: res.status };
+        }
+      } catch (err) {
+        const isAbort = err && (err.name === 'AbortError' || String(err).includes('AbortError'));
+        return {
+          __kind: isAbort ? 'abort' : 'fetch_error',
+          message: String(err && err.message || err)
+        };
+      } finally {
+        clearTimeout(timer);
+      }
+    })()
+  `;
+}
+
+/**
+ * Private helper to execute an in-page fetch and return parsed JSON data.
+ * Validates HTTP status first, handles auth, empty, non-json, and status_code errors.
+ */
+async function fetchPageJson(page, { path, query, timeoutMs, context }) {
+  if (timeoutMs <= 0) {
+    throw new TimeoutError(`Douyin ${context} request timed out before calling API`);
+  }
+
+  const js = buildPageFetchScript({ path, query, timeoutMs });
+  let evalRaw;
+  try {
+    evalRaw = await page.evaluate(js);
+  } catch (err) {
+    throw new CommandExecutionError(
+      `In-page evaluate failed for ${context}: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+
+  const result = unwrapEvaluateResult(evalRaw);
+  if (!result || typeof result !== 'object') {
+    throw new CommandExecutionError(`Malformed in-page evaluate response for ${context}`);
+  }
+
+  if (result.__kind === 'abort') {
+    throw new TimeoutError(`Douyin ${context} request timed out (fetch aborted in browser)`);
+  }
+
+  if (result.__kind === 'fetch_error') {
+    throw new CommandExecutionError(
+      `In-page fetch request failed for ${context}: ${result.message}`
+    );
+  }
+
+  if (result.__kind === 'http_error') {
+    if (
+      result.status === 401 ||
+      result.status === 403 ||
+      isAuthLikeMessage(result.status, result.msg)
+    ) {
+      throw new AuthRequiredError(
+        'www.douyin.com',
+        `Douyin ${context} request requires authentication (HTTP ${result.status}): ${result.msg}`
+      );
+    }
+    throw new CommandExecutionError(
+      `Douyin ${context} API returned HTTP ${result.status}: ${result.msg}`
+    );
+  }
+
+  if (result.__kind === 'empty') {
+    throw new EmptyResultError(
+      'douyin-ext',
+      `Douyin ${context} endpoint returned empty body (HTTP ${result.status}). The page may require login, verification, or is restricted.`
+    );
+  }
+
+  if (result.__kind === 'non_json') {
+    throw new CommandExecutionError(
+      `Douyin ${context} API returned non-JSON response (HTTP ${result.status}). The page may require login, verification, or is restricted.`
+    );
+  }
+
+  const data = result.data;
+  if (!data || typeof data !== 'object') {
+    throw new CommandExecutionError(`Douyin ${context} returned invalid JSON`);
+  }
+
+  if ('status_code' in data && data.status_code !== 0) {
+    const code = data.status_code;
+    const msg = data.status_msg || data.message || 'unknown error';
+    if (isAuthLikeMessage(code, msg)) {
+      throw new AuthRequiredError(
+        'www.douyin.com',
+        `Douyin API authentication/permission error (${code}) on ${context}: ${msg}. Please check login state or verify in browser.`
+      );
+    }
+    throw new CommandExecutionError(
+      `Douyin API returned status_code ${code} on ${context}: ${msg}. Please check login status or verify in browser.`
+    );
+  }
+
+  return data;
 }
 
 /**
@@ -86,134 +209,22 @@ export function extractVideoItem(rawItem) {
 /**
  * Fetch top comments for a single aweme in page context within remaining timeout budget.
  */
-export async function fetchAwemeCommentsFromPage(
-  page,
-  awemeId,
-  count,
-  remainingTimeoutMs
-) {
-  if (remainingTimeoutMs <= 0) {
-    throw new TimeoutError(
-      `Douyin comment request timed out before calling comment API for video ${awemeId}`
-    );
-  }
+async function fetchAwemeCommentsFromPage(page, awemeId, count, remainingTimeoutMs) {
+  const data = await fetchPageJson(page, {
+    path: '/aweme/v1/web/comment/list/',
+    query: {
+      aid: '6383',
+      aweme_id: awemeId,
+      count: String(count),
+      cursor: '0',
+    },
+    timeoutMs: remainingTimeoutMs,
+    context: `comments of video ${awemeId}`,
+  });
 
-  const fetchTimeout = Math.max(1, Math.floor(remainingTimeoutMs));
-  const js = `
-    (async () => {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), ${fetchTimeout});
-      try {
-        const query = new URLSearchParams({
-          aid: '6383',
-          aweme_id: ${JSON.stringify(awemeId)},
-          count: ${JSON.stringify(String(count))},
-          cursor: '0'
-        });
-        const url = 'https://www.douyin.com/aweme/v1/web/comment/list/?' + query.toString();
-        const res = await fetch(url, {
-          method: 'GET',
-          credentials: 'include',
-          signal: controller.signal,
-          headers: { 'Accept': 'application/json' }
-        });
-        const text = await res.text();
-        if (!text.trim()) {
-          return { __kind: 'empty', status: res.status };
-        }
-        try {
-          const json = JSON.parse(text);
-          if (!res.ok) {
-            return {
-              __kind: 'http_error',
-              status: res.status,
-              msg: json?.status_msg || json?.message || 'HTTP ' + res.status
-            };
-          }
-          return { __kind: 'ok', data: json };
-        } catch {
-          return { __kind: 'non_json', status: res.status };
-        }
-      } catch (err) {
-        const isAbort = err && (err.name === 'AbortError' || String(err).includes('AbortError'));
-        return {
-          __kind: isAbort ? 'abort' : 'fetch_error',
-          message: String(err && err.message || err)
-        };
-      } finally {
-        clearTimeout(timer);
-      }
-    })()
-  `;
-
-  let evalRaw;
-  try {
-    evalRaw = await page.evaluate(js);
-  } catch (err) {
+  if (data.comments != null && !Array.isArray(data.comments)) {
     throw new CommandExecutionError(
-      `In-page evaluate failed for comments of video ${awemeId}: ${err instanceof Error ? err.message : String(err)}`
-    );
-  }
-
-  const result = unwrapEvaluateResult(evalRaw);
-  if (!result || typeof result !== 'object') {
-    throw new CommandExecutionError(
-      `Malformed in-page evaluate response for comments of video ${awemeId}`
-    );
-  }
-
-  if (result.__kind === 'abort') {
-    throw new TimeoutError(
-      `Douyin comment API fetch timed out for video ${awemeId} (aborted in browser)`
-    );
-  }
-
-  if (result.__kind === 'fetch_error') {
-    throw new CommandExecutionError(
-      `In-page fetch request failed for comments of video ${awemeId}: ${result.message}`
-    );
-  }
-
-  if (result.__kind === 'non_json') {
-    throw new CommandExecutionError(
-      `Douyin comment API returned non-JSON response for video ${awemeId} (HTTP ${result.status})`
-    );
-  }
-
-  if (result.__kind === 'empty') {
-    return [];
-  }
-
-  if (result.__kind === 'http_error') {
-    if (isAuthLikeMessage(result.status, result.msg)) {
-      throw new AuthRequiredError(
-        'www.douyin.com',
-        `Douyin comment request requires authentication (HTTP ${result.status}): ${result.msg}`
-      );
-    }
-    throw new CommandExecutionError(
-      `Douyin comment API returned HTTP ${result.status} for video ${awemeId}: ${result.msg}`
-    );
-  }
-
-  const data = result.data;
-  if (!data || typeof data !== 'object') {
-    throw new CommandExecutionError(
-      `Douyin comment API returned invalid JSON for video ${awemeId}`
-    );
-  }
-
-  if ('status_code' in data && data.status_code !== 0) {
-    const code = data.status_code;
-    const msg = data.status_msg || data.message || 'unknown error';
-    if (isAuthLikeMessage(code, msg)) {
-      throw new AuthRequiredError(
-        'www.douyin.com',
-        `Douyin API authentication/permission error (${code}) on comments for video ${awemeId}: ${msg}`
-      );
-    }
-    throw new CommandExecutionError(
-      `Douyin comment API returned status_code ${code} for video ${awemeId}: ${msg}`
+      `Invalid comments type in API response for video ${awemeId}: expected array`
     );
   }
 
@@ -276,119 +287,17 @@ export async function fetchUserVideosPage(
     throw new TimeoutError('Douyin user-videos request timed out waiting for page stability');
   }
 
-  const fetchTimeout = Math.max(1, Math.floor(remAfterWait));
-  const js = `
-    (async () => {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), ${fetchTimeout});
-      try {
-        const query = new URLSearchParams({
-          aid: '6383',
-          sec_user_id: ${JSON.stringify(secUid)},
-          max_cursor: ${JSON.stringify(cursor)},
-          count: ${JSON.stringify(String(count))}
-        });
-        const url = 'https://www.douyin.com/aweme/v1/web/aweme/post/?' + query.toString();
-        const res = await fetch(url, {
-          method: 'GET',
-          credentials: 'include',
-          signal: controller.signal,
-          headers: { 'Accept': 'application/json' }
-        });
-        const text = await res.text();
-        if (!text.trim()) {
-          return { __kind: 'empty', status: res.status };
-        }
-        try {
-          const json = JSON.parse(text);
-          if (!res.ok) {
-            return {
-              __kind: 'http_error',
-              status: res.status,
-              msg: json?.status_msg || json?.message || 'HTTP ' + res.status
-            };
-          }
-          return { __kind: 'ok', data: json };
-        } catch {
-          return { __kind: 'non_json', status: res.status };
-        }
-      } catch (err) {
-        const isAbort = err && (err.name === 'AbortError' || String(err).includes('AbortError'));
-        return {
-          __kind: isAbort ? 'abort' : 'fetch_error',
-          message: String(err && err.message || err)
-        };
-      } finally {
-        clearTimeout(timer);
-      }
-    })()
-  `;
-
-  let evalRaw;
-  try {
-    evalRaw = await page.evaluate(js);
-  } catch (err) {
-    throw new CommandExecutionError(
-      `In-page evaluate failed for user ${secUid}: ${err instanceof Error ? err.message : String(err)}`
-    );
-  }
-
-  const result = unwrapEvaluateResult(evalRaw);
-  if (!result || typeof result !== 'object') {
-    throw new CommandExecutionError(`Malformed in-page evaluate response for user ${secUid}`);
-  }
-
-  if (result.__kind === 'abort') {
-    throw new TimeoutError('Douyin user-videos request timed out (fetch aborted in browser)');
-  }
-
-  if (result.__kind === 'fetch_error') {
-    throw new CommandExecutionError(
-      `In-page fetch request failed for user ${secUid}: ${result.message}`
-    );
-  }
-
-  if (result.__kind === 'non_json') {
-    throw new CommandExecutionError(
-      `Douyin post API returned non-JSON response for user ${secUid} (HTTP ${result.status}). The page may require login, verification, or is restricted.`
-    );
-  }
-
-  if (result.__kind === 'empty') {
-    throw new EmptyResultError(
-      'douyin-ext',
-      `Douyin post endpoint returned empty body for user ${secUid} (HTTP ${result.status}). User may be restricted or requires login verification.`
-    );
-  }
-
-  if (result.__kind === 'http_error') {
-    if (isAuthLikeMessage(result.status, result.msg)) {
-      throw new AuthRequiredError(
-        'www.douyin.com',
-        `Douyin post request requires authentication (HTTP ${result.status}): ${result.msg}`
-      );
-    }
-    throw new CommandExecutionError(`Douyin post API returned HTTP ${result.status}: ${result.msg}`);
-  }
-
-  const data = result.data;
-  if (!data || typeof data !== 'object') {
-    throw new CommandExecutionError(`Douyin post returned invalid JSON for user ${secUid}`);
-  }
-
-  if ('status_code' in data && data.status_code !== 0) {
-    const code = data.status_code;
-    const msg = data.status_msg || data.message || 'unknown error';
-    if (isAuthLikeMessage(code, msg)) {
-      throw new AuthRequiredError(
-        'www.douyin.com',
-        `Douyin API authentication/permission error (${code}): ${msg}. Please check login state or verify in browser.`
-      );
-    }
-    throw new CommandExecutionError(
-      `Douyin API returned status_code ${code} for user ${secUid}: ${msg}. Please check login status or verify in browser.`
-    );
-  }
+  const data = await fetchPageJson(page, {
+    path: '/aweme/v1/web/aweme/post/',
+    query: {
+      aid: '6383',
+      sec_user_id: secUid,
+      max_cursor: cursor,
+      count: String(count),
+    },
+    timeoutMs: remAfterWait,
+    context: `user videos (${secUid})`,
+  });
 
   // Validate next_cursor (from max_cursor)
   if (data.max_cursor == null) {
@@ -472,6 +381,11 @@ export async function fetchUserVideosPage(
         remaining
       );
     }
+  }
+
+  // Enforce overall timeout budget before returning
+  if (getRemainingMs() <= 0) {
+    throw new TimeoutError('Douyin user-videos request exceeded overall timeout budget');
   }
 
   return {

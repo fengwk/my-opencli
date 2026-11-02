@@ -59,12 +59,16 @@ describe('douyin-ext user-videos contract & argument validation', () => {
     expect(() => validateUserVideosTarget('123456789012345')).toThrow(ArgumentError);
   });
 
-  // Test intent: Ensure cursor is preserved as an exact digits-string without rounding or truncation.
-  it('accepts and preserves arbitrary-length digit string cursors without numeric truncation', () => {
+  // Test intent: Ensure cursor is preserved as an exact digits-string without rounding or truncation,
+  // and reject non-string numbers to prevent floating-point or precision-loss rounding.
+  it('accepts and preserves arbitrary-length digit string cursors without numeric truncation and rejects numbers', () => {
     const cursor = '1789453816000';
     expect(validateCursor(cursor)).toBe(cursor);
     expect(validateCursor(null)).toBe('0');
     expect(validateCursor(undefined)).toBe('0');
+
+    // Reject number types to prevent precision loss before string casting
+    expect(() => validateCursor(1789453816000)).toThrow(ArgumentError);
   });
 
   // Test intent: Reject non-numeric characters, negative numbers, or decimal fractions in cursor.
@@ -107,11 +111,11 @@ describe('douyin-ext user-videos contract & argument validation', () => {
     });
     expect(activeArgs.commentLimit).toBe(5);
 
-    const camelArgs = normalizeUserVideosArgs({
+    const maxArgs = normalizeUserVideosArgs({
       target: validSecUid,
-      commentLimit: 10,
+      'comment-limit': 10,
     });
-    expect(camelArgs.commentLimit).toBe(10);
+    expect(maxArgs.commentLimit).toBe(10);
 
     expect(() =>
       normalizeUserVideosArgs({ target: validSecUid, 'comment-limit': -1 })

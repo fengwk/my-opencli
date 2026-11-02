@@ -21,28 +21,8 @@ import {
   MIN_USER_VIDEOS_COUNT,
   normalizeUserVideosArgs,
   USER_VIDEOS_COLUMNS,
-  validateCursor,
-  validateUserVideosTarget,
 } from './src/user-videos-contract.js';
-import {
-  extractVideoItem,
-  fetchAwemeCommentsFromPage,
-  fetchUserVideosPage,
-  isAuthLikeMessage,
-  unwrapEvaluateResult,
-} from './src/user-videos-fetch.js';
-
-export {
-  validateUserVideosTarget,
-  validateCursor,
-  normalizeUserVideosArgs,
-  fetchUserVideosPage,
-  fetchAwemeCommentsFromPage,
-  extractVideoItem,
-  unwrapEvaluateResult,
-  isAuthLikeMessage,
-  USER_VIDEOS_COLUMNS,
-};
+import { fetchUserVideosPage } from './src/user-videos-fetch.js';
 
 export const userVideosCommand = cli({
   site: 'douyin-ext',
