@@ -15,7 +15,7 @@ Only download videos you own or are authorized to save.
   - `download`: The plugin navigates the background browser to the official video page, performs a strictly read-only, non-mutating in-page `fetch(credentials: 'include')` to obtain structured video metadata, and streams the binary MP4 stream directly over Node HTTP to the local execution host (e.g. Hub server).
   - `user-videos`: The plugin navigates to the official user homepage (`/user/<sec_uid>`), executes an in-page read-only `fetch` against `/aweme/v1/web/aweme/post/?aid=6383&sec_user_id=...&max_cursor=...&count=...` with `credentials: 'include'`, preserves complete pages without dropping rows or slicing, and provides verified pagination state (`cursor`, `next_cursor`, `has_more`, `items`). When `--comment-limit > 0`, it sequentially fetches top comments via `/aweme/v1/web/comment/list/` under the same overall timeout budget.
 - **Verified Live Evidence**:
-  - Environment: Remote instance `6zttqqy2`, authenticated account 李一帆 (`sec_uid=MS4wLjABAAAAyi85GGeS9GCLBpS4JAJ-r4Kz0cPVz-b0wIiYaeg_icU`).
+  - Environment: A signed-in remote browser; target public profile 李一帆 (`sec_uid=MS4wLjABAAAAyi85GGeS9GCLBpS4JAJ-r4Kz0cPVz-b0wIiYaeg_icU`). This is the profile being read, not the identity of the signed-in account.
   - First page GET request (`max_cursor=0`, `count=20`): Returned HTTP 200, `status_code: 0`, 18 videos, `has_more: 1`, `max_cursor: 1789453816000`.
   - Second page GET request (`max_cursor=1789453816000`, `count=20`): Returned HTTP 200, `status_code: 0`, 15 distinct videos, `has_more: 1`, `max_cursor: 1784127963000`.
   - Real API payload verified fields: `status_code`, `min_cursor`, `max_cursor`, `has_more`, `aweme_list`.
@@ -110,7 +110,7 @@ Each object in `items` contains:
 - `title`: Video description / title
 - `duration`: Video duration in seconds
 - `digg_count`: Digg / like count
-- `play_url`: Merged MP4 video play URL
+- `play_url`: Platform playback URL, which may redirect; use `download` to select and validate a merged MP4 stream
 - `top_comments`: Array of top comments (`[{ text, digg_count, nickname }]`), empty if `--comment-limit 0`
 - `url`: Official video URL (`https://www.douyin.com/video/<aweme_id>`)
 - `is_image`: Boolean indicating whether this post is an image gallery (图集)
