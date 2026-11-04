@@ -106,15 +106,37 @@ Returns a single row object with columns `['sec_uid', 'cursor', 'next_cursor', '
 | `has_more` | Boolean indicating whether more videos are available |
 | `items` | Array of video item objects in this page |
 
+Each object in `items` is a flat metadata record. Optional metadata is `null` when
+the API omits it or returns an invalid type; one bad optional field never drops the
+item or fails the page. Metadata extraction adds no extra API request. Only
+`aweme_id` and the pagination fields (`cursor`, `next_cursor`, `has_more`) are strict.
+
 Each object in `items` contains:
 - `aweme_id`: Verified 16-20 digit numeric ID string
-- `title`: Video description / title
-- `duration`: Video duration in seconds
-- `digg_count`: Digg / like count
-- `play_url`: Platform playback URL, which may redirect; use `download` to select and validate a merged MP4 stream
+- `title`: Trimmed display title derived from the description (or title)
+- `item_title`: Douyin short title exactly as returned, or `null`; an empty short title stays `""`
+- `desc`: Raw description exactly as returned, or `null`
+- `desc_has_truncation_notice`: `true` only when `desc` ends with the known `……版本过低，升级后可展示全部信息` notice, otherwise `false`
+- `duration`: Video duration in seconds, rounded from `duration_ms`, or `null` if missing/invalid
+- `duration_ms`: Raw video duration in milliseconds, or `null`
+- `create_time`: Raw creation timestamp in seconds, or `null`
+- `author`: Object `{ nickname, uid, sec_uid, unique_id }`, or `null`. `uid` is preserved as a string; unsafe numeric IDs are not coerced. Individual fields are `null` when missing/invalid, and `unique_id` may legitimately be `null`.
+- `width`: Video width in pixels, or `null`
+- `height`: Video height in pixels, or `null`
+- `cover_url`: Video cover image URL, or `null`
+- `music`: Object `{ title, author }`, or `null`
+- `digg_count`: Like count as a non-negative safe integer, or `null`
+- `comment_count`: Comment count as a non-negative safe integer, or `null`
+- `collect_count`: Favorite/collection count as a non-negative safe integer, or `null`
+- `share_count`: Share count as a non-negative safe integer, or `null`
+- `play_url`: Platform playback URL, which may redirect; use `download` to select and validate a merged MP4 stream. It is `""` when unavailable.
 - `top_comments`: Array of top comments (`[{ text, digg_count, nickname }]`), empty if `--comment-limit 0`
 - `url`: Official video URL (`https://www.douyin.com/video/<aweme_id>`)
 - `is_image`: Boolean indicating whether this post is an image gallery (图集)
+
+Counts are never padded: a missing or invalid count is `null`, while a real `0` stays
+`0`. The post endpoint's `play_count` is not exported because the observed payload
+returned `0` for every item and no trustworthy playback count was available.
 
 `quality` in `download` is the platform's rendition label, not a guarantee of exact pixel dimensions.
 For example, the verified `540p` rendition was 1024×576. An end-to-end check saved

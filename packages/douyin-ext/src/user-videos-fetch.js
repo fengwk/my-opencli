@@ -152,9 +152,36 @@ async function fetchPageJson(page, { path, query, timeoutMs, context }) {
   return data;
 }
 
+const DESC_TRUNCATION_NOTICE = '……版本过低，升级后可展示全部信息';
+
+function nullableString(value) {
+  return typeof value === 'string' ? value : null;
+}
+
+function nullableIdString(value) {
+  if (typeof value === 'string') {
+    return value;
+  }
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) {
+    return String(value);
+  }
+  return null;
+}
+
+function nullableNonNegativeSafeInteger(value) {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : null;
+}
+
+function nullableObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+}
+
 /**
  * Validate and extract aweme item fields safely without losing numeric precision.
  * Requires 16-20 digit string IDs, disallows unsafe number-to-string casts.
+ * Optional metadata is nullable and never drops the item or fails the page.
  */
 export function extractVideoItem(rawItem) {
   if (!rawItem || typeof rawItem !== 'object' || Array.isArray(rawItem)) {
@@ -182,13 +209,20 @@ export function extractVideoItem(rawItem) {
     );
   }
 
+  const video = nullableObject(rawItem.video) ?? {};
+  const statistics = nullableObject(rawItem.statistics) ?? {};
+  const author = nullableObject(rawItem.author);
+  const music = nullableObject(rawItem.music);
+
   const title = String(rawItem.desc || rawItem.title || '').trim();
-  const duration =
-    typeof rawItem.video?.duration === 'number'
-      ? Math.round(rawItem.video.duration / 1000)
-      : 0;
-  const diggCount = Number(rawItem.statistics?.digg_count ?? 0);
-  const playUrl = rawItem.video?.play_addr?.url_list?.[0] ?? '';
+  const desc = nullableString(rawItem.desc);
+  const itemTitle = nullableString(rawItem.item_title);
+  const descHasTruncationNotice =
+    desc != null && desc.trimEnd().endsWith(DESC_TRUNCATION_NOTICE);
+
+  const durationMs = nullableNonNegativeSafeInteger(video.duration);
+  const duration = durationMs == null ? null : Math.round(durationMs / 1000);
+  const playUrl = video.play_addr?.url_list?.[0] ?? '';
   const isImage = Boolean(
     rawItem.images && Array.isArray(rawItem.images) && rawItem.images.length > 0
   );
@@ -197,8 +231,33 @@ export function extractVideoItem(rawItem) {
   return {
     aweme_id: id,
     title,
+    item_title: itemTitle,
+    desc,
+    desc_has_truncation_notice: descHasTruncationNotice,
     duration,
-    digg_count: diggCount,
+    duration_ms: durationMs,
+    create_time: nullableNonNegativeSafeInteger(rawItem.create_time),
+    author: author
+      ? {
+          nickname: nullableString(author.nickname),
+          uid: nullableIdString(author.uid),
+          sec_uid: nullableString(author.sec_uid),
+          unique_id: nullableString(author.unique_id),
+        }
+      : null,
+    width: nullableNonNegativeSafeInteger(video.width),
+    height: nullableNonNegativeSafeInteger(video.height),
+    cover_url: nullableString(video.cover?.url_list?.[0]),
+    music: music
+      ? {
+          title: nullableString(music.title),
+          author: nullableString(music.author),
+        }
+      : null,
+    digg_count: nullableNonNegativeSafeInteger(statistics.digg_count),
+    comment_count: nullableNonNegativeSafeInteger(statistics.comment_count),
+    collect_count: nullableNonNegativeSafeInteger(statistics.collect_count),
+    share_count: nullableNonNegativeSafeInteger(statistics.share_count),
     play_url: playUrl,
     top_comments: [],
     url,
