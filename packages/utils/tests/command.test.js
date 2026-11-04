@@ -17,4 +17,12 @@ describe('utils/scrape command registration', () => {
     expect(scrapeCommand.access).toBe('read');
     expect(scrapeCommand.example).toContain('opencli utils scrape');
   });
+
+  it('exposes an optional output directory that requires a value', () => {
+    // The CLI must distinguish an omitted option from a flag without a path.
+    const op = scrapeCommand.args.find((arg) => arg.name === 'op');
+    expect(op).toMatchObject({ name: 'op', valueRequired: true });
+    expect(op.required).not.toBe(true);
+    expect(op.default).toBeUndefined();
+  });
 });

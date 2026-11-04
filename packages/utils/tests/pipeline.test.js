@@ -1,3 +1,6 @@
+import os from 'node:os';
+import path from 'node:path';
+import { ArgumentError } from '@jackwener/opencli/errors';
 import { describe, expect, it } from 'vitest';
 import {
   INLINE_TEXT_MAX_CHARS,
@@ -151,5 +154,32 @@ describe('normalizeScrapeArgs', () => {
     expect(() => normalizeScrapeArgs({ url: 'https://example.com', timeout: 181 })).toThrow(/timeout/);
     expect(() => normalizeScrapeArgs({ url: 'https://example.com', 'wait-for': Number.MAX_SAFE_INTEGER + 1 }))
       .toThrow(/wait-for/);
+  });
+
+  it('resolves the default and explicit output directories per call', () => {
+    // An explicit path, even the default path, must retain its distinct permission policy.
+    const url = 'https://example.com';
+    const defaultDir = path.join(os.tmpdir(), 'opencli-scrape');
+    expect(normalizeScrapeArgs({ url })).toMatchObject({
+      outputDir: defaultDir,
+      isDefaultOutputDir: true,
+    });
+    expect(normalizeScrapeArgs({ url, op: './artifacts' })).toMatchObject({
+      outputDir: path.resolve('./artifacts'),
+      isDefaultOutputDir: false,
+    });
+    expect(normalizeScrapeArgs({ url, op: './space at end ' }).outputDir)
+      .toBe(path.resolve('./space at end '));
+    expect(normalizeScrapeArgs({ url, op: defaultDir })).toMatchObject({
+      outputDir: defaultDir,
+      isDefaultOutputDir: false,
+    });
+  });
+
+  it.each([undefined, null, '', '   ', true, 0, {}, []])('rejects an explicit invalid --op value: %s', (op) => {
+    // Only omission selects the default; malformed explicit values must not silently fall back.
+    const normalize = () => normalizeScrapeArgs({ url: 'https://example.com', op });
+    expect(normalize).toThrow(ArgumentError);
+    expect(normalize).toThrow(/--op/);
   });
 });
