@@ -30,6 +30,7 @@ Only download videos you own or are authorized to save.
 - **Format Filtering**: Rejects DASH and audio-only streams; selects verified merged MP4 variants.
 - **Quality Selection**: Supports `best`, `2160p`, `1440p`, `1080p`, `720p`, `540p`, `480p`, `360p`. If a requested quality is not present, throws an explicit error rather than silently degrading.
 - **Reliable Local Download**: Streams via `pipeline` with chunk-accumulated MP4 `ftyp` box verification (rejecting HTML error pages). Employs atomic `link + unlink` hardlink loop to guarantee existing files are never overwritten even under concurrency.
+- **UTF-8 Filenames**: Final filenames stay within 255 UTF-8 bytes, including the complete video ID, extension, and any collision counter. Titles are shortened at Unicode code-point boundaries without changing the returned title metadata.
 
 ## Usage
 
