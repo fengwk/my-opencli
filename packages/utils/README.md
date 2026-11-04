@@ -31,11 +31,14 @@ opencli utils scrape https://example.com --window foreground
 opencli utils scrape https://example.com --as links
 opencli utils scrape https://example.com --as screenshot
 opencli utils scrape https://example.com --as fullscreenshot
+
+# write all artifacts directly into a chosen directory
+opencli utils scrape https://example.com --op ./scrape-output
 ```
 
 `--as` is the scrape payload kind. CLI envelope format remains `-f json|table|plain|...` (this command defaults to JSON).
 
-Artifacts are always written under `$TMPDIR/opencli-scrape/` (screenshots, direct media, and the full markdown/links payload).
+Artifacts (screenshots, direct media, and the full markdown/links payload) are written directly under `--op` when supplied, or under the system temporary directory's `opencli-scrape/` by default. Relative `--op` paths are resolved against the current working directory. An unusable directory fails the command rather than falling back to the default.
 
 JSON shape: `title`, `url`, `as`, `chars`, `truncated`, `content`, `links`, `files`, `text`.
 If `chars > 10000`, `truncated=true`, `content`/`links` are emptied, and `text` only says the body exceeded 10k and lists `files`. Read the saved `.md` for the full document.
@@ -44,7 +47,7 @@ If `chars > 10000`, `truncated=true`, `content`/`links` are emptied, and `text` 
 
 Rendered HTML is collected after the my-mcp smart wait (text-length stability, then leftover network-idle if it does not settle). Direct media URLs (`pdf`/`png`/`zip`/…) are fetched with host cookies and saved as files. Browser-context fetch is preferred; a cookie-scoped Node fetch is used only when browser CORS blocks it. Direct-media transfer is capped at 8 MiB to bound browser/CLI memory; larger files fail explicitly instead of returning a partial artifact.
 
-The artifact directory is private (`0700`) and newly created files are private (`0600`) on POSIX systems. Failed or timed-out writes are removed best-effort.
+New artifact directories are private (`0700`) and newly created files are private (`0600`) on POSIX systems. Existing explicit `--op` directories retain their permissions; choose a suitably private directory. The default directory is kept private. Failed or timed-out writes are removed best-effort.
 
 The Node fallback requests only the requested URL and explicit `http(s)` redirects. It re-reads host cookies for each redirect destination, so cookies from one origin are not forwarded to another.
 

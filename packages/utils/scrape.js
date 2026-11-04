@@ -44,6 +44,11 @@ export const scrapeCommand = cli({
       help: `Content kind: ${SCRAPE_FORMATS.join(', ')} (default markdown). Not the CLI -f/--format envelope.`,
     },
     {
+      name: 'op',
+      valueRequired: true,
+      help: 'Output directory for all scrape artifacts (default: system temp/opencli-scrape)',
+    },
+    {
       name: 'only-main-content',
       default: false,
       help: 'Keep only the primary page content for markdown/links (default false)',

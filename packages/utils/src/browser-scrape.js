@@ -1,9 +1,8 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { CommandExecutionError, TimeoutError } from '@jackwener/opencli/errors';
-import { isSupportedHttpUrl } from './contract.js';
+import { defaultScrapeOutputDir, isSupportedHttpUrl } from './contract.js';
 import {
   COLLECT_DOCUMENT_JS,
   TEXT_LENGTH_JS,
@@ -33,24 +32,27 @@ const NETWORK_IDLE_POLL_MS = 500;
 const DIRECT_MEDIA_PROBE_TIMEOUT_MS = 3000;
 const MEDIA_PROBE_MAX_BYTES = 8 * 1024 * 1024;
 const MAX_MEDIA_REDIRECTS = 5;
-const ARTIFACT_DIR_NAME = 'opencli-scrape';
 
 export async function scrapeWithPage(page, args) {
   const deadline = new ScrapeDeadline(args.timeoutMs, args.timeoutSeconds);
+  const artifactDir = {
+    outputDir: args.outputDir ?? defaultScrapeOutputDir(),
+    isDefaultOutputDir: args.outputDir === undefined || args.isDefaultOutputDir === true,
+  };
   const networkCaptureStarted = await maybeStartNetworkCapture(page);
 
   if (hasMediaLikeFileExtension(args.url)) {
-    const media = await tryProbeDirectMedia(page, args.url, deadline, { browserFirst: false });
+    const media = await tryProbeDirectMedia(page, args.url, deadline, artifactDir, { browserFirst: false });
     if (media) return toMediaResult(media);
   }
 
-  const navigation = await navigate(page, args.url, deadline);
+  const navigation = await navigate(page, args.url, deadline, artifactDir);
   if (navigation.media) {
     return toMediaResult(navigation.media);
   }
 
   if (hasMediaLikeFileExtension(args.url)) {
-    const media = await tryProbeDirectMedia(page, args.url, deadline);
+    const media = await tryProbeDirectMedia(page, args.url, deadline, artifactDir);
     if (media) return toMediaResult(media);
   }
 
@@ -67,7 +69,7 @@ export async function scrapeWithPage(page, args) {
 
   if (args.as === 'screenshot' || args.as === 'fullscreenshot') {
     const meta = await collectSnapshot(page, { required: false, deadline });
-    const file = await saveScreenshot(page, args.as === 'fullscreenshot', deadline);
+    const file = await saveScreenshot(page, args.as === 'fullscreenshot', deadline, artifactDir);
     return toResult({
       title: meta.title || '',
       url: meta.url || args.url,
@@ -81,7 +83,7 @@ export async function scrapeWithPage(page, args) {
   const title = snapshot.title || '';
   const url = snapshot.url || args.url;
   if (!isSupportedHttpUrl(url) || (Number(snapshot.textLength) || 0) === 0) {
-    const media = await tryProbeDirectMedia(page, args.url, deadline, { browserFirst: false });
+    const media = await tryProbeDirectMedia(page, args.url, deadline, artifactDir, { browserFirst: false });
     if (media) return toMediaResult(media);
   }
   if (!isSupportedHttpUrl(url)) {
@@ -100,7 +102,7 @@ export async function scrapeWithPage(page, args) {
       onlyMainContent: args.onlyMainContent,
     });
     deadline.throwIfExpired();
-    return toResult({ title, url, as: 'links', links, persistText: true, deadline });
+    return toResult({ title, url, as: 'links', links, persistText: true, deadline, artifactDir });
   }
 
   const content = buildTextResult({
@@ -111,7 +113,7 @@ export async function scrapeWithPage(page, args) {
     onlyMainContent: args.onlyMainContent,
   });
   deadline.throwIfExpired();
-  return toResult({ title, url, as: 'markdown', content, persistText: true, deadline });
+  return toResult({ title, url, as: 'markdown', content, persistText: true, deadline, artifactDir });
 }
 
 async function toResult({
@@ -123,6 +125,7 @@ async function toResult({
   files = [],
   persistText = false,
   deadline = null,
+  artifactDir,
 }) {
   deadline?.throwIfExpired();
   const payload = formatScrapeText({ title, url, content, links, files: [] });
@@ -131,7 +134,7 @@ async function toResult({
   let savedContentFile = null;
   try {
     if (persistText && payload) {
-      savedContentFile = await saveBinary('content-', '.md', Buffer.from(payload, 'utf8'));
+      savedContentFile = await saveBinary('content-', '.md', Buffer.from(payload, 'utf8'), artifactDir);
       allFiles = [savedContentFile, ...allFiles];
       deadline?.throwIfExpired();
     }
@@ -170,7 +173,7 @@ function toMediaResult(media) {
   });
 }
 
-async function navigate(page, url, deadline) {
+async function navigate(page, url, deadline, artifactDir) {
   const previousUrl = await readCurrentUrlBestEffort(page, deadline);
   let lastError = null;
   for (let attempt = 1; attempt <= 2; attempt += 1) {
@@ -186,7 +189,7 @@ async function navigate(page, url, deadline) {
       deadline.throwIfExpired();
       lastError = error;
       if (isLikelyDownloadNavigationError(error)) {
-        const media = await tryProbeDirectMedia(page, url, deadline);
+        const media = await tryProbeDirectMedia(page, url, deadline, artifactDir);
         if (media) return { media };
       }
       if (await hasUsablePageContentAfterNavigation(page, previousUrl, deadline)) {
@@ -397,7 +400,7 @@ async function collectAllFrameDocuments(page, mainSnapshot, deadline) {
   return mergeFrameDocuments(mainSnapshot, crossOriginSnapshots);
 }
 
-async function tryProbeDirectMedia(page, url, deadline, { browserFirst = true } = {}) {
+async function tryProbeDirectMedia(page, url, deadline, artifactDir, { browserFirst = true } = {}) {
   deadline.throwIfExpired();
   const probeDeadlineAt = Date.now() + Math.min(deadline.remainingMs(), DIRECT_MEDIA_PROBE_TIMEOUT_MS);
   let probed = null;
@@ -452,7 +455,7 @@ async function tryProbeDirectMedia(page, url, deadline, { browserFirst = true } 
   const fileName = resolveSuggestedFileName(contentDisposition, responseUrl)
     || resolveSuggestedFileName('', url);
   const extension = guessExtension(mime, fileName);
-  const file = await saveBinary('media-', extension, bytes);
+  const file = await saveBinary('media-', extension, bytes, artifactDir);
   try {
     deadline.throwIfExpired();
     return { fileName, url, files: [file] };
@@ -712,9 +715,9 @@ async function sleepMs(page, ms) {
   await new Promise((resolve) => setTimeout(resolve, normalizedMs));
 }
 
-async function saveScreenshot(page, fullPage, deadline) {
+async function saveScreenshot(page, fullPage, deadline, artifactDir) {
   deadline.throwIfExpired();
-  const file = await saveBinary(fullPage ? 'fullscreenshot-' : 'screenshot-', '.png', Buffer.alloc(0), false);
+  const file = await saveBinary(fullPage ? 'fullscreenshot-' : 'screenshot-', '.png', Buffer.alloc(0), artifactDir);
   try {
     await page.screenshot({ fullPage, path: file, format: 'png' });
     deadline.throwIfExpired();
@@ -725,27 +728,29 @@ async function saveScreenshot(page, fullPage, deadline) {
   }
 }
 
-async function saveBinary(prefix, extension, bytes, write = true) {
-  const dir = await ensureArtifactDir();
+async function saveBinary(prefix, extension, bytes, artifactDir) {
+  const dir = await ensureArtifactDir(artifactDir);
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const file = path.join(dir, `${prefix}${Date.now()}-${crypto.randomBytes(4).toString('hex')}${extension}`);
+    let handle;
     try {
-      await fs.writeFile(file, write ? bytes : Buffer.alloc(0), {
-        flag: 'wx',
-        mode: 0o600,
-      });
+      handle = await fs.open(file, 'wx', 0o600);
+      await handle.writeFile(bytes);
+      await handle.close();
       return file;
     } catch (error) {
-      if (error?.code === 'EEXIST') continue;
-      await deleteFileBestEffort(file);
+      if (!handle && error?.code === 'EEXIST') continue;
+      if (handle) {
+        await handle.close().catch(() => {});
+        await deleteFileBestEffort(file);
+      }
       throw error;
     }
   }
   throw new CommandExecutionError('Failed to allocate a unique scrape artifact path');
 }
 
-async function ensureArtifactDir() {
-  const dir = path.join(os.tmpdir(), ARTIFACT_DIR_NAME);
+async function ensureArtifactDir({ outputDir: dir, isDefaultOutputDir }) {
   await fs.mkdir(dir, { recursive: true, mode: 0o700 });
   const stat = await fs.lstat(dir);
   if (!stat.isDirectory() || stat.isSymbolicLink()) {
@@ -760,7 +765,7 @@ async function ensureArtifactDir() {
       'Remove the directory or change it to the current user before retrying.',
     );
   }
-  if (process.platform !== 'win32') {
+  if (isDefaultOutputDir && process.platform !== 'win32') {
     await fs.chmod(dir, 0o700);
   }
   return dir;

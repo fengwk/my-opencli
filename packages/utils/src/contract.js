@@ -1,3 +1,5 @@
+import os from 'node:os';
+import path from 'node:path';
 import { ArgumentError } from '@jackwener/opencli/errors';
 import { SCRAPE_FORMATS } from './pipeline.js';
 
@@ -22,14 +24,32 @@ export function normalizeScrapeArgs(kwargs = {}) {
   }
 
   const timeoutSeconds = normalizeTimeoutSeconds(kwargs.timeout);
+  const isDefaultOutputDir = !Object.hasOwn(kwargs, 'op');
+  const outputDir = isDefaultOutputDir ? defaultScrapeOutputDir() : normalizeOutputDir(kwargs.op);
   return {
     url,
     as,
+    outputDir,
+    isDefaultOutputDir,
     onlyMainContent: boolish(kwargs['only-main-content'] ?? kwargs.onlyMainContent),
     timeoutSeconds,
     timeoutMs: timeoutSeconds * 1000,
     waitForMs: normalizeWaitForMs(kwargs['wait-for'] ?? kwargs.waitFor),
   };
+}
+
+export function defaultScrapeOutputDir() {
+  return path.join(os.tmpdir(), 'opencli-scrape');
+}
+
+function normalizeOutputDir(raw) {
+  if (typeof raw !== 'string' || !raw.trim()) {
+    throw new ArgumentError(
+      '--op must be a non-empty directory path',
+      'Pass --op with a directory path.',
+    );
+  }
+  return path.resolve(raw);
 }
 
 export function isSupportedHttpUrl(value) {
