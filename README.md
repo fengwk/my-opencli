@@ -2,6 +2,14 @@
 
 Personal OpenCLI plugins, installed via the official plugin mechanism.
 
+## v0.1.67
+
+- Align all five plugin versions at `0.1.67`; other plugin business logic is unchanged.
+- Enrich each `douyin-ext user-videos` item with creation time, short title, raw description, author, duration in milliseconds, dimensions, cover, music, and comment/favorite/share counts using the existing single-page request.
+- **Output correction:** missing or invalid engagement counts and duration now return `null`, not a fabricated `0`; real zero counts remain `0`. Keep IDs as strings and preserve pagination and image-gallery flags.
+- Mark the known platform description-truncation notice without claiming complete captions or trustworthy playback counts.
+- Update installed plugins explicitly; rebuilding the Hub image alone does not update persisted plugin code.
+
 ## v0.1.66
 
 - Align all five plugin versions at `0.1.66`, including the `utils scrape` output-directory fix and the Douyin filename fix already integrated on main.
