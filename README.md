@@ -4,10 +4,11 @@ Personal OpenCLI plugins, installed via the official plugin mechanism.
 
 ## v0.1.66
 
-- Align all five plugin versions at `0.1.66`; this release changes `utils scrape` output handling only.
+- Align all five plugin versions at `0.1.66`, including the `utils scrape` output-directory fix and the Douyin filename fix already integrated on main.
 - Add optional `utils scrape --op <directory>` for all saved artifacts: markdown/links, screenshots, and direct media. Without `--op`, keep using the system temporary `opencli-scrape/` directory and preserve existing inline text and long-content behavior.
 - OpenCLI Hub can discover `op` in the command manifest and inject its per-execution resource directory. After updating installed plugins and refreshing the Catalog, callers omit `--op`; files become available through execution `resources` without Hub, CLI, or extension changes.
 - An invalid or unwritable output directory fails explicitly instead of falling back to temporary storage. Existing explicitly selected directory permissions are preserved.
+- Keep Douyin download filenames within 255 UTF-8 bytes while preserving complete video IDs, extensions, collision counters, and whole Unicode code points.
 - ChatGPT attachment reliability findings and the deferred Gemini WebChannel adaptation are not addressed by this release.
 
 ## v0.1.65
