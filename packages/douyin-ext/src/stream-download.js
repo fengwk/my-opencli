@@ -6,6 +6,7 @@ import { CommandExecutionError } from '@jackwener/opencli/errors';
 import { isTrustedCdnUrl } from './video-selector.js';
 
 export const MIN_VALID_VIDEO_BYTES = 1024;
+const MAX_FILENAME_BYTES = 255;
 
 /**
  * Validate standard MP4 ftyp container header:
@@ -88,6 +89,7 @@ function createMp4HeaderValidator() {
  * - Strips NUL and control characters (0x00-0x1F, 0x7F)
  * - Strips path separators and illegal filesystem characters
  * - Strips leading/trailing dots and whitespace
+ * - Keeps at most 80 whole Unicode code points; the final byte budget is enforced at placement
  */
 export function sanitizeFilename(name) {
   const cleaned = String(name ?? '')
@@ -97,17 +99,35 @@ export function sanitizeFilename(name) {
     .replace(/\s+/g, ' ')
     .replace(/^[\.\s]+|[\.\s]+$/g, '')
     .trim();
-  return cleaned.slice(0, 80);
+  return Array.from(cleaned).slice(0, 80).join('');
+}
+
+function truncateUtf8(text, maxBytes) {
+  let result = '';
+  let bytes = 0;
+  for (const character of text) {
+    const characterBytes = Buffer.byteLength(character, 'utf8');
+    if (bytes + characterBytes > maxBytes) break;
+    result += character;
+    bytes += characterBytes;
+  }
+  return result;
 }
 
 /**
  * Atomically create a destination file using hardlink + unlink loop.
  * Guarantees zero overwrite even under concurrent execution on POSIX filesystems.
+ * Truncates only the title/base name, reserving bytes for an intact ID, counter and extension.
  */
-export async function atomicNoOverwriteLink(tmpFilePath, outputDir, baseName, ext = '.mp4') {
+export async function atomicNoOverwriteLink(tmpFilePath, outputDir, baseName, ext = '.mp4', idSuffix = '') {
   let counter = 0;
   while (true) {
-    const candidateName = counter === 0 ? `${baseName}${ext}` : `${baseName} (${counter})${ext}`;
+    const suffix = `${idSuffix}${counter === 0 ? '' : ` (${counter})`}${ext}`;
+    const titleBudget = MAX_FILENAME_BYTES - Buffer.byteLength(suffix, 'utf8');
+    if (titleBudget < 0) {
+      throw new CommandExecutionError('Video filename suffix exceeds the 255-byte filename limit');
+    }
+    const candidateName = `${truncateUtf8(baseName, titleBudget)}${suffix}`;
     const candidatePath = path.join(outputDir, candidateName);
 
     try {
@@ -284,8 +304,9 @@ export async function downloadVideoToFile({
 
       // Atomic, non-overwriting rename via hardlink from owned task directory
       const cleanTitle = sanitizeFilename(title);
-      const baseName = cleanTitle ? `${cleanTitle}_${id}` : String(id);
-      const finalTargetPath = await atomicNoOverwriteLink(partFilePath, resolvedOutputDir, baseName, '.mp4');
+      const baseName = cleanTitle || String(id);
+      const idSuffix = cleanTitle ? `_${id}` : '';
+      const finalTargetPath = await atomicNoOverwriteLink(partFilePath, resolvedOutputDir, baseName, '.mp4', idSuffix);
 
       return {
         status: 'ok',

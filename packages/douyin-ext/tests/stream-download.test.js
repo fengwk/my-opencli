@@ -104,6 +104,71 @@ describe('douyin-ext stream-download (chunked header, error cleanup, atomic no-o
     expect(sanitizeFilename('...')).toBe('');
   });
 
+  // Regression: the real failing title produced a 260-byte basename despite its 80-character cap.
+  it('downloads the reported Chinese title within the filename byte limit and preserves its ID', async () => {
+    const id = '7651618528713871355';
+    const title = '故事板怎么用才不翻车？一条视频把实操细节全讲清楚！ 故事板最近大火，但很多人一用就翻车：单张图还行，连成视频就人物变、场景变、镜头关系也乱。 这期一帆老师不只讲';
+    expect(Buffer.byteLength(`${title.slice(0, 80)}_${id}.mp4`, 'utf8')).toBe(260);
+    const buffer = createDummyMp4Buffer();
+    const result = await downloadVideoToFile({
+      id,
+      title,
+      variant: { quality: '1080p', codec: 'h264', urls: [validCdnUrl] },
+      outputDir: testDir,
+      fetchFn: vi.fn(async () => ({
+        status: 200,
+        headers: new Headers({ 'content-type': 'video/mp4', 'content-length': String(buffer.length) }),
+        body: createChunkedStream([buffer]),
+      })),
+    });
+
+    const filename = path.basename(result.path);
+    expect(Buffer.byteLength(filename, 'utf8')).toBeLessThanOrEqual(255);
+    expect(filename.endsWith(`_${id}.mp4`)).toBe(true);
+    expect(result.title).toBe(title);
+    expect(fs.readFileSync(result.path)).toEqual(buffer);
+    expect(fs.readdirSync(testDir)).toEqual([filename]);
+  });
+
+  // UTF-16 slicing can split an emoji at the title cap; byte truncation must keep whole code points too.
+  it('keeps emoji whole at both title and final UTF-8 filename boundaries', async () => {
+    expect(sanitizeFilename(`${'a'.repeat(79)}😀尾`)).toBe(`${'a'.repeat(79)}😀`);
+    const idSuffix = '_12345678901234567890';
+    const source = path.join(testDir, 'emoji.part');
+    fs.writeFileSync(source, 'emoji payload');
+    const finalPath = await atomicNoOverwriteLink(
+      source, testDir, sanitizeFilename('😀'.repeat(100)), '.mp4', idSuffix
+    );
+    const filename = path.basename(finalPath);
+    expect(Buffer.byteLength(filename, 'utf8')).toBeLessThanOrEqual(255);
+    expect(filename.endsWith(`${idSuffix}.mp4`)).toBe(true);
+    expect(filename.slice(0, -`${idSuffix}.mp4`.length)).toBe('😀'.repeat(57));
+    expect(Buffer.from(filename, 'utf8').toString('utf8')).toBe(filename);
+    expect(fs.readFileSync(finalPath, 'utf8')).toBe('emoji payload');
+  });
+
+  // Re-budget the title when a collision counter grows from one to two digits, without overwriting.
+  it('reserves ID, extension and collision suffix bytes through counter rollover', async () => {
+    const title = '中'.repeat(80);
+    const idSuffix = '_12345678901234567890';
+    const paths = [];
+    for (let counter = 0; counter <= 10; counter += 1) {
+      const source = path.join(testDir, `source-${counter}.part`);
+      fs.writeFileSync(source, `content-${counter}`);
+      const finalPath = await atomicNoOverwriteLink(source, testDir, title, '.mp4', idSuffix);
+      const filename = path.basename(finalPath);
+      expect(Buffer.byteLength(filename, 'utf8')).toBeLessThanOrEqual(255);
+      expect(filename.endsWith(`${idSuffix}${counter ? ` (${counter})` : ''}.mp4`)).toBe(true);
+      expect(Buffer.from(filename, 'utf8').toString('utf8')).toBe(filename);
+      expect(fs.existsSync(source)).toBe(false);
+      paths.push(finalPath);
+    }
+    expect(new Set(paths).size).toBe(11);
+    for (const [counter, filename] of paths.entries()) {
+      expect(fs.readFileSync(filename, 'utf8')).toBe(`content-${counter}`);
+    }
+  });
+
   // Risk check: Hanging response body aborted by AbortSignal and temp dir cleaned up
   it('cleans up owned task directory when stream body stalls and times out', async () => {
     const hangingStream = new ReadableStream({
