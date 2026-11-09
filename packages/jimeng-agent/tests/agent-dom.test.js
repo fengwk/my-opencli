@@ -15,6 +15,7 @@ import {
   closeVisiblePreferenceTooltip,
   configureAutoVideoPreference,
   findSpacedNeedleRange,
+  getComposerClearState,
   inspectComposerAssetIdState,
   isMentionChipAppended,
   isStrictMentionCommit,
@@ -111,7 +112,7 @@ function createPreferencePage(options = {}) {
         <div role="combobox">Agent 模式</div>
         <button aria-expanded="${state.open}" ${state.dockAria ? `aria-label="${state.dockAria}"` : ''} data-control="dock">${state.dock}</button>
         ${state.imageDock ? '<button>图片</button>' : ''}
-        <div class="tiptap ProseMirror" contenteditable="true"></div>
+        <div class="tiptap ProseMirror" contenteditable="true">${state.editorHtml || ''}</div>
         <input type="file">
       </div>
       ${state.open ? `<div role="tooltip">${state.kind === 'legacy' ? legacyPanel : currentPanel}</div>` : ''}
@@ -130,6 +131,8 @@ function createPreferencePage(options = {}) {
       get className() { return this.node.attribs.class || ''; }
       get innerText() { return $(this.node).text(); }
       get textContent() { return $(this.node).text(); }
+      cloneNode() { return wrap($(this.node).clone()[0]); }
+      remove() { $(this.node).remove(); }
       get checked() { return Object.hasOwn(this.node.attribs, 'checked'); }
       get id() { return this.node.attribs.id || ''; }
       get accept() { return this.node.attribs.accept || ''; }
@@ -201,6 +204,40 @@ function createPreferencePage(options = {}) {
   };
   return { page, state, clicks, render };
 }
+
+describe('jimeng-agent/agent-dom — composer placeholders', () => {
+  const placeholder = '输入想法、剧本或上传参考，支持 / 使用技能，添加主体，和 Agent 一起创作';
+
+  it.each([
+    ['legacy', 'data-rich-placeholder="true"', 'rich-placeholder-widget'],
+    ['current', 'data-document-placeholder=""', 'document-placeholder-widget'],
+  ])('ignores the %s placeholder when checking that the composer is empty', async (_, attr, className) => {
+    // Replay the real DOM expression: the current placeholder caused the exact
+    // 36-character / one-false-mention failure despite an otherwise empty editor.
+    const { page } = createPreferencePage({
+      editorHtml: `<p ${attr}><span class="${className} ProseMirror-widget" contenteditable="false">${placeholder}</span><img class="ProseMirror-separator"><br class="ProseMirror-trailingBreak"></p>`,
+    });
+    expect(await getComposerClearState(page)).toEqual({
+      empty: true, textLength: 0, mentionCount: 0,
+    });
+    // Inspection must strip only the clone, leaving the live placeholder intact.
+    expect(await page.evaluate(`document.querySelector('.tiptap').innerText`)).toBe(placeholder);
+  });
+
+  it.each([
+    ['真实提示词', 5, 0],
+    ['<span class="node-reference-mention-tag" contenteditable="false">图片1</span>', 3, 1],
+  ])('still rejects real composer content: %s', async (content, textLength, mentionCount) => {
+    // The new paragraph attribute is not permission to drop the entire block:
+    // real prompt text and reference chips must still block a failed clear.
+    const { page } = createPreferencePage({
+      editorHtml: `<p data-document-placeholder=""><span class="document-placeholder-widget" contenteditable="false">${placeholder}</span>${content}</p>`,
+    });
+    expect(await getComposerClearState(page)).toEqual({
+      empty: false, textLength, mentionCount,
+    });
+  });
+});
 
 describe('jimeng-agent/agent-dom — Auto/video preference cards', () => {
   it('configures a re-rendering smart card, verifies it, and closes it without reopening', async () => {

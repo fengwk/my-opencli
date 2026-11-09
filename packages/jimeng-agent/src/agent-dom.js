@@ -1973,15 +1973,17 @@ async function clearComposer(page, phase = 'clear-initial') {
   );
 }
 
-async function getComposerClearState(page) {
+export async function getComposerClearState(page) {
   return page.evaluate(`(() => {
     ${buildPromptEditorLocatorScript()}
     const editor = findPromptEditor();
     if (!editor) return { empty: false, textLength: 0, mentionCount: 0 };
 
     const clone = editor.cloneNode(true);
+    // Current Jimeng uses a document-placeholder widget. Strip the widget,
+    // not its data-document-placeholder paragraph, which may hold real input.
     clone.querySelectorAll(
-      '[data-rich-placeholder], .rich-placeholder-widget, .ProseMirror-separator, .ProseMirror-trailingBreak',
+      '[data-rich-placeholder], .rich-placeholder-widget, .document-placeholder-widget, .ProseMirror-separator, .ProseMirror-trailingBreak',
     ).forEach((node) => node.remove());
     const text = (clone.innerText || clone.textContent || '')
       .replace(/[\\u00a0\\u200b\\s]+/g, '');
@@ -2833,7 +2835,7 @@ async function computePromptEditorEndClickPoint(page) {
       const node = walker.currentNode;
       const parent = node.parentElement;
       if (!node.nodeValue || !parent) continue;
-      if (parent.closest('.rich-placeholder-widget, [data-rich-placeholder], .node-reference-mention-tag')) continue;
+      if (parent.closest('.rich-placeholder-widget, .document-placeholder-widget, [data-rich-placeholder], .node-reference-mention-tag')) continue;
       lastText = node;
     }
 
@@ -3463,7 +3465,7 @@ async function collectContentCheckpointSnapshot(page) {
           mention.replaceWith(document.createTextNode(mention.innerText || mention.textContent || ''));
         });
         clone.querySelectorAll(
-          '[data-rich-placeholder], .rich-placeholder-widget, .ProseMirror-separator, .ProseMirror-trailingBreak',
+          '[data-rich-placeholder], .rich-placeholder-widget, .document-placeholder-widget, .ProseMirror-separator, .ProseMirror-trailingBreak',
         ).forEach((node) => node.remove());
         clone.querySelectorAll('br').forEach((br) => br.replaceWith(document.createTextNode('\\n')));
         return String(clone.textContent || '').split('\\n');
