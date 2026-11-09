@@ -22,10 +22,58 @@ function extFromMime(mime) {
 
 export function resolveImageOutputDir(value) {
   const raw = String(value || '').trim();
-  if (!raw) return path.join(os.homedir(), 'Pictures', 'chatgpt-agent');
+  if (!raw) {
+    // Preserve the existing WSL/Windows default as well as explicit --op.
+    if (shouldPreferWindowsPictures()) {
+      const winPics = guessWindowsPicturesDir();
+      if (winPics) {
+        const dir = path.join(winPics, 'chatgpt-agent');
+        try {
+          fs.mkdirSync(dir, { recursive: true });
+          return dir;
+        } catch { /* fall through */ }
+      }
+    }
+    return path.join(os.homedir(), 'Pictures', 'chatgpt-agent');
+  }
   if (raw === '~') return os.homedir();
   if (raw.startsWith('~/')) return path.join(os.homedir(), raw.slice(2));
   return path.resolve(raw);
+}
+
+function shouldPreferWindowsPictures() {
+  const force = String(process.env.OPENCLI_UPLOAD_STAGE || process.env.OPENCLI_IMAGE_DIR_WIN || '').trim();
+  if (force === '0' || force.toLowerCase() === 'false') return false;
+  if (force === '1' || force.toLowerCase() === 'true') return fs.existsSync('/mnt/c/Users');
+  if (process.env.WSL_DISTRO_NAME) return fs.existsSync('/mnt/c/Users');
+  try {
+    return /microsoft|wsl/i.test(fs.readFileSync('/proc/version', 'utf8')) && fs.existsSync('/mnt/c/Users');
+  } catch {
+    return false;
+  }
+}
+
+function guessWindowsPicturesDir() {
+  const usersRoot = '/mnt/c/Users';
+  if (!fs.existsSync(usersRoot)) return null;
+  const skip = new Set(['Public', 'Default', 'Default User', 'All Users', 'desktop.ini']);
+  const names = fs.readdirSync(usersRoot).filter((n) => {
+    try {
+      return !skip.has(n) && fs.statSync(path.join(usersRoot, n)).isDirectory();
+    } catch {
+      return false;
+    }
+  });
+  const prefer = process.env.WINDOWS_USER || process.env.USER || '';
+  const ordered = [
+    ...names.filter((n) => n.toLowerCase() === String(prefer).toLowerCase()),
+    ...names,
+  ];
+  for (const n of ordered) {
+    const pics = path.join(usersRoot, n, 'Pictures');
+    if (fs.existsSync(pics)) return pics;
+  }
+  return null;
 }
 
 function isAllowed(predicate) {
@@ -54,32 +102,41 @@ export function imageTargetsScript(messageIds) {
     };
     const tokenMatch = (scope) => (scope.getAttribute('data-chatgpt-search-message-ids') || '')
       .trim().split(/[\\s,]+/).some((token) => ids.has(token));
-    const main = document.querySelector('main') || document.querySelector('[role="main"]');
+    const mainSelector = document.querySelector('main') ? 'main' : '[role="main"]';
+    const main = document.querySelector(mainSelector);
     if (!main) return { targets: [], reason: 'main-not-found' };
     const galleries = [...main.querySelectorAll('[data-testid="generated-image-gallery"]')];
-    const railButtons = [...document.querySelectorAll('button[aria-label^="Show generated image "]')];
-    const previewButtons = [...document.querySelectorAll('button[data-testid="generated-image-preview"]')];
     const targets = [];
     const seenScopes = new Set();
     for (const gallery of galleries) {
       const scope = gallery.closest('[data-chatgpt-search-message-ids]');
-      if (!scope || !tokenMatch(scope) || scope.closest(
+      if (!scope || !tokenMatch(scope) || gallery.closest(
         'form[data-chatgpt-composer], [data-chatgpt-composer], [data-message-author-role="user"], [data-conversation-role="user"], [data-turn="user"], [data-chatgpt-search-unit-key*=":user"]'
       ) || !visible(gallery)) continue;
       if (seenScopes.has(scope)) continue;
       seenScopes.add(scope);
-      const rails = [...scope.querySelectorAll('button[aria-label^="Show generated image "]')]
+      const scopeKey = [...new Set((scope.getAttribute('data-chatgpt-search-message-ids') || '')
+        .trim().split(/[\\s,]+/).filter((token) => ids.has(token)))].sort().join(',');
+      const scopeSelector = mainSelector + ' [data-chatgpt-search-message-ids='
+        + JSON.stringify(scope.getAttribute('data-chatgpt-search-message-ids')) + ']';
+      if (document.querySelectorAll(scopeSelector).length !== 1
+          || [...scope.querySelectorAll('[data-testid="generated-image-gallery"]')]
+            .filter((other) => other.closest('[data-chatgpt-search-message-ids]') === scope).length !== 1) {
+        return { targets: [], reason: 'ambiguous-gallery-scope' };
+      }
+      const previewSelector = scopeSelector + ' button[data-testid="generated-image-preview"]:not([aria-hidden="true"])';
+      const rails = [...scope.querySelectorAll('[role="group"][aria-label="Generated images"] button[aria-label^="Show generated image "]')]
         .filter((button) => button.closest('[data-chatgpt-search-message-ids]') === scope && visible(button))
         .map((button) => ({ button, order: Number((button.getAttribute('aria-label') || '').match(/(\\d+)$/)?.[1]) }))
         .sort((a, b) => a.order - b.order);
       if (rails.length) {
         for (const rail of rails) {
-          const preview = [...gallery.querySelectorAll('button[data-testid="generated-image-preview"]')]
-            .find((button) => visible(button));
           targets.push({
+            key: scopeKey + ':' + rail.order,
             kind: 'rail',
-            globalIndex: railButtons.indexOf(rail.button),
-            previewGlobalIndex: previewButtons.indexOf(preview),
+            selector: scopeSelector + ' [role="group"][aria-label="Generated images"] button[aria-label='
+              + JSON.stringify(rail.button.getAttribute('aria-label')) + ']',
+            previewSelector,
             order: rail.order,
           });
         }
@@ -88,7 +145,7 @@ export function imageTargetsScript(messageIds) {
       const previews = [...gallery.querySelectorAll('button[data-testid="generated-image-preview"]')]
         .filter((button) => visible(button));
       if (previews.length === 1 && galleries.filter((other) => other.closest('[data-chatgpt-search-message-ids]') === scope).length === 1) {
-        targets.push({ kind: 'preview', globalIndex: previewButtons.indexOf(previews[0]), order: 1 });
+        targets.push({ key: scopeKey + ':1', kind: 'preview', previewSelector, order: 1 });
       } else {
         return { targets: [], reason: 'ambiguous-gallery-without-rail' };
       }
@@ -100,12 +157,14 @@ export function imageTargetsScript(messageIds) {
 export function selectedImageMatchesScript(messageIds, target) {
   return `(() => {
     const ids = new Set(${JSON.stringify(messageIds)});
-    const buttons = [...document.querySelectorAll('button[aria-label^="Show generated image "]')];
-    const rail = buttons[${target.globalIndex}];
+    const rail = document.querySelector(${JSON.stringify(target.selector)});
     if (!rail) return false;
     const scope = rail.closest('[data-chatgpt-search-message-ids]');
     const tokens = (scope?.getAttribute('data-chatgpt-search-message-ids') || '').trim().split(/[\\s,]+/);
     if (!tokens.some((token) => ids.has(token))) return false;
+    const scopeKey = [...new Set(tokens.filter((token) => ids.has(token)))].sort().join(',');
+    const order = Number((rail.getAttribute('aria-label') || '').match(/(\\d+)$/)?.[1]);
+    if (${JSON.stringify(target.key || '')} && scopeKey + ':' + order !== ${JSON.stringify(target.key || '')}) return false;
     if (rail.getAttribute('aria-pressed') !== 'true') return false;
     const source = rail.querySelector('img')?.currentSrc || rail.querySelector('img')?.src || '';
     if (!source) return false;
@@ -126,27 +185,31 @@ function dialogStateScript() {
       const s = getComputedStyle(el);
       return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
     };
-    const allTriggers = [...document.querySelectorAll('[aria-label="Download"]')];
     const dialog = [...document.querySelectorAll('[role="dialog"]')]
       .find((el) => visible(el) && el.querySelector('[aria-label="Download"]'));
     const trigger = dialog?.querySelector('[aria-label="Download"]');
-    const menu = [...document.querySelectorAll('[role="menu"]')].find(visible);
+    const menu = trigger?.getAttribute('aria-expanded') === 'true'
+      ? [...document.querySelectorAll('[role="menu"]')].find(visible) : null;
     const items = menu ? [...menu.querySelectorAll('[role="menuitem"]')].map((el) => ({
-      index: [...document.querySelectorAll('[role="menuitem"]')].indexOf(el),
+      index: [...menu.querySelectorAll('[role="menuitem"]')].indexOf(el),
       text: (el.innerText || el.textContent || '').trim(),
       visible: visible(el),
     })) : [];
     const closeButtons = dialog ? [...dialog.querySelectorAll('button')].filter((button) => {
       const label = (button.getAttribute('aria-label') || '').trim();
-      return visible(button) && (label === 'Close' || label === '关闭' || button.getAttribute('data-testid') === 'close-button');
+      return visible(button) && (label === 'Close viewer' || label === 'Close' || label === '关闭' || button.getAttribute('data-testid') === 'close-button');
     }) : [];
+    const dialogSelector = dialog?.id ? '[role="dialog"][id=' + JSON.stringify(dialog.id) + ']' : '[role="dialog"]';
+    const close = closeButtons.length === 1 ? closeButtons[0] : null;
     return {
       dialog: !!dialog,
-      triggerIndex: trigger ? allTriggers.indexOf(trigger) : -1,
+      triggerSelector: trigger ? dialogSelector + ' [aria-label="Download"]' : '',
       menu: !!menu,
+      menuSelector: menu?.id ? '[role="menu"][id=' + JSON.stringify(menu.id) + '] [role="menuitem"]' : '[role="menu"] [role="menuitem"]',
       items,
-      closeIndex: closeButtons.length === 1
-        ? [...document.querySelectorAll('button')].indexOf(closeButtons[0]) : -1,
+      closeSelector: close ? dialogSelector + (close.getAttribute('aria-label')
+        ? ' button[aria-label=' + JSON.stringify(close.getAttribute('aria-label')) + ']'
+        : ' button[data-testid="close-button"]') : '',
     };
   })()`;
 }
@@ -194,6 +257,7 @@ async function collectReceipt(receipt, outputDir, index) {
   }
   if (!isImageBuffer(bytes)) throw new Error('download-file-not-image');
   return {
+    ...raw,
     kind: 'image-export',
     method: 'chrome-download',
     index,
@@ -223,12 +287,13 @@ async function downloadOne(page, target, messageIds, index, outputDir, remaining
   });
   const actionAllowed = () => isAllowed(canContinue) && remainingMs() > 0;
   let viewerOpened = false;
+  let downloadSubmitted = false;
   let waiter = null;
   try {
     if (!actionAllowed()) return failed('image-download-time-budget-exhausted');
     if (target.kind === 'rail') {
-      const click = await page.click('button[aria-label^="Show generated image "]', { nth: target.globalIndex });
-      if (!click || click.matches_n === 0) return failed('image-rail-selection-click-failed');
+      const click = await page.click(target.selector);
+      if (!(click?.matches_n > 0)) return failed('image-rail-selection-click-failed');
       let selected = false;
       for (let attempt = 0; attempt < 20 && actionAllowed(); attempt += 1) {
         selected = await evaluate(page, selectedImageMatchesScript(messageIds, target));
@@ -239,24 +304,21 @@ async function downloadOne(page, target, messageIds, index, outputDir, remaining
     }
 
     if (!actionAllowed()) return failed('image-download-time-budget-exhausted');
-    const preview = await page.click(
-      'button[data-testid="generated-image-preview"]',
-      { nth: target.kind === 'rail' ? target.previewGlobalIndex : target.globalIndex },
-    );
-    if (!preview || preview.matches_n === 0) return failed('image-preview-click-failed');
+    const preview = await page.click(target.previewSelector);
+    if (!(preview?.matches_n > 0)) return failed('image-preview-click-failed');
     viewerOpened = true;
 
     let state = null;
     for (let attempt = 0; attempt < 20 && actionAllowed(); attempt += 1) {
       state = await evaluate(page, dialogStateScript());
-      if (state?.dialog && state.triggerIndex >= 0) break;
+      if (state?.dialog && state.triggerSelector) break;
       await page.sleep(Math.min(0.2, remainingMs() / 1000));
     }
-    if (!state?.dialog || state.triggerIndex < 0) return failed('image-viewer-not-open');
+    if (!state?.dialog || !state.triggerSelector) return failed('image-viewer-not-open');
 
     if (!state.menu) {
       if (!actionAllowed()) return failed('image-download-time-budget-exhausted');
-      await page.focus('[aria-label="Download"]', { nth: state.triggerIndex });
+      await page.focus(state.triggerSelector);
       await page.pressKey('Enter');
       state = await evaluate(page, dialogStateScript());
     }
@@ -270,16 +332,17 @@ async function downloadOne(page, target, messageIds, index, outputDir, remaining
     waiter = Promise.resolve(waiter).then((receipt) => ({ receipt }), (error) => ({ error }));
     let clickResult;
     try {
-      clickResult = await page.click('[role="menuitem"]', { nth: matches[0].index });
+      downloadSubmitted = true;
+      clickResult = await page.click(state.menuSelector, { nth: matches[0].index });
     } catch (error) {
       await waiter;
       waiter = null;
       return failed(`image-download-click-failed: ${error?.message || error}`, true);
     }
-    if (!clickResult) {
+    if (!(clickResult?.matches_n > 0)) {
       await waiter;
       waiter = null;
-      return failed('image-download-click-failed');
+      return failed('image-download-click-failed', true);
     }
     const waited = await waiter;
     waiter = null;
@@ -290,12 +353,20 @@ async function downloadOne(page, target, messageIds, index, outputDir, remaining
     return await collectReceipt(waited.receipt, outputDir, index);
   } catch (error) {
     if (waiter) await waiter;
-    return failed(error?.message || String(error));
+    return failed(error?.message || String(error), downloadSubmitted);
   } finally {
     if (viewerOpened) {
       try {
         const state = await evaluate(page, dialogStateScript());
-        if (state?.closeIndex >= 0) await page.click('button', { nth: state.closeIndex });
+        if (state?.closeSelector) {
+          await page.click(state.closeSelector);
+          // Wait for the viewer to release the underlying gallery before the
+          // next image is selected; a completed file survives cleanup failure.
+          for (let attempt = 0; attempt < 20 && actionAllowed(); attempt += 1) {
+            if ((await evaluate(page, dialogStateScript()))?.dialog !== true) break;
+            await page.sleep(Math.min(0.2, remainingMs() / 1000));
+          }
+        }
       } catch { /* retain the completed receipt even if the viewer cannot close */ }
     }
   }
@@ -312,9 +383,10 @@ export async function exportNewImagesLikeOfficial(page, opts = {}) {
     : [];
   const expectedCount = Math.max(1, Number(opts.expectedCount) || 1);
   const outputDir = resolveImageOutputDir(opts.outputDir);
+  const deadline = Date.now() + (opts.timeoutMs ?? 60_000);
   const remainingMs = typeof opts.remainingMs === 'function'
     ? opts.remainingMs
-    : () => Number.MAX_SAFE_INTEGER;
+    : () => Math.max(0, deadline - Date.now());
   const continuePredicate = opts.canContinue;
   fs.mkdirSync(outputDir, { recursive: true });
   if (!ids.length) {
@@ -326,30 +398,47 @@ export async function exportNewImagesLikeOfficial(page, opts = {}) {
   const runAttempt = async () => {
     let discovery;
     try {
-      discovery = await evaluate(page, imageTargetsScript(ids));
+      // Protocol completion can precede the gallery controls mounting.
+      for (let attempt = 0; attempt < 12; attempt += 1) {
+        if (!isAllowed(continuePredicate) || remainingMs() <= 0) break;
+        discovery = await evaluate(page, imageTargetsScript(ids));
+        if (discovery?.targets?.length >= expectedCount) break;
+        if (attempt < 11) await page.sleep(Math.min(0.5, remainingMs() / 1000));
+      }
     } catch (error) {
       return [{ kind: 'image-export', method: 'chrome-download', downloaded: false, error: `image-target-discovery-failed: ${error?.message || error}` }];
     }
     const targets = Array.isArray(discovery?.targets) ? discovery.targets : [];
+    if (targets.length > expectedCount || new Set(targets.map((t) => t.key)).size !== targets.length) {
+      return [{ kind: 'image-export', method: 'chrome-download', downloaded: false, error: 'ambiguous-image-targets' }];
+    }
+    const keys = new Set(targets.map((target) => target.key));
+    if ([...successful.keys()].some((key) => !keys.has(key))) {
+      // A remount may reorder indices, but must not replace already completed
+      // image identities and then count newly discovered targets as extra images.
+      return [{ kind: 'image-export', method: 'chrome-download', downloaded: false, error: 'image-target-identity-changed' }];
+    }
     const results = [];
     for (let index = 0; index < Math.min(expectedCount, targets.length); index += 1) {
-      if (successful.has(index)) continue;
+      const key = targets[index].key;
+      if (successful.has(key)) {
+        successful.get(key).index = index;
+        continue;
+      }
       if (!isAllowed(continuePredicate) || remainingMs() <= 0) {
         results.push({ kind: 'image-export', method: 'chrome-download', index, downloaded: false, error: 'image-download-time-budget-exhausted' });
         continue;
       }
       const result = await downloadOne(page, targets[index], ids, index, outputDir, remainingMs, continuePredicate);
       results.push(result);
-      if (result.downloaded) successful.set(index, result);
+      if (result.downloaded) successful.set(key, result);
       if (result.uncertain) retryBlocked = true;
       if (index < Math.min(expectedCount, targets.length) - 1 && isAllowed(continuePredicate) && remainingMs() > 0) {
         await page.sleep(Math.min(0.4, remainingMs() / 1000));
       }
     }
     for (let index = targets.length; index < expectedCount; index += 1) {
-      if (!successful.has(index)) {
-        results.push({ kind: 'image-export', method: 'chrome-download', index, downloaded: false, error: discovery?.reason || 'image-target-unavailable' });
-      }
+      results.push({ kind: 'image-export', method: 'chrome-download', index, downloaded: false, error: discovery?.reason || 'image-target-unavailable' });
     }
     return results;
   };

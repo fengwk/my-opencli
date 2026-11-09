@@ -1128,19 +1128,21 @@ describe('DOM Regression: Native generated-image target discovery', () => {
   it('discovers three gallery images in side-rail order', () => {
     const { runScript } = createDomSandbox(`<main>${multiImageFixture}</main>`);
     const result = runScript(imageTargetsScript(['msg-current']));
-    expect(result.targets.map(({ kind, globalIndex, order }) => ({ kind, globalIndex, order }))).toEqual([
-      { kind: 'rail', globalIndex: 0, order: 1 },
-      { kind: 'rail', globalIndex: 1, order: 2 },
-      { kind: 'rail', globalIndex: 2, order: 3 },
+    expect(result.targets.map(({ kind, order }) => ({ kind, order }))).toEqual([
+      { kind: 'rail', order: 1 },
+      { kind: 'rail', order: 2 },
+      { kind: 'rail', order: 3 },
     ]);
+    expect(result.targets.every((target) => target.selector.includes('data-chatgpt-search-message-ids="msg-current msg-current msg-current"'))).toBe(true);
   });
 
   // The rail's selected state and page-owned image source must match before
   // the viewer opens; an unselected historical image is not sufficient.
   it('confirms that only the selected rail source matches the preview', () => {
     const { runScript } = createDomSandbox(`<main>${multiImageFixture}</main>`);
-    expect(runScript(selectedImageMatchesScript(['msg-current'], { globalIndex: 1 }))).toBe(true);
-    expect(runScript(selectedImageMatchesScript(['msg-current'], { globalIndex: 0 }))).toBe(false);
+    const { targets } = runScript(imageTargetsScript(['msg-current']));
+    expect(runScript(selectedImageMatchesScript(['msg-current'], targets[1]))).toBe(true);
+    expect(runScript(selectedImageMatchesScript(['msg-current'], targets[0]))).toBe(false);
   });
 
   // Historical and user scopes, plus a matching broad ancestor, cannot widen
@@ -1149,7 +1151,7 @@ describe('DOM Regression: Native generated-image target discovery', () => {
     const history = multiImageFixture.replaceAll('msg-current', 'msg-history')
       .replaceAll('/current-', '/history-');
     const user = multiImageFixture.replace('<section ', '<section data-conversation-role="user" ')
-      .replaceAll('/current-', '/user-');
+      .replaceAll('/current-', '/user-').replaceAll('msg-current', 'msg-user');
     const nested = '<div data-chatgpt-search-message-ids="msg-current">'
       + '<div data-chatgpt-search-message-ids="other"><div data-testid="generated-image-gallery">'
       + '<button data-testid="generated-image-preview"></button></div></div></div>';
@@ -1162,8 +1164,26 @@ describe('DOM Regression: Native generated-image target discovery', () => {
       + '<div data-testid="generated-image-gallery"><button data-testid="generated-image-preview"></button>'
       + '</div></div></main>';
     expect(createDomSandbox(html).runScript(imageTargetsScript(['msg-one'])).targets)
-      .toEqual([{ kind: 'preview', globalIndex: 0, order: 1 }]);
+      .toMatchObject([{ key: 'msg-one:1', kind: 'preview', order: 1 }]);
     expect(createDomSandbox(html).runScript(imageTargetsScript([])).targets).toEqual([]);
     expect(createDomSandbox(html).runScript(imageTargetsScript(['missing'])).targets).toEqual([]);
+  });
+
+  // A broad matching scope does not authorize a gallery nested in a user turn.
+  it('excludes user galleries nested below a matching message scope', () => {
+    const html = '<main><div data-chatgpt-search-message-ids="msg-one">'
+      + '<div data-conversation-role="user"><div data-testid="generated-image-gallery">'
+      + '<button data-testid="generated-image-preview"></button></div></div></div></main>';
+    expect(createDomSandbox(html).runScript(imageTargetsScript(['msg-one'])).targets).toEqual([]);
+  });
+
+  // A duplicate DOM scope cannot be safely addressed by the same semantic CSS;
+  // stop rather than choose a current/history/user candidate by array position.
+  it('fails closed when another element duplicates the exact message scope', () => {
+    const user = multiImageFixture.replace('<section ', '<section data-conversation-role="user" ');
+    const { runScript } = createDomSandbox(`<main>${multiImageFixture}${user}</main>`);
+    expect(runScript(imageTargetsScript(['msg-current']))).toMatchObject({
+      targets: [], reason: 'ambiguous-gallery-scope',
+    });
   });
 });

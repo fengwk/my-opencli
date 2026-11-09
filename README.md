@@ -2,6 +2,14 @@
 
 Personal OpenCLI plugins, installed via the official plugin mechanism.
 
+## v0.1.72
+
+- Align all five plugin versions at `0.1.72`; only ChatGPT image download logic changes.
+- Replace generated-image Blob/Base64 export with real browser file downloads: select each current-turn gallery image, open its viewer, choose `Download` → `Download image`, wait for Chrome completion and collect the receipt-proven file into `--op`. Image bytes no longer traverse the daemon request or response. No Base64 fallback and no daemon size-limit increase.
+- Use protocol message IDs and ordered gallery controls; never enumerate the viewer's history-wide image rail as output. Preserve completed files on partial failure and allow one bounded conversation remount without resubmitting a prompt.
+- Require forked OpenCLI `2.0.2-fengwk.6` or later for the ancestor-overlay click repair. Older versions can report a successful click without activating the button; update the CLI as well as the persisted Hub plugin. Browser Bridge `1.0.39` is unchanged.
+- Live-verified three native Chrome download receipts and three distinct `1672×941` PNGs (`2,656,621`, `2,416,232`, `2,731,298` bytes), copied into the managed output directory without generating new images.
+
 ## v0.1.71
 
 - Align all five plugin versions at `0.1.71`; retain the Jimeng fixes through `v0.1.70`. Only ChatGPT image-export logic changes in this release.

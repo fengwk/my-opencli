@@ -70,17 +70,19 @@ non-invasively through CDP — the page's own `fetch`/XHR are never patched.
 ### Hub file boundary
 
 - Input: the Skill uploads attachments with Hub multipart resources first. Execution argv references `/resources/...`; Hub resolves it to an execution-host path. `uploadComposerFiles` passes that path to `page.setFileInput`, and Chrome reads the file through native CDP. Do not embed attachment bytes in command JSON.
-- Output: the plugin writes artifacts into `--op`, which Hub injects as a per-execution directory, then Hub scans it and returns resource download URLs. Both generated images and ordinary files use Chrome's native download path and are copied into `--op`; image bytes are not sent through Hub command argv or responses.
+- Output: the plugin writes artifacts into `--op`, which Hub injects as a per-execution directory, then Hub scans it and returns resource download URLs. Both generated images and ordinary files use Chrome's native download path and are copied into `--op`; image bytes are not sent through command argv or daemon control responses. Clients obtain those files through Hub resource HTTP downloads.
 - The Hub/CLI/Chrome deployment needs a shared filesystem for path-based upload and native-download collection. A browser on another host needs an explicit file-transfer facility; passing the caller's local path is not enough.
 
 ## Requirements
 
 | Host | Minimum | Current verified release |
 |------|---------|--------------------------|
-| `@jackwener/opencli` (fork) | `>=1.8.8-fengwk.3` | `2.0.2-fengwk.2` (`fork-v2.0.2-fengwk.2`) |
-| Browser Bridge / Extension | **`>=1.0.35`** | paired Extension **`1.0.37`** |
+| `@jackwener/opencli` (fork) | `>=2.0.2-fengwk.6` | `2.0.2-fengwk.6` (`fork-v2.0.2-fengwk.6`) |
+| Browser Bridge / Extension | **`>=1.0.35`** | published pair **`1.0.39`**; native downloads also verified with **`1.0.38`** |
 
 Needs fork APIs: `page.startSseCapture` / `page.readSseCapture` (HTTP stream capture) and `page.startWsCapture` / `page.readWsCapture` (WebSocket capture), hardened `page.setFileInput`, and optional `Arg.repeatable` for multi `--file`. The CLI/CLI-extension pair must both ship HTTP stream capture: the extension arms it per request and the CLI drains it, so a mismatched pair fails the turn before the prompt is sent.
+
+Native gallery downloads also require the CLI `2.0.2-fengwk.6` click hit-test fix: ordinary ancestor pseudo-overlays must not count as proof that native input reaches a child button. Update the installed CLI before this plugin; publishing releases alone does not update Hub's persisted plugin tree.
 
 Also depends on the host package’s built-in `clis/chatgpt/utils.js`. `host-chatgpt.js` resolves it through the public `@jackwener/opencli/registry` export, so it works with the host symlink created by the official plugin installer even when package metadata is not exported.
 

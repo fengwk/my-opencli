@@ -1,6 +1,6 @@
 {
   "name": "opencli-plugin-douyin-ext",
-  "version": "0.1.71",
+  "version": "0.1.72",
   "private": true,
   "type": "module",
   "description": "Douyin video downloads and user cursor pagination via in-page read-only metadata fetch and local streaming MP4 download",
