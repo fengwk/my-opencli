@@ -2,6 +2,14 @@
 
 Personal OpenCLI plugins, installed via the official plugin mechanism.
 
+## v0.1.69
+
+- Align all five plugin versions at `0.1.69`; only `jimeng-agent` page logic changes.
+- Fix rich-reference insertion falsely failing after a successful picker click: current Jimeng uses `.node-referenceMentionTag` instead of `.node-reference-mention-tag`. Recognize both chip roots consistently in commit checks, caret targeting, leftover-query cleanup, diagnostics and content checkpoints.
+- Preserve exact mention order/count and raw-query/menu checks. Do not replace chip matching with generic non-editable-node matching, which also includes placeholder widgets.
+- Live-verified the complete V01 draft with six image references and its full prompt: content checkpoint passed with zero retries. This verification used `submit=0`; no generation was submitted and formal submission on Hub remains unverified.
+- Update installed plugins explicitly on Hub; publishing this release does not update persisted plugin code.
+
 ## v0.1.68
 
 - Align all five plugin versions at `0.1.68`; only `jimeng-agent` changes its page logic this release.
