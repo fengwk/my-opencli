@@ -123,10 +123,10 @@ describe('jimeng-agent canvas-v0 ask contract', () => {
     duration: 5,
   };
 
-  // Legacy canvas must inherit the emphasized header and blank-line layout.
+  // Legacy canvas shares the legacy-model notice and exact header layout.
   it.each([
-    ['seedance2.0', '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0`，绝对禁止使用 `seedance2.0_vip` 或其它任何模型标识，模型标识必须设定为 `seedance2.0`'],
-    ['seedance2.0fast', '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0fast`，绝对禁止使用 `seedance2.0fast_vip` 或其它任何模型标识，模型标识必须设定为 `seedance2.0fast`'],
+    ['seedance2.0', '你要使用 Seedance2.0 模型，模型标识参数必须严格设置为 `seedance2.0`，绝对禁止使用 `seedance2.0_vip` 或其它任何模型标识，模型标识必须设定为 `seedance2.0`，此模型为旧版本兼容模型，可能无法在最新模型列表查找到，但 `seedance2.0` 为实际可用模型，你只需要原样传入即可。'],
+    ['seedance2.0fast', '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0fast`，绝对禁止使用 `seedance2.0fast_vip` 或其它任何模型标识，模型标识必须设定为 `seedance2.0fast`，此模型为旧版本兼容模型，可能无法在最新模型列表查找到，但 `seedance2.0fast` 为实际可用模型，你只需要原样传入即可。'],
   ])('uses the explicit %s model identifier in its Agent header', (modelVersion, prefix) => {
     const canonical = normalizeCanvasV0AskArgs({ ...base, model_version: modelVersion });
     expect(canonical.modelVersion).toBe(modelVersion);

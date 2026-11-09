@@ -657,7 +657,8 @@ describe('jimeng-agent/contract — mention extraction', () => {
 });
 
 describe('jimeng-agent/contract — agentPrompt assembly', () => {
-  // Exact headers lock model identifiers and the blank-line-separated layout.
+  // Exact headers lock the matching legacy-model compatibility notice, model
+  // identifiers and blank-line-separated layout without changing the body.
   it('assembles seedance2.0 header with separated asset-id line and no user prompt', () => {
     const out = normalizeAskArgs(baseArgs({
       model_version: 'seedance2.0',
@@ -665,7 +666,7 @@ describe('jimeng-agent/contract — agentPrompt assembly', () => {
     }));
     expect(out.assetId).toMatch(/^[0-9a-f]{16}$/);
     expect(out.agentPrompt).toBe(
-      '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0`，绝对禁止使用 `seedance2.0_vip` 或其它任何模型标识，模型标识必须设定为 `seedance2.0`\n\n'
+      '你要使用 Seedance2.0 模型，模型标识参数必须严格设置为 `seedance2.0`，绝对禁止使用 `seedance2.0_vip` 或其它任何模型标识，模型标识必须设定为 `seedance2.0`，此模型为旧版本兼容模型，可能无法在最新模型列表查找到，但 `seedance2.0` 为实际可用模型，你只需要原样传入即可。\n\n'
       + '你必须严格按照下面的提示词内容生成1个16:9的5s视频\n\n'
       + `资产编号：${out.assetId}`,
     );
@@ -676,10 +677,10 @@ describe('jimeng-agent/contract — agentPrompt assembly', () => {
       model_version: 'seedance2.0fast',
     }));
     expect(out.agentPrompt.startsWith(
-      '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0fast`，绝对禁止使用 `seedance2.0fast_vip` 或其它任何模型标识，模型标识必须设定为 `seedance2.0fast`\n\n',
+      '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0fast`，绝对禁止使用 `seedance2.0fast_vip` 或其它任何模型标识，模型标识必须设定为 `seedance2.0fast`，此模型为旧版本兼容模型，可能无法在最新模型列表查找到，但 `seedance2.0fast` 为实际可用模型，你只需要原样传入即可。\n\n',
     )).toBe(true);
     expect(out.agentPrompt).toBe(
-      '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0fast`，绝对禁止使用 `seedance2.0fast_vip` 或其它任何模型标识，模型标识必须设定为 `seedance2.0fast`\n\n'
+      '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0fast`，绝对禁止使用 `seedance2.0fast_vip` 或其它任何模型标识，模型标识必须设定为 `seedance2.0fast`，此模型为旧版本兼容模型，可能无法在最新模型列表查找到，但 `seedance2.0fast` 为实际可用模型，你只需要原样传入即可。\n\n'
       + '你必须严格按照下面的提示词内容生成1个16:9的5s视频\n\n'
       + `资产编号：${out.assetId}`,
     );
@@ -736,7 +737,7 @@ describe('jimeng-agent/contract — agentPrompt assembly', () => {
       prompt: 'show a cat playing piano',
     }));
     expect(out.agentPrompt).toBe(
-      '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0`，绝对禁止使用 `seedance2.0_vip` 或其它任何模型标识，模型标识必须设定为 `seedance2.0`\n\n'
+      '你要使用 Seedance2.0 模型，模型标识参数必须严格设置为 `seedance2.0`，绝对禁止使用 `seedance2.0_vip` 或其它任何模型标识，模型标识必须设定为 `seedance2.0`，此模型为旧版本兼容模型，可能无法在最新模型列表查找到，但 `seedance2.0` 为实际可用模型，你只需要原样传入即可。\n\n'
       + '你必须严格按照下面的提示词内容生成1个16:9的5s视频\n\n'
       + `资产编号：${out.assetId}\n\n`
       + '---\n\n'
@@ -748,7 +749,7 @@ describe('jimeng-agent/contract — agentPrompt assembly', () => {
   it('always keeps the asset-id line even when the prompt is empty', () => {
     const out = normalizeAskArgs(baseArgs({ prompt: '' }));
     expect(out.agentPrompt).toBe(
-      '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0`，绝对禁止使用 `seedance2.0_vip` 或其它任何模型标识，模型标识必须设定为 `seedance2.0`\n\n'
+      '你要使用 Seedance2.0 模型，模型标识参数必须严格设置为 `seedance2.0`，绝对禁止使用 `seedance2.0_vip` 或其它任何模型标识，模型标识必须设定为 `seedance2.0`，此模型为旧版本兼容模型，可能无法在最新模型列表查找到，但 `seedance2.0` 为实际可用模型，你只需要原样传入即可。\n\n'
       + '你必须严格按照下面的提示词内容生成1个16:9的5s视频\n\n'
       + `资产编号：${out.assetId}`,
     );
@@ -764,7 +765,7 @@ describe('jimeng-agent/contract — agentPrompt assembly', () => {
       prompt,
     }));
     expect(out.agentPrompt).toBe(
-      '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0fast`，绝对禁止使用 `seedance2.0fast_vip` 或其它任何模型标识，模型标识必须设定为 `seedance2.0fast`\n\n'
+      '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0fast`，绝对禁止使用 `seedance2.0fast_vip` 或其它任何模型标识，模型标识必须设定为 `seedance2.0fast`，此模型为旧版本兼容模型，可能无法在最新模型列表查找到，但 `seedance2.0fast` 为实际可用模型，你只需要原样传入即可。\n\n'
       + '你必须严格按照下面的提示词内容生成1个16:9的15s视频\n\n'
       + `资产编号：${out.assetId}\n\n---\n\n${prompt}`,
     );

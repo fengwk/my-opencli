@@ -95,8 +95,8 @@ const MAX_DURATION = MAX_REFERENCE_DURATION_SECONDS;
  * generation instructions are separated by a blank line.
  */
 const MODEL_PREFIXES = Object.freeze({
-  'seedance2.0': '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0`，绝对禁止使用 `seedance2.0_vip` 或其它任何模型标识，模型标识必须设定为 `seedance2.0`',
-  'seedance2.0fast': '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0fast`，绝对禁止使用 `seedance2.0fast_vip` 或其它任何模型标识，模型标识必须设定为 `seedance2.0fast`',
+  'seedance2.0': '你要使用 Seedance2.0 模型，模型标识参数必须严格设置为 `seedance2.0`，绝对禁止使用 `seedance2.0_vip` 或其它任何模型标识，模型标识必须设定为 `seedance2.0`，此模型为旧版本兼容模型，可能无法在最新模型列表查找到，但 `seedance2.0` 为实际可用模型，你只需要原样传入即可。',
+  'seedance2.0fast': '你要使用 Seedance2.0 Fast 模型，模型标识参数必须严格设置为 `seedance2.0fast`，绝对禁止使用 `seedance2.0fast_vip` 或其它任何模型标识，模型标识必须设定为 `seedance2.0fast`，此模型为旧版本兼容模型，可能无法在最新模型列表查找到，但 `seedance2.0fast` 为实际可用模型，你只需要原样传入即可。',
   'seedance2.0_vip': '(必须使用 Seedance2.0 VIP 模型）',
   'seedance2.0fast_vip': '(必须使用 Seedance2.0 Fast VIP 模型）',
   'seedance2.0mini': '(必须使用 Seedance2.0 Mini 模型）',
