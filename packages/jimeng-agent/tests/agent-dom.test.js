@@ -13,9 +13,11 @@ import {
   buildWorkspaceUrl,
   chooseRetryPlan,
   closeVisiblePreferenceTooltip,
+  collectContentCheckpointSnapshot,
   configureAutoVideoPreference,
   findSpacedNeedleRange,
   getComposerClearState,
+  getMentionState,
   inspectComposerAssetIdState,
   isMentionChipAppended,
   isStrictMentionCommit,
@@ -133,6 +135,7 @@ function createPreferencePage(options = {}) {
       get textContent() { return $(this.node).text(); }
       cloneNode() { return wrap($(this.node).clone()[0]); }
       remove() { $(this.node).remove(); }
+      replaceWith(node) { $(this.node).replaceWith(node); }
       get checked() { return Object.hasOwn(this.node.attribs, 'checked'); }
       get id() { return this.node.attribs.id || ''; }
       get accept() { return this.node.attribs.accept || ''; }
@@ -157,6 +160,7 @@ function createPreferencePage(options = {}) {
       activeElement: null,
       querySelectorAll: (selector) => $(selector).toArray().map(wrap),
       querySelector: (selector) => $(selector).toArray().map(wrap)[0] || null,
+      createTextNode: (text) => ({ type: 'text', data: text }),
     };
     window = {
       innerHeight: 1000,
@@ -236,6 +240,66 @@ describe('jimeng-agent/agent-dom — composer placeholders', () => {
     expect(await getComposerClearState(page)).toEqual({
       empty: false, textLength, mentionCount,
     });
+  });
+});
+
+describe('jimeng-agent/agent-dom — rich reference chip DOM', () => {
+  // Current TipTap node-view wrapper, captured after a real 图片1 picker click.
+  // Keep nested thumbnail/label elements: counting generic non-editable nodes
+  // would mistake placeholders or nested wrappers for extra reference chips.
+  // Use an inline thumbnail wrapper so parsing fixture HTML does not auto-close
+  // the <p>; the live node-view mounts its thumbnail <div> via DOM operations.
+  const chip = (className, label) => `<span class="react-renderer ${className}" contenteditable="false" draggable="true"><span data-node-view-wrapper="" style="white-space: normal;"><span data-drag-handle="true" class="tag-HAOZ2L"><span class="icon-Kf_fri"><span class="thumbnail-GhTKTF"><img draggable="false"></span></span><span class="label-MDLUtG">${label}</span></span></span></span>`;
+  const placeholder = '<span class="document-placeholder-widget" contenteditable="false">占位</span>';
+
+  it.each(['node-reference-mention-tag', 'node-referenceMentionTag'])(
+    'observes one ordered commit for %s without counting placeholder or arbitrary non-editable nodes',
+    async (className) => {
+      const { page, state, render } = createPreferencePage({
+        editorHtml: `<p>${placeholder}<span contenteditable="false">非引用</span></p>`,
+      });
+      const before = await getMentionState(page, assets[0]);
+      expect(before.mentionLabels).toEqual([]);
+      state.editorHtml = `<p>${chip(className, '图片1')}${placeholder}<span contenteditable="false">非引用</span></p>`;
+      render();
+      const after = await getMentionState(page, assets[0]);
+      expect(after).toEqual({
+        hasRaw: false, matchingMentionCount: 1, menuVisible: false, mentionLabels: ['图片1'],
+      });
+      expect(isStrictMentionCommit(before, after, { status: 'clicked' }, assets[0], 1)).toBe(true);
+    },
+  );
+
+  it('keeps mixed legacy/current repeated references ordered in both commit and content checkpoints', async () => {
+    // Reading a nested chip more than once or deduplicating repeated labels
+    // breaks the exact @ sequence required by V01's repeated references.
+    const { page } = createPreferencePage({
+      editorHtml: `<p>角色${chip('node-reference-mention-tag', '图片1')}与${chip('node-referenceMentionTag', '图片2')}</p><p>再次${chip('node-referenceMentionTag', '图片1')}<br>结尾</p>`,
+    });
+    const state = await getMentionState(page, assets[0]);
+    expect(state.mentionLabels).toEqual(['图片1', '图片2', '图片1']);
+    expect(state.matchingMentionCount).toBe(2);
+    const snapshot = await collectContentCheckpointSnapshot(page);
+    expect(snapshot.observedMentionLabels).toEqual(state.mentionLabels);
+    expect(snapshot.mentionCount).toBe(3);
+    expect(snapshot.editorLines).toEqual(['角色图片1与图片2', '再次图片1', '结尾']);
+    expect(snapshot.rawAt).toBe(false);
+  });
+
+  it('still rejects raw @ queries, wrong labels and duplicate appends from the current DOM', async () => {
+    const { page, state, render } = createPreferencePage();
+    const before = await getMentionState(page, assets[0]);
+    for (const content of [
+      `${chip('node-referenceMentionTag', '图片1')}@图片1`,
+      chip('node-referenceMentionTag', '图片10'),
+      chip('node-referenceMentionTag', '图片1').repeat(2),
+    ]) {
+      state.editorHtml = `<p>${content}</p>`;
+      render();
+      expect(isStrictMentionCommit(
+        before, await getMentionState(page, assets[0]), { status: 'clicked' }, assets[0], 1,
+      )).toBe(false);
+    }
   });
 });
 

@@ -79,6 +79,10 @@ const MENTION_NODE_SELECTOR = [
   '[data-node-type*="mention"]',
   '[class*="mention"]',
 ].join(', ');
+// TipTap renamed the reference node view from kebab-case to camelCase.
+// Count only these chip roots for ordered commits/checkpoints, not every
+// non-editable widget (placeholders and nested node-view elements included).
+const RICH_MENTION_SELECTOR = '.node-reference-mention-tag, .node-referenceMentionTag';
 const MENTION_OPTION_SELECTOR = [
   'li[role="option"]',
   '.lv-select-option',
@@ -2539,7 +2543,7 @@ async function captureMentionDebug(page, debug, phase, asset, extra = {}) {
       })
       .filter((item) => item.text || /menu|option|dropdown|popup|suggestion/i.test(item.className));
     const mentions = editor
-      ? [...editor.querySelectorAll('.node-reference-mention-tag')].map((node) => ({
+      ? [...editor.querySelectorAll(${JSON.stringify(RICH_MENTION_SELECTOR)})].map((node) => ({
         text: compactText(node).replace(/\\s+/g, ' ').trim(),
         blockIndex: [...editor.children].findIndex((block) => block.contains(node)),
         html: node.outerHTML,
@@ -2835,7 +2839,7 @@ async function computePromptEditorEndClickPoint(page) {
       const node = walker.currentNode;
       const parent = node.parentElement;
       if (!node.nodeValue || !parent) continue;
-      if (parent.closest('.rich-placeholder-widget, .document-placeholder-widget, [data-rich-placeholder], .node-reference-mention-tag')) continue;
+      if (parent.closest(${JSON.stringify(`.rich-placeholder-widget, .document-placeholder-widget, [data-rich-placeholder], ${RICH_MENTION_SELECTOR}`)})) continue;
       lastText = node;
     }
 
@@ -3167,7 +3171,7 @@ async function inspectMentionCandidateTarget(page, marker, asset) {
   return result;
 }
 
-async function getMentionState(page, asset) {
+export async function getMentionState(page, asset) {
   return page.evaluate(`(() => {
     ${buildPromptEditorLocatorScript()}
     // \`visible\` comes from buildPromptEditorLocatorScript().
@@ -3192,9 +3196,8 @@ async function getMentionState(page, asset) {
     const variants = ${JSON.stringify([asset.label, asset.filename, asset.mentionName])}.map(compact).filter(Boolean);
     const editorText = (editor.innerText || editor.textContent || '').replace(/\\u00a0/g, ' ');
     const tail = compact(editorText.slice(-Math.max(160, ${JSON.stringify(asset.label)}.length * 8)));
-    const mentionNodes = [...editor.querySelectorAll(${JSON.stringify(MENTION_NODE_SELECTOR)})].filter(visible);
-    const mentionLabels = [...editor.querySelectorAll('.node-reference-mention-tag')]
-      .filter(visible)
+    const mentionNodes = [...editor.querySelectorAll(${JSON.stringify(RICH_MENTION_SELECTOR)})].filter(visible);
+    const mentionLabels = mentionNodes
       .map((node) => compact(read(node)))
       .filter(Boolean);
     const matchesVariant = ${mentionTextMatchesVariant.toString()};
@@ -3271,7 +3274,7 @@ export function findSpacedNeedleRange(joined, needle) {
 /**
  * Poll after the atomic candidate click until the mention commit is observable:
  * - the click ran;
- * - exactly one ordered .node-reference-mention-tag was appended for this asset;
+ * - exactly one ordered rich reference chip was appended for this asset;
  * - the raw query is gone and the mention menu is closed.
  * Chip rendering can lag behind the click on slow hosts.
  */
@@ -3325,7 +3328,7 @@ async function stripLeftoverRawMentionQuery(page, asset) {
     const chunks = [];
     while (walker.nextNode()) {
       const node = walker.currentNode;
-      if (node.parentElement?.closest('.node-reference-mention-tag, [data-type*="mention"], [data-node-type*="mention"]')) {
+      if (node.parentElement?.closest(${JSON.stringify(`${RICH_MENTION_SELECTOR}, [data-type*="mention"], [data-node-type*="mention"]`)})) {
         continue;
       }
       chunks.push({ node, value: node.nodeValue || '' });
@@ -3444,7 +3447,7 @@ export async function runContentCheckpoint(page, agentPrompt, assets, options = 
   return report;
 }
 
-async function collectContentCheckpointSnapshot(page) {
+export async function collectContentCheckpointSnapshot(page) {
   return page.evaluate(`(() => {
     ${buildPromptEditorLocatorScript()}
     const editor = findPromptEditor();
@@ -3461,7 +3464,7 @@ async function collectContentCheckpointSnapshot(page) {
     const editorLines = editor
       ? [...editor.children].flatMap((block) => {
         const clone = block.cloneNode(true);
-        clone.querySelectorAll('.node-reference-mention-tag').forEach((mention) => {
+        clone.querySelectorAll(${JSON.stringify(RICH_MENTION_SELECTOR)}).forEach((mention) => {
           mention.replaceWith(document.createTextNode(mention.innerText || mention.textContent || ''));
         });
         clone.querySelectorAll(
@@ -3472,7 +3475,7 @@ async function collectContentCheckpointSnapshot(page) {
       })
       : [];
     const observedMentionLabels = editor
-      ? [...editor.querySelectorAll('.node-reference-mention-tag')]
+      ? [...editor.querySelectorAll(${JSON.stringify(RICH_MENTION_SELECTOR)})]
         .map((node) => (node.innerText || node.textContent || '').replace(/\\s+/g, '').trim())
         .filter(Boolean)
       : [];
