@@ -2,6 +2,13 @@
 
 Personal OpenCLI plugins, installed via the official plugin mechanism.
 
+## v0.1.70
+
+- Align all five plugin versions at `0.1.70`; only the shared `jimeng-agent` model prompt changes.
+- Add the requested legacy-compatibility notice to `seedance2.0fast` and `seedance2.0`: the model may be absent from the latest model list, but the Agent must pass the exact identifier unchanged. Keep each notice tied to its selected model and preserve the prohibition on substituting VIP or other models.
+- Correct the `seedance2.0` display name from Fast to the regular model. Preserve prompt-body content, asset-id and blank-line layout across Generate and both Canvas contracts.
+- Keep the existing per-line native-text insertion and explicit line breaks. Batching multiline text between mentions is deferred until newline rendering and caret placement are verified; no input-path or submit-policy change ships here.
+
 ## v0.1.69
 
 - Align all five plugin versions at `0.1.69`; only `jimeng-agent` page logic changes.
