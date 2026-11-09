@@ -40,6 +40,7 @@ import {
   COMPOSER_GENERAL_FILE_SELECTORS,
   COMPOSER_IMAGE_FILE_SELECTORS,
 } from '../src/upload-dom.js';
+import { imageTargetsScript, selectedImageMatchesScript } from '../src/image-export.js';
 
 /**
  * Creates an execution environment exposing standard DOM interfaces to node:vm.
@@ -190,6 +191,13 @@ function createDomSandbox(html, { origin = 'https://chatgpt.com', href = 'https:
         };
       },
       HTMLElement,
+    },
+    getComputedStyle: (target) => {
+      const style = target?.getAttribute?.('style') || '';
+      return {
+        display: /display\s*:\s*none/i.test(style) ? 'none' : 'block',
+        visibility: /visibility\s*:\s*hidden/i.test(style) ? 'hidden' : 'visible',
+      };
     },
     Node: { DOCUMENT_POSITION_FOLLOWING: 4 },
     HTMLElement,
@@ -1106,5 +1114,56 @@ describe('DOM Regression: Modern ChatGPT Generated-Image Gallery Extractor', () 
 
     expect(result.modern).toBe(false);
     expect(result.urls).toEqual([]);
+  });
+});
+
+describe('DOM Regression: Native generated-image target discovery', () => {
+  const multiImageFixture = readFileSync(
+    new URL('./__fixtures__/generated-images.html', import.meta.url),
+    'utf8',
+  );
+
+  // The production discovery script must enumerate all current-turn rail
+  // controls in canonical order, independent of which image is selected.
+  it('discovers three gallery images in side-rail order', () => {
+    const { runScript } = createDomSandbox(`<main>${multiImageFixture}</main>`);
+    const result = runScript(imageTargetsScript(['msg-current']));
+    expect(result.targets.map(({ kind, globalIndex, order }) => ({ kind, globalIndex, order }))).toEqual([
+      { kind: 'rail', globalIndex: 0, order: 1 },
+      { kind: 'rail', globalIndex: 1, order: 2 },
+      { kind: 'rail', globalIndex: 2, order: 3 },
+    ]);
+  });
+
+  // The rail's selected state and page-owned image source must match before
+  // the viewer opens; an unselected historical image is not sufficient.
+  it('confirms that only the selected rail source matches the preview', () => {
+    const { runScript } = createDomSandbox(`<main>${multiImageFixture}</main>`);
+    expect(runScript(selectedImageMatchesScript(['msg-current'], { globalIndex: 1 }))).toBe(true);
+    expect(runScript(selectedImageMatchesScript(['msg-current'], { globalIndex: 0 }))).toBe(false);
+  });
+
+  // Historical and user scopes, plus a matching broad ancestor, cannot widen
+  // the current-turn scope selected from protocol message IDs.
+  it('excludes historical/user galleries and rejects a nonmatching nearest scope', () => {
+    const history = multiImageFixture.replaceAll('msg-current', 'msg-history')
+      .replaceAll('/current-', '/history-');
+    const user = multiImageFixture.replace('<section ', '<section data-conversation-role="user" ')
+      .replaceAll('/current-', '/user-');
+    const nested = '<div data-chatgpt-search-message-ids="msg-current">'
+      + '<div data-chatgpt-search-message-ids="other"><div data-testid="generated-image-gallery">'
+      + '<button data-testid="generated-image-preview"></button></div></div></div>';
+    const { runScript } = createDomSandbox(`<main>${history}${multiImageFixture}${user}${nested}</main>`);
+    expect(runScript(imageTargetsScript(['msg-current'])).targets).toHaveLength(3);
+  });
+
+  it('allows one scoped preview without a rail and fails closed for missing IDs', () => {
+    const html = '<main><div data-chatgpt-search-message-ids="msg-one">'
+      + '<div data-testid="generated-image-gallery"><button data-testid="generated-image-preview"></button>'
+      + '</div></div></main>';
+    expect(createDomSandbox(html).runScript(imageTargetsScript(['msg-one'])).targets)
+      .toEqual([{ kind: 'preview', globalIndex: 0, order: 1 }]);
+    expect(createDomSandbox(html).runScript(imageTargetsScript([])).targets).toEqual([]);
+    expect(createDomSandbox(html).runScript(imageTargetsScript(['missing'])).targets).toEqual([]);
   });
 });

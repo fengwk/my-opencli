@@ -1,358 +1,35 @@
 /**
- * Export generated ChatGPT images the same way as official clis/chatgpt image:
- *   visible DOM img URLs → page fetch/canvas → base64 → local files.
- * No backend-api poll, no chrome Download button.
- *
- * Sparse transparent ChatGPT loading placeholders (e.g. a `data:image/png` canvas
- * mounted before the real asset finishes rendering) must never be persisted as a
- * successful download. When protocol image pointers exist but the first visual
- * attempt yields fewer than the expected assets, the automation page may be reloaded
- * once and the export pipeline re-run, gated by the caller's `canRetry` hook.
+ * Export generated images through ChatGPT's native Chrome download UI.
+ * Image bytes stay in Chrome; Node only receives the completed download receipt
+ * and copies the receipt-proven file into the managed output directory.
  */
 
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
-import { saveBase64ToFile } from '@jackwener/opencli/utils';
-import { modernImageExtractorScript, unwrapEvaluateResult } from './dom-helpers.js';
-import {
-  getChatGPTImageAssets,
-  getChatGPTVisibleImageUrls,
-} from './host-chatgpt.js';
-
-const DEFAULT_POLL_ITERATIONS = 12;
-const PLACEHOLDER_INSPECT_MAX_SIDE = 512;
-const PLACEHOLDER_INSPECT_SAMPLE_GRID = 16;
-const PLACEHOLDER_INSPECT_TIMEOUT_MS = 2000;
-const PLACEHOLDER_MEAN_ALPHA_THRESHOLD = 8;
-const PLACEHOLDER_NONTRANSPARENT_RATIO_THRESHOLD = 0.05;
-const PLACEHOLDER_NONTRANSPARENT_ALPHA_FLOOR = 16;
+import { collectDownloadsToOutputDir, toNodeLocalPath } from './artifact-collect.js';
+import { unwrapEvaluateResult } from './dom-helpers.js';
 
 function extFromMime(mime) {
   const m = String(mime || '').toLowerCase();
   if (m.includes('png')) return '.png';
   if (m.includes('webp')) return '.webp';
   if (m.includes('gif')) return '.gif';
-  return '.jpg';
+  if (m.includes('jpeg') || m.includes('jpg')) return '.jpg';
+  return '';
 }
 
 export function resolveImageOutputDir(value) {
   const raw = String(value || '').trim();
-  if (!raw) {
-    // WSL + Windows Chrome only: write under Windows Pictures for Explorer visibility
-    // and re-upload via setFileInput. Native Linux defaults to ~/Pictures/chatgpt-agent.
-    if (shouldPreferWindowsPictures()) {
-      const winPics = guessWindowsPicturesDir();
-      if (winPics) {
-        const dir = path.join(winPics, 'chatgpt-agent');
-        try {
-          fs.mkdirSync(dir, { recursive: true });
-          return dir;
-        } catch { /* fall through */ }
-      }
-    }
-    return path.join(os.homedir(), 'Pictures', 'chatgpt-agent');
-  }
+  if (!raw) return path.join(os.homedir(), 'Pictures', 'chatgpt-agent');
   if (raw === '~') return os.homedir();
   if (raw.startsWith('~/')) return path.join(os.homedir(), raw.slice(2));
   return path.resolve(raw);
 }
 
-function shouldPreferWindowsPictures() {
-  const force = String(process.env.OPENCLI_UPLOAD_STAGE || process.env.OPENCLI_IMAGE_DIR_WIN || '').trim();
-  if (force === '0' || force.toLowerCase() === 'false') return false;
-  if (force === '1' || force.toLowerCase() === 'true') return fs.existsSync('/mnt/c/Users');
-  if (process.env.WSL_DISTRO_NAME) return fs.existsSync('/mnt/c/Users');
-  try {
-    return /microsoft|wsl/i.test(fs.readFileSync('/proc/version', 'utf8')) && fs.existsSync('/mnt/c/Users');
-  } catch {
-    return false;
-  }
-}
-
-function guessWindowsPicturesDir() {
-  const usersRoot = '/mnt/c/Users';
-  if (!fs.existsSync(usersRoot)) return null;
-  const skip = new Set(['Public', 'Default', 'Default User', 'All Users', 'desktop.ini']);
-  const names = fs.readdirSync(usersRoot).filter((n) => {
-    try {
-      return !skip.has(n) && fs.statSync(path.join(usersRoot, n)).isDirectory();
-    } catch {
-      return false;
-    }
-  });
-  const prefer = process.env.WINDOWS_USER || process.env.USER || '';
-  const ordered = [
-    ...names.filter((n) => n.toLowerCase() === String(prefer).toLowerCase()),
-    ...names,
-  ];
-  for (const n of ordered) {
-    const pics = path.join(usersRoot, n, 'Pictures');
-    if (fs.existsSync(pics)) return pics;
-  }
-  return null;
-}
-
-function nextAvailablePath(dir, baseName, ext) {
-  let candidate = path.join(dir, `${baseName}${ext}`);
-  for (let index = 1; fs.existsSync(candidate); index += 1) {
-    candidate = path.join(dir, `${baseName}_${index}${ext}`);
-  }
-  return candidate;
-}
-
-/**
- * Snapshot visible image URLs (call before send or during polling).
- *
- * For modern ChatGPT DOM (containing [data-testid="generated-image-gallery"]),
- * extracts loaded images from the gallery preview elements without requiring
- * rect dimensions > 0.
- *
- * When `messageIds` is provided (array of UUIDs):
- *   Only returns images whose ancestor [data-chatgpt-search-message-ids] matches.
- *   If the modern DOM is present but no matching images exist (or messageIds is empty),
- *   returns [] without falling back to legacy/full-page URLs (fail-closed against history leakage).
- *
- * Falls back to legacy host `getChatGPTVisibleImageUrls` ONLY when no modern gallery
- * markers exist on the page.
- *
- * @param {object} page
- * @param {string[] | null} [messageIds]
- * @returns {Promise<string[]>}
- */
-export async function snapshotVisibleImageUrls(page, messageIds) {
-  if (!page || typeof page.evaluate !== 'function') {
-    return [];
-  }
-
-  let res;
-  try {
-    const raw = await page.evaluate(modernImageExtractorScript(messageIds));
-    res = unwrapEvaluateResult(raw);
-  } catch {
-    // Fail closed on evaluate error: do NOT fall back to legacy history extractor
-    return [];
-  }
-
-  // Explicit legacy fallback: only when the page affirmatively confirms absence
-  // of modern gallery markers (res.modern === false).
-  if (res && typeof res === 'object' && res.modern === false) {
-    try {
-      return await getChatGPTVisibleImageUrls(page);
-    } catch {
-      return [];
-    }
-  }
-
-  // Modern path: must be a valid object with modern === true and urls array.
-  if (res && typeof res === 'object' && res.modern === true && Array.isArray(res.urls)) {
-    return res.urls;
-  }
-
-  // Malformed result: fail closed.
-  return [];
-}
-
-// --- Sparse-placeholder detection (page-side canvas inspection) ------------------
-//
-// ChatGPT occasionally mounts a fully transparent 480x480 PNG canvas as a loading
-// placeholder for the generated image. Refreshing the page in the browser reveals
-// the genuine output; the placeholder is essentially alpha=0 with negligible RGB.
-// Detection is done in the dedicated automation page: reference its existing
-// image, draw it into a bounded canvas (max side <= 512), and sample a
-// 16x16 grid for mean alpha / non-transparent ratio. We fail open on any page /
-// canvas / decode error so an unknown image is never silently dropped.
-
-function buildPlaceholderInspectScript(source) {
-  // The script is the only place page-context happens. It always resolves
-  // with `{ inspected: bool, ... }` so the caller never has to handle a
-  // thrown promise from page.evaluate.
-  return `(async () => {
-    const source = ${JSON.stringify(source)};
-    try {
-      let imageUrl = source.url || '';
-      if (source.inlineSha256) {
-        // Inline images already live in this DOM. Send only a digest across the
-        // command channel, then resolve that exact source here, not its bytes.
-        const seen = new Set();
-        for (const node of document.querySelectorAll('img')) {
-          const candidate = node.currentSrc || node.src || '';
-          if (!candidate.startsWith('data:image/') || seen.has(candidate)) continue;
-          seen.add(candidate);
-          const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(candidate));
-          const hex = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
-          if (hex === source.inlineSha256) {
-            imageUrl = candidate;
-            break;
-          }
-        }
-        if (!imageUrl) return { inspected: false, reason: 'inline-source-not-in-dom' };
-      }
-      const img = new Image();
-      await new Promise((resolve, reject) => {
-        let settled = false;
-        let timeoutId = null;
-        const cleanup = () => {
-          img.onload = null;
-          img.onerror = null;
-          if (timeoutId !== null) {
-            clearTimeout(timeoutId);
-            timeoutId = null;
-          }
-        };
-        const settleResolve = () => {
-          if (settled) return;
-          settled = true;
-          cleanup();
-          resolve();
-        };
-        const settleReject = (err) => {
-          if (settled) return;
-          settled = true;
-          cleanup();
-          reject(err);
-        };
-        // Install handlers BEFORE assigning src. Data URLs often decode
-        // synchronously, so a later onload assignment can miss the event.
-        img.onload = settleResolve;
-        img.onerror = () => settleReject(new Error('image-load-failed'));
-        img.src = imageUrl;
-        // Already complete (synchronous decode or cache hit): trust the
-        // natural dimensions. Zero/NaN means the payload did not decode
-        // into a real image — fail open instead of sampling a fake 1x1.
-        if (img.complete) {
-          if (img.naturalWidth === 0 || img.naturalHeight === 0) {
-            settleReject(new Error('image-load-empty'));
-          } else {
-            settleResolve();
-          }
-          return;
-        }
-        timeoutId = setTimeout(
-          () => settleReject(new Error('image-load-timeout')),
-          ${PLACEHOLDER_INSPECT_TIMEOUT_MS},
-        );
-      });
-      // Re-verify natural dimensions post-load; some browsers report
-      // complete=true with zero dimensions before the pixels arrive.
-      const w = img.naturalWidth;
-      const h = img.naturalHeight;
-      if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) {
-        return { inspected: false, reason: 'image-load-empty' };
-      }
-      const maxSide = ${PLACEHOLDER_INSPECT_MAX_SIDE};
-      const scale = Math.min(1, maxSide / Math.max(w, h));
-      const cw = Math.max(1, Math.floor(w * scale));
-      const ch = Math.max(1, Math.floor(h * scale));
-      const canvas = document.createElement('canvas');
-      canvas.width = cw;
-      canvas.height = ch;
-      const ctx = canvas.getContext('2d', { willReadFrequently: true });
-      if (!ctx) return { inspected: false, reason: 'canvas-context-unavailable' };
-      ctx.drawImage(img, 0, 0, cw, ch);
-
-      const xCount = Math.min(cw, ${PLACEHOLDER_INSPECT_SAMPLE_GRID});
-      const yCount = Math.min(ch, ${PLACEHOLDER_INSPECT_SAMPLE_GRID});
-      const samples = xCount * yCount;
-      let nonTransparent = 0;
-      let totalAlpha = 0;
-      for (let yi = 0; yi < yCount; yi += 1) {
-        const y = Math.min(ch - 1, Math.floor((yi + 0.5) * ch / yCount));
-        for (let xi = 0; xi < xCount; xi += 1) {
-          const x = Math.min(cw - 1, Math.floor((xi + 0.5) * cw / xCount));
-          const data = ctx.getImageData(x, y, 1, 1).data;
-          const a = data[3];
-          totalAlpha += a;
-          if (a > ${PLACEHOLDER_NONTRANSPARENT_ALPHA_FLOOR}) nonTransparent += 1;
-        }
-      }
-      return {
-        inspected: true,
-        width: cw,
-        height: ch,
-        originalWidth: w,
-        originalHeight: h,
-        meanAlpha: totalAlpha / samples,
-        nonTransparentRatio: nonTransparent / samples,
-        samples,
-      };
-    } catch (err) {
-      return { inspected: false, reason: String((err && err.message) || err) };
-    }
-  })()`;
-}
-
-/**
- * Build a per-asset `inspectPlaceholder(dataUrl, mimeType)` closure bound to the
- * supplied page. The closure is fail-open: any page / canvas / decode error or
- * non-data-URL input yields `{ rejected: false }` so the asset is saved.
- *
- * @param {object} page  page object exposing `evaluate(script)`.
- * @returns {(dataUrl: string, mimeType?: string, sourceUrl?: string) => Promise<{ rejected: boolean, reason?: string, meanAlpha?: number, nonTransparentRatio?: number, originalWidth?: number, originalHeight?: number }>}
- */
-export function makeInspectPlaceholder(page) {
-  return async (dataUrl, _mimeType, sourceUrl) => {
-    if (typeof dataUrl !== 'string' || !/^data:image\/[a-z0-9.+-]+;/i.test(dataUrl)) {
-      return { rejected: false, reason: 'not-data-url' };
-    }
-    let raw;
-    try {
-      // The command channel carries references, never image contents. Blob and
-      // HTTP sources use their URL; inline DOM images use a fixed-size digest.
-      const originalSource = typeof sourceUrl === 'string'
-        && /^(blob:|https?:|data:image\/)/i.test(sourceUrl) ? sourceUrl : dataUrl;
-      const source = /^data:image\//i.test(originalSource)
-        ? { inlineSha256: createHash('sha256').update(originalSource).digest('hex') }
-        : { url: originalSource };
-      raw = await page.evaluate(buildPlaceholderInspectScript(source));
-    } catch (err) {
-      return { rejected: false, reason: 'evaluation-error', error: err?.message || String(err) };
-    }
-    const result = unwrapEvaluateResult(raw);
-    if (!result || !result.inspected) {
-      return { rejected: false, reason: (result && result.reason) || 'inspection-failed' };
-    }
-    const meanAlpha = Number(result.meanAlpha);
-    const nonTransparentRatio = Number(result.nonTransparentRatio);
-    if (!Number.isFinite(meanAlpha) || !Number.isFinite(nonTransparentRatio)) {
-      return { rejected: false, reason: 'invalid-stats' };
-    }
-    if (
-      meanAlpha < PLACEHOLDER_MEAN_ALPHA_THRESHOLD
-      && nonTransparentRatio < PLACEHOLDER_NONTRANSPARENT_RATIO_THRESHOLD
-    ) {
-      return {
-        rejected: true,
-        reason: 'sparse-alpha',
-        meanAlpha,
-        nonTransparentRatio,
-      };
-    }
-    return {
-      rejected: false,
-      reason: 'looks-opaque-enough',
-      meanAlpha,
-      nonTransparentRatio,
-      originalWidth: Number(result.originalWidth) || 0,
-      originalHeight: Number(result.originalHeight) || 0,
-    };
-  };
-}
-
-// --- Per-attempt pipeline (testable, no host-import side effects) -----------------
-
-/**
- * Strict predicate evaluator for budget gates (canContinue / canRetry).
- * Fail-closed: returns true only when predicate is omitted or explicitly evaluates to true.
- * Returns false on undefined, falsy, non-boolean return values, or thrown exceptions.
- *
- * @param {(() => boolean) | null | undefined} predicate
- * @returns {boolean}
- */
-export function isContinueAllowed(predicate) {
-  if (predicate == null) return true;
-  if (typeof predicate !== 'function') return false;
+function isAllowed(predicate) {
+  if (typeof predicate !== 'function') return true;
   try {
     return predicate() === true;
   } catch {
@@ -360,284 +37,340 @@ export function isContinueAllowed(predicate) {
   }
 }
 
-/**
- * Run the export pipeline once: settle → poll → fetch assets → save / reject.
- *
- * Errors from `fetchAssets` propagate to the caller (do not swallow them here).
- * The `inspectPlaceholder` dependency owns its own fail-open semantics.
- *
- * @param {{
- *   sleep: (seconds: number) => Promise<void>,
- *   snapshotUrls: () => Promise<string[]>,
- *   fetchAssets: (urls: string[]) => Promise<Array<{ url: string, dataUrl: string, mimeType: string, width: number, height: number }>>,
- *   saveBase64: (base64: string, filePath: string) => Promise<void>,
- *   inspectPlaceholder: (dataUrl: string, mimeType?: string, sourceUrl?: string) => Promise<{ rejected: boolean, reason?: string, meanAlpha?: number, nonTransparentRatio?: number, originalWidth?: number, originalHeight?: number }>,
- *   beforeSet: Set<string>,
- *   expectedCount: number,
- *   outputDir: string,
- *   settleMs: number,
- *   pollIterations?: number,
- *   canContinue?: () => boolean,
- *   reuseDownloads?: object[],
- * }} deps
- * @returns {Promise<{ results: object[], hasValidDownload: boolean }>}
- */
-export async function runImageExportAttempt(deps) {
-  const {
-    sleep,
-    snapshotUrls,
-    fetchAssets,
-    saveBase64,
-    inspectPlaceholder,
-    beforeSet,
-    expectedCount,
-    outputDir,
-    settleMs,
-    pollIterations = DEFAULT_POLL_ITERATIONS,
-    canContinue,
-    reuseDownloads = [],
-  } = deps;
-
-  await sleep(settleMs / 1000);
-
-  let urls = [];
-  for (let i = 0; i < pollIterations; i += 1) {
-    if (!isContinueAllowed(canContinue)) break;
-    let all = [];
-    try {
-      all = await snapshotUrls();
-    } catch {
-      all = [];
-    }
-    urls = (Array.isArray(all) ? all : []).filter((u) => u && !beforeSet.has(u));
-    if (urls.length >= expectedCount) break;
-    // One loaded sibling is not a complete batch. Keep waiting until the
-    // protocol count is met, or the bounded poll / caller budget is exhausted.
-    if (i < pollIterations - 1) {
-      if (!isContinueAllowed(canContinue)) break;
-      await sleep(1);
-    }
-  }
-
-  if (!urls.length) {
-    return {
-      hasValidDownload: false,
-      results: [{
-        kind: 'image-export',
-        downloaded: false,
-        error: 'no-new-visible-image-urls',
-        expectedCount,
-      }],
+export function imageTargetsScript(messageIds) {
+  return `(() => {
+    const ids = new Set(${JSON.stringify(messageIds)});
+    if (!ids.size) return { targets: [], reason: 'missing-message-ids' };
+    const visible = (el) => {
+      if (!el || el.hidden || el.hasAttribute('hidden') || el.closest('[inert], [aria-hidden="true"]')) return false;
+      let node = el;
+      while (node) {
+        const style = getComputedStyle(node);
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+        node = node.parentElement;
+      }
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
     };
-  }
+    const tokenMatch = (scope) => (scope.getAttribute('data-chatgpt-search-message-ids') || '')
+      .trim().split(/[\\s,]+/).some((token) => ids.has(token));
+    const main = document.querySelector('main') || document.querySelector('[role="main"]');
+    if (!main) return { targets: [], reason: 'main-not-found' };
+    const galleries = [...main.querySelectorAll('[data-testid="generated-image-gallery"]')];
+    const railButtons = [...document.querySelectorAll('button[aria-label^="Show generated image "]')];
+    const previewButtons = [...document.querySelectorAll('button[data-testid="generated-image-preview"]')];
+    const targets = [];
+    const seenScopes = new Set();
+    for (const gallery of galleries) {
+      const scope = gallery.closest('[data-chatgpt-search-message-ids]');
+      if (!scope || !tokenMatch(scope) || scope.closest(
+        'form[data-chatgpt-composer], [data-chatgpt-composer], [data-message-author-role="user"], [data-conversation-role="user"], [data-turn="user"], [data-chatgpt-search-unit-key*=":user"]'
+      ) || !visible(gallery)) continue;
+      if (seenScopes.has(scope)) continue;
+      seenScopes.add(scope);
+      const rails = [...scope.querySelectorAll('button[aria-label^="Show generated image "]')]
+        .filter((button) => button.closest('[data-chatgpt-search-message-ids]') === scope && visible(button))
+        .map((button) => ({ button, order: Number((button.getAttribute('aria-label') || '').match(/(\\d+)$/)?.[1]) }))
+        .sort((a, b) => a.order - b.order);
+      if (rails.length) {
+        for (const rail of rails) {
+          const preview = [...gallery.querySelectorAll('button[data-testid="generated-image-preview"]')]
+            .find((button) => visible(button));
+          targets.push({
+            kind: 'rail',
+            globalIndex: railButtons.indexOf(rail.button),
+            previewGlobalIndex: previewButtons.indexOf(preview),
+            order: rail.order,
+          });
+        }
+        continue;
+      }
+      const previews = [...gallery.querySelectorAll('button[data-testid="generated-image-preview"]')]
+        .filter((button) => visible(button));
+      if (previews.length === 1 && galleries.filter((other) => other.closest('[data-chatgpt-search-message-ids]') === scope).length === 1) {
+        targets.push({ kind: 'preview', globalIndex: previewButtons.indexOf(previews[0]), order: 1 });
+      } else {
+        return { targets: [], reason: 'ambiguous-gallery-without-rail' };
+      }
+    }
+    return { targets, reason: targets.length ? '' : 'no-scoped-gallery' };
+  })()`;
+}
 
-  if (expectedCount > 0 && urls.length > expectedCount + 2) {
-    urls = urls.slice(-Math.max(expectedCount, 3));
-  }
+export function selectedImageMatchesScript(messageIds, target) {
+  return `(() => {
+    const ids = new Set(${JSON.stringify(messageIds)});
+    const buttons = [...document.querySelectorAll('button[aria-label^="Show generated image "]')];
+    const rail = buttons[${target.globalIndex}];
+    if (!rail) return false;
+    const scope = rail.closest('[data-chatgpt-search-message-ids]');
+    const tokens = (scope?.getAttribute('data-chatgpt-search-message-ids') || '').trim().split(/[\\s,]+/);
+    if (!tokens.some((token) => ids.has(token))) return false;
+    if (rail.getAttribute('aria-pressed') !== 'true') return false;
+    const source = rail.querySelector('img')?.currentSrc || rail.querySelector('img')?.src || '';
+    if (!source) return false;
+    const preview = [...scope.querySelectorAll('button[data-testid="generated-image-preview"]')]
+      .find((button) => {
+        const img = button.querySelector('img');
+        return img && (img.currentSrc || img.src || '') === source;
+      });
+    return !!preview;
+  })()`;
+}
 
-  if (process.env.OPENCLI_VERBOSE) {
-    console.error(
-      `[chatgpt-agent] image-export newUrls=${urls.length} expected=${expectedCount}`,
-    );
-  }
-
-  // No try/catch: let getChatGPTImageAssets errors propagate (preserve prior semantics).
-  const assets = await fetchAssets(urls);
-  if (!assets || !assets.length) {
-    return {
-      hasValidDownload: false,
-      results: [{
-        kind: 'image-export',
-        downloaded: false,
-        error: 'image-asset-export-failed',
-        urls,
-      }],
+function dialogStateScript() {
+  return `(() => {
+    const visible = (el) => {
+      if (!el || el.hidden || el.closest('[inert], [aria-hidden="true"]')) return false;
+      const r = el.getBoundingClientRect();
+      const s = getComputedStyle(el);
+      return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
     };
+    const allTriggers = [...document.querySelectorAll('[aria-label="Download"]')];
+    const dialog = [...document.querySelectorAll('[role="dialog"]')]
+      .find((el) => visible(el) && el.querySelector('[aria-label="Download"]'));
+    const trigger = dialog?.querySelector('[aria-label="Download"]');
+    const menu = [...document.querySelectorAll('[role="menu"]')].find(visible);
+    const items = menu ? [...menu.querySelectorAll('[role="menuitem"]')].map((el) => ({
+      index: [...document.querySelectorAll('[role="menuitem"]')].indexOf(el),
+      text: (el.innerText || el.textContent || '').trim(),
+      visible: visible(el),
+    })) : [];
+    const closeButtons = dialog ? [...dialog.querySelectorAll('button')].filter((button) => {
+      const label = (button.getAttribute('aria-label') || '').trim();
+      return visible(button) && (label === 'Close' || label === '关闭' || button.getAttribute('data-testid') === 'close-button');
+    }) : [];
+    return {
+      dialog: !!dialog,
+      triggerIndex: trigger ? allTriggers.indexOf(trigger) : -1,
+      menu: !!menu,
+      items,
+      closeIndex: closeButtons.length === 1
+        ? [...document.querySelectorAll('button')].indexOf(closeButtons[0]) : -1,
+    };
+  })()`;
+}
+
+async function evaluate(page, script) {
+  return unwrapEvaluateResult(await page.evaluate(script));
+}
+
+async function collectReceipt(receipt, outputDir, index) {
+  if (!receipt || receipt.downloaded !== true || receipt.state !== 'complete') {
+    throw new Error('download-receipt-incomplete');
   }
-
-  const stamp = Date.now();
-  const results = [];
-  // Reloading changes blob URLs, not file bytes. Reuse earlier successful files
-  // by content, with multiplicity (two identical outputs still count as two).
-  const reusable = new Map();
-  for (const saved of reuseDownloads) {
-    if (!saved?.downloaded || !saved.sha256) continue;
-    const matches = reusable.get(saved.sha256) || [];
-    matches.push(saved);
-    reusable.set(saved.sha256, matches);
+  const filename = String(receipt.filename || '').trim();
+  if (!filename) throw new Error('download-receipt-filename-missing');
+  const mimeType = String(receipt.mime || '').toLowerCase();
+  const ext = extFromMime(mimeType);
+  if (!mimeType.startsWith('image/') || !ext) throw new Error('download-receipt-not-image');
+  const sourcePath = toNodeLocalPath(filename);
+  let sourceBytes;
+  try {
+    const stat = fs.statSync(sourcePath);
+    if (!stat.isFile() || stat.size <= 0) throw new Error('empty-or-not-file');
+    sourceBytes = fs.readFileSync(sourcePath);
+  } catch {
+    throw new Error('download-file-unreadable-or-empty');
   }
-  for (let index = 0; index < assets.length; index += 1) {
-    const asset = assets[index];
-    const sourceIndex = urls.indexOf(asset.url);
-    const outputIndex = sourceIndex < 0 ? index : sourceIndex;
-    const base64 = String(asset.dataUrl || '').replace(/^data:[^;]+;base64,/, '');
-    if (!base64) {
-      results.push({
-        kind: 'image-export',
-        index: outputIndex,
-        downloaded: false,
-        error: 'empty-data-url',
-        url: asset.url || '',
-      });
-      continue;
-    }
-
-    const placeholder = await inspectPlaceholder(asset.dataUrl, asset.mimeType, asset.url);
-    if (placeholder && placeholder.rejected) {
-      results.push({
-        kind: 'image-export',
-        index: outputIndex,
-        downloaded: false,
-        error: 'sparse-placeholder-rejected',
-        url: asset.url || '',
-        mimeType: asset.mimeType || '',
-        width: asset.width || 0,
-        height: asset.height || 0,
-        meanAlpha: placeholder.meanAlpha,
-        nonTransparentRatio: placeholder.nonTransparentRatio,
-        reason: placeholder.reason,
-      });
-      continue;
-    }
-
-    const suffix = urls.length > 1 ? `_${outputIndex + 1}` : '';
-    // Lazy rail <img> nodes can still have 0x0 natural size (or 56px layout).
-    // Validate and report the decoded asset, not the thumbnail element.
-    const width = placeholder?.originalWidth || asset.width || 0;
-    const height = placeholder?.originalHeight || asset.height || 0;
-    if ((width > 0 && width < 128) || (height > 0 && height < 128)) {
-      results.push({
-        kind: 'image-export',
-        index: outputIndex,
-        downloaded: false,
-        error: 'image-too-small',
-        url: asset.url || '',
-        width,
-        height,
-      });
-      continue;
-    }
-    const ext = extFromMime(asset.mimeType);
-    const sha256 = createHash('sha256').update(Buffer.from(base64, 'base64')).digest('hex');
-    const previous = reusable.get(sha256)?.shift();
-    const filePath = previous?.path
-      || nextAvailablePath(outputDir, `chatgpt-agent_${stamp}${suffix}`, ext);
-    if (!previous) await saveBase64(base64, filePath);
-    results.push({
-      kind: 'image-export',
-      index: outputIndex,
-      downloaded: true,
-      path: filePath,
-      sha256,
-      url: asset.url || '',
-      mimeType: asset.mimeType || '',
-      width,
-      height,
-    });
+  if (!isImageBuffer(sourceBytes)) throw new Error('download-file-not-image');
+  const [raw] = collectDownloadsToOutputDir([{
+    filename,
+    path: filename,
+    downloaded: true,
+    state: receipt.state,
+    downloadId: receipt.id,
+    originalFilename: filename,
+    mimeType,
+  }], outputDir);
+  if (!raw?.collected || !raw.path) throw new Error('download-file-unavailable');
+  let bytes;
+  try {
+    const stat = fs.statSync(raw.path);
+    if (!stat.isFile() || stat.size <= 0) throw new Error('empty-or-not-file');
+    bytes = fs.readFileSync(raw.path);
+  } catch {
+    throw new Error('download-file-unreadable-or-empty');
   }
-  // The host asset fetcher may silently omit failed blobs. Keep those failures
-  // explicit so incomplete exports can be diagnosed without generating again.
-  const fetched = new Set(assets.map((asset) => asset.url));
-  urls.forEach((url, index) => {
-    if (!fetched.has(url)) {
-      results.push({ kind: 'image-export', index, downloaded: false, error: 'image-asset-export-failed', url });
-    }
-  });
-  results.sort((a, b) => a.index - b.index);
-
+  if (!isImageBuffer(bytes)) throw new Error('download-file-not-image');
   return {
-    hasValidDownload: results.some((r) => r && r.downloaded === true),
-    results,
+    kind: 'image-export',
+    method: 'chrome-download',
+    index,
+    downloaded: true,
+    path: raw.path,
+    originalFilename: filename,
+    downloadId: receipt.id,
+    mimeType,
+    bytes: bytes.length,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
   };
 }
 
+function isImageBuffer(bytes) {
+  const prefix = bytes.subarray(0, 12);
+  const isPng = prefix.length >= 8 && prefix.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  const isJpeg = prefix.length >= 3 && prefix[0] === 0xff && prefix[1] === 0xd8 && prefix[2] === 0xff;
+  const isGif = /^GIF8[79]a$/.test(prefix.subarray(0, 6).toString('ascii'));
+  const isWebp = prefix.length >= 12 && prefix.subarray(0, 4).toString('ascii') === 'RIFF'
+    && prefix.subarray(8, 12).toString('ascii') === 'WEBP';
+  return isPng || isJpeg || isGif || isWebp;
+}
+
+async function downloadOne(page, target, messageIds, index, outputDir, remainingMs, canContinue) {
+  const failed = (error, uncertain = false) => ({
+    kind: 'image-export', method: 'chrome-download', index, downloaded: false, error, ...(uncertain ? { uncertain: true } : {}),
+  });
+  const actionAllowed = () => isAllowed(canContinue) && remainingMs() > 0;
+  let viewerOpened = false;
+  let waiter = null;
+  try {
+    if (!actionAllowed()) return failed('image-download-time-budget-exhausted');
+    if (target.kind === 'rail') {
+      const click = await page.click('button[aria-label^="Show generated image "]', { nth: target.globalIndex });
+      if (!click || click.matches_n === 0) return failed('image-rail-selection-click-failed');
+      let selected = false;
+      for (let attempt = 0; attempt < 20 && actionAllowed(); attempt += 1) {
+        selected = await evaluate(page, selectedImageMatchesScript(messageIds, target));
+        if (selected) break;
+        await page.sleep(Math.min(0.2, remainingMs() / 1000));
+      }
+      if (!selected) return failed('selected-image-preview-not-matched');
+    }
+
+    if (!actionAllowed()) return failed('image-download-time-budget-exhausted');
+    const preview = await page.click(
+      'button[data-testid="generated-image-preview"]',
+      { nth: target.kind === 'rail' ? target.previewGlobalIndex : target.globalIndex },
+    );
+    if (!preview || preview.matches_n === 0) return failed('image-preview-click-failed');
+    viewerOpened = true;
+
+    let state = null;
+    for (let attempt = 0; attempt < 20 && actionAllowed(); attempt += 1) {
+      state = await evaluate(page, dialogStateScript());
+      if (state?.dialog && state.triggerIndex >= 0) break;
+      await page.sleep(Math.min(0.2, remainingMs() / 1000));
+    }
+    if (!state?.dialog || state.triggerIndex < 0) return failed('image-viewer-not-open');
+
+    if (!state.menu) {
+      if (!actionAllowed()) return failed('image-download-time-budget-exhausted');
+      await page.focus('[aria-label="Download"]', { nth: state.triggerIndex });
+      await page.pressKey('Enter');
+      state = await evaluate(page, dialogStateScript());
+    }
+    const matches = (state?.items || []).filter((item) => item.visible && item.text === 'Download image');
+    if (!state?.menu || matches.length !== 1) return failed('exact-download-image-menuitem-not-found');
+    if (!actionAllowed()) return failed('image-download-time-budget-exhausted');
+
+    const timeoutMs = Math.max(1, Math.floor(remainingMs()));
+    // The waiter is armed synchronously, before the real Chrome/CDP click.
+    waiter = page.waitForDownload('', timeoutMs);
+    waiter = Promise.resolve(waiter).then((receipt) => ({ receipt }), (error) => ({ error }));
+    let clickResult;
+    try {
+      clickResult = await page.click('[role="menuitem"]', { nth: matches[0].index });
+    } catch (error) {
+      await waiter;
+      waiter = null;
+      return failed(`image-download-click-failed: ${error?.message || error}`, true);
+    }
+    if (!clickResult) {
+      await waiter;
+      waiter = null;
+      return failed('image-download-click-failed');
+    }
+    const waited = await waiter;
+    waiter = null;
+    if (waited.error) return failed(`image-download-wait-failed: ${waited.error?.message || waited.error}`, true);
+    if (!waited.receipt || waited.receipt.downloaded !== true || waited.receipt.state !== 'complete') {
+      return failed('download-receipt-incomplete', true);
+    }
+    return await collectReceipt(waited.receipt, outputDir, index);
+  } catch (error) {
+    if (waiter) await waiter;
+    return failed(error?.message || String(error));
+  } finally {
+    if (viewerOpened) {
+      try {
+        const state = await evaluate(page, dialogStateScript());
+        if (state?.closeIndex >= 0) await page.click('button', { nth: state.closeIndex });
+      } catch { /* retain the completed receipt even if the viewer cannot close */ }
+    }
+  }
+}
+
 /**
- * After protocol reports image pointers: export NEW visible images vs beforeUrls.
- *
- * Caller-owned retry policy: the caller passes a `reloadConversation` callback
- * (already validated as targeting a real conversation URL) and an optional
- * `canRetry` predicate. At most one reload happens when the first attempt
- * produced fewer than the expected downloads and `canRetry()` returns true. Reload failures
- * fall back to the first attempt's results.
- *
- * @param {object} page
- * @param {{
- *   beforeUrls?: string[],
- *   expectedCount?: number,
- *   messageIds?: string[],
- *   outputDir?: string,
- *   settleMs?: number,
- *   pollIterations?: number,
- *   canContinue?: () => boolean,
- *   reloadConversation?: () => Promise<void>,
- *   canRetry?: () => boolean,
- * }} opts
+ * Export generated images strictly within protocol messageIds. A single
+ * conversation remount may retry missing indices; successes are retained and
+ * never counted twice. The caller owns route validation and remaining budget.
  */
 export async function exportNewImagesLikeOfficial(page, opts = {}) {
-  const beforeSet = new Set(opts.beforeUrls || []);
-  const expectedCount = Math.max(1, opts.expectedCount || 1);
-  const messageIds = opts.messageIds;
+  const ids = Array.isArray(opts.messageIds)
+    ? [...new Set(opts.messageIds.map((id) => String(id || '').trim()).filter(Boolean))]
+    : [];
+  const expectedCount = Math.max(1, Number(opts.expectedCount) || 1);
   const outputDir = resolveImageOutputDir(opts.outputDir);
-  const settleMs = opts.settleMs ?? 1500;
-  const pollIterations = opts.pollIterations ?? DEFAULT_POLL_ITERATIONS;
-  const canContinue = typeof opts.canContinue === 'function' ? opts.canContinue : null;
-  const reloadConversation = typeof opts.reloadConversation === 'function'
-    ? opts.reloadConversation
-    : null;
-  const canRetry = typeof opts.canRetry === 'function' ? opts.canRetry : null;
-
+  const remainingMs = typeof opts.remainingMs === 'function'
+    ? opts.remainingMs
+    : () => Number.MAX_SAFE_INTEGER;
+  const continuePredicate = opts.canContinue;
   fs.mkdirSync(outputDir, { recursive: true });
+  if (!ids.length) {
+    return [{ kind: 'image-export', method: 'chrome-download', downloaded: false, error: 'missing-message-ids' }];
+  }
 
-  const inspectPlaceholder = makeInspectPlaceholder(page);
-
-  const baseDeps = {
-    sleep: (seconds) => page.sleep(seconds),
-    snapshotUrls: () => snapshotVisibleImageUrls(page, messageIds),
-    fetchAssets: (urls) => getChatGPTImageAssets(page, urls),
-    saveBase64: (base64, filePath) => saveBase64ToFile(base64, filePath),
-    inspectPlaceholder,
-    beforeSet,
-    expectedCount,
-    outputDir,
-    settleMs,
-    pollIterations,
-    canContinue,
+  const successful = new Map();
+  let retryBlocked = false;
+  const runAttempt = async () => {
+    let discovery;
+    try {
+      discovery = await evaluate(page, imageTargetsScript(ids));
+    } catch (error) {
+      return [{ kind: 'image-export', method: 'chrome-download', downloaded: false, error: `image-target-discovery-failed: ${error?.message || error}` }];
+    }
+    const targets = Array.isArray(discovery?.targets) ? discovery.targets : [];
+    const results = [];
+    for (let index = 0; index < Math.min(expectedCount, targets.length); index += 1) {
+      if (successful.has(index)) continue;
+      if (!isAllowed(continuePredicate) || remainingMs() <= 0) {
+        results.push({ kind: 'image-export', method: 'chrome-download', index, downloaded: false, error: 'image-download-time-budget-exhausted' });
+        continue;
+      }
+      const result = await downloadOne(page, targets[index], ids, index, outputDir, remainingMs, continuePredicate);
+      results.push(result);
+      if (result.downloaded) successful.set(index, result);
+      if (result.uncertain) retryBlocked = true;
+      if (index < Math.min(expectedCount, targets.length) - 1 && isAllowed(continuePredicate) && remainingMs() > 0) {
+        await page.sleep(Math.min(0.4, remainingMs() / 1000));
+      }
+    }
+    for (let index = targets.length; index < expectedCount; index += 1) {
+      if (!successful.has(index)) {
+        results.push({ kind: 'image-export', method: 'chrome-download', index, downloaded: false, error: discovery?.reason || 'image-target-unavailable' });
+      }
+    }
+    return results;
   };
 
-  const first = await runImageExportAttempt(baseDeps);
-
-  const retryAllowed = !!reloadConversation && isContinueAllowed(canRetry);
-  const successfulCount = (attempt) => attempt.results.filter((r) => r.downloaded === true).length;
-  if (successfulCount(first) >= expectedCount || !retryAllowed) {
-    return first.results;
-  }
-
-  if (process.env.OPENCLI_VERBOSE) {
-    console.error(
-      '[chatgpt-agent] image-export: incomplete downloads, retrying after conversation reload',
-    );
-  }
-  try {
-    await reloadConversation();
-  } catch (err) {
-    if (process.env.OPENCLI_VERBOSE) {
-      console.error(
-        `[chatgpt-agent] image-export reload failed: ${err?.message || err}`,
-      );
+  let results = await runAttempt();
+  if (successful.size < expectedCount && !retryBlocked && typeof opts.reloadConversation === 'function'
+      && isAllowed(opts.canRetry) && remainingMs() > 0) {
+    try {
+      await opts.reloadConversation();
+      results = await runAttempt();
+    } catch (error) {
+      results.push({ kind: 'image-export', method: 'chrome-download', downloaded: false, error: `image-remount-failed: ${error?.message || error}` });
     }
-    return first.results;
   }
-
-  const second = await runImageExportAttempt({ ...baseDeps, reuseDownloads: first.results });
-  // A reload may fetch a different partial subset. Preserve earlier successes
-  // that were not reused, instead of replacing them with the second subset.
-  const secondPaths = new Set(second.results.filter((r) => r.downloaded).map((r) => r.path));
-  const retained = first.results.filter((r) => r.downloaded && !secondPaths.has(r.path));
-  const successes = [...retained, ...second.results.filter((r) => r.downloaded)];
-  if (successes.length >= expectedCount) return successes.sort((a, b) => a.index - b.index);
-  const successIndices = new Set(successes.map((r) => r.index));
-  return [
-    ...successes,
-    ...second.results.filter((r) => !r.downloaded && !successIndices.has(r.index)),
-  ].sort((a, b) => a.index - b.index);
+  const final = [...successful.values()];
+  const finalIndices = new Set(final.map((entry) => entry.index));
+  for (const result of results) {
+    if (!result.downloaded && !finalIndices.has(result.index)) {
+      final.push(result);
+      if (Number.isInteger(result.index)) finalIndices.add(result.index);
+    }
+  }
+  return final.sort((a, b) => (a.index ?? Number.MAX_SAFE_INTEGER) - (b.index ?? Number.MAX_SAFE_INTEGER));
 }

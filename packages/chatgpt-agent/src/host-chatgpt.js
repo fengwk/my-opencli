@@ -109,8 +109,6 @@ export const {
   ensureChatGPTComposer,
   ensureChatGPTLogin,
   getChatGPTSendFailureState,
-  getChatGPTImageAssets,
-  getChatGPTVisibleImageUrls,
   openChatGPTConversation,
   parseChatGPTConversationId,
   requireNonEmptyPrompt,

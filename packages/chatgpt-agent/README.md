@@ -5,9 +5,9 @@ Protocol-first ChatGPT web adapter:
 1. Arm HTTP-stream + WS capture → send composer message
 2. Collect stream text / sandbox files / image gen pointers
 3. Files: human-like chip / flyout Download via `waitForDownload`
-4. Images: official-style DOM export (fetch/canvas → local files)
+4. Images: select current-turn gallery images, then use ChatGPT viewer → Download → `Download image` with `waitForDownload`
 5. Uploads: sequential `setFileInput` (path) — native CDP path only, no DataTransfer / base64 fallback
-6. Managed collect: Chrome downloads are remapped (`C:\...` → `/mnt/c/...` on WSL) and copied into `--op` (`path` / `collected` / `collectedFrom` / `bytes`)
+6. Managed collect: receipt-proven Chrome downloads are remapped (`C:\...` → `/mnt/c/...` on WSL) and copied into `--op`
 
 ## Turn stream transports
 
@@ -61,19 +61,16 @@ non-invasively through CDP — the page's own `fetch`/XHR are never patched.
 
 ### Generated-image gallery compatibility
 
-- Modern generated-image galleries use loaded image dimensions rather than preview layout size, which can remain `0×0`.
-- Multi-image turns may mount only the selected image in the main preview. Export also reads the `Generated images` side rail, whose sources are full-size images, in rail order and deduplicates the active preview.
-- Export matches the nearest `data-chatgpt-search-message-ids` container against the current turn's protocol image message IDs. User uploads, unrelated thumbnails, and historical galleries are not modern-path export candidates.
-- Export waits for the protocol-reported image count within the polling/time budget. A partial export reports `IMAGE_EXPORT_INCOMPLETE` rather than success; downloaded files are preserved. Recover from the existing conversation instead of resubmitting a generation.
-- Missing message IDs or failed/malformed DOM evaluation fail closed. The legacy visible-image extractor is used only when modern gallery markers are absent.
-- Lazy side-rail blobs can be fetched before thumbnail decoding completes; export checks and reports the decoded file's dimensions rather than the small thumbnail layout.
-- Inspection requests contain only a Blob/HTTP URL or an inline image's SHA-256 (resolved against the existing DOM), never the fetched image's Base64. This avoids the daemon's command-body limit without increasing it. If an inline source is no longer in the DOM, inspection reports that limitation and preserves the existing fail-open policy.
-- If export is incomplete and the timeout budget allows, the dedicated automation tab leaves and reopens the validated persisted conversation once. This really remounts the gallery even when the host skips navigation to the current URL; it never resubmits the prompt. Files already saved are reused by SHA-256 so the reload does not duplicate Hub resources.
+- Generated-image export requires non-empty protocol image `messageId` values. It only targets galleries whose nearest `data-chatgpt-search-message-ids` scope matches those IDs; missing IDs, historical galleries, user uploads, and ambiguous targets fail closed.
+- Multi-image galleries are selected in `Generated images` side-rail order. Each rail selection is verified against its selected preview before opening the viewer. A single preview without a rail is allowed only inside one unambiguous scoped gallery.
+- Each image uses the viewer's `Download` menu trigger and the exact `Download image` menu item; `waitForDownload` is armed before the final CDP click. The completed Chrome receipt's local file is validated as a non-empty image and copied to `--op`. Results retain `kind: image-export` and report `method: chrome-download`, the original filename, download id, managed path, byte count and SHA-256.
+- Image bytes never pass through the daemon command or response. There is no image Base64 extraction, host asset fetch, or fallback export path.
+- Downloads use the caller's remaining timeout for discovery, UI actions and the receipt waiter. On incomplete output, the validated persisted conversation may be remounted once without resubmitting the prompt. Successful files are retained across the remount and already completed indices are skipped.
 
 ### Hub file boundary
 
 - Input: the Skill uploads attachments with Hub multipart resources first. Execution argv references `/resources/...`; Hub resolves it to an execution-host path. `uploadComposerFiles` passes that path to `page.setFileInput`, and Chrome reads the file through native CDP. Do not embed attachment bytes in command JSON.
-- Output: the plugin writes artifacts into `--op`, which Hub injects as a per-execution directory, then Hub scans it and returns resource download URLs. Images currently use the host's page Blob → Base64 **response** → local-file export; ordinary file downloads use Chrome's native download path and are copied into `--op`. Neither path sends image bytes through Hub command argv.
+- Output: the plugin writes artifacts into `--op`, which Hub injects as a per-execution directory, then Hub scans it and returns resource download URLs. Both generated images and ordinary files use Chrome's native download path and are copied into `--op`; image bytes are not sent through Hub command argv or responses.
 - The Hub/CLI/Chrome deployment needs a shared filesystem for path-based upload and native-download collection. A browser on another host needs an explicit file-transfer facility; passing the caller's local path is not enough.
 
 ## Requirements

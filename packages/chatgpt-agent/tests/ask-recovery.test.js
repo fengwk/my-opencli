@@ -53,11 +53,9 @@ vi.mock('../src/resolve.js', () => ({
 }));
 
 const exportNewImagesLikeOfficial = vi.fn();
-const snapshotVisibleImageUrls = vi.fn();
 const resolveImageOutputDir = vi.fn((p) => p || '/tmp/pictures');
 vi.mock('../src/image-export.js', () => ({
   exportNewImagesLikeOfficial: (...args) => exportNewImagesLikeOfficial(...args),
-  snapshotVisibleImageUrls: (...args) => snapshotVisibleImageUrls(...args),
   resolveImageOutputDir: (...args) => resolveImageOutputDir(...args),
 }));
 
@@ -75,7 +73,6 @@ describe('chatgpt-agent/ask recovery execution flow', () => {
     probeChatSurface.mockReset().mockResolvedValue({ broken: false, composer: true });
     ensureIdleSurfaceWithRecovery.mockResolvedValue({ ok: true });
     recoverChatSurfaceAfterFailure.mockResolvedValue({});
-    snapshotVisibleImageUrls.mockResolvedValue([]);
     sendChatGPTMessage.mockResolvedValue(true);
     getChatGPTSendFailureState.mockReset().mockResolvedValue({
       composer: true,
@@ -204,7 +201,6 @@ describe('chatgpt-agent/ask recovery execution flow', () => {
       session: 'explicit-session-id', allowReload: false,
     });
     expect(clearChatGPTDraft).not.toHaveBeenCalled();
-    expect(snapshotVisibleImageUrls).not.toHaveBeenCalled();
     expect(probeChatSurface).not.toHaveBeenCalled();
     expect(sendChatGPTMessage).not.toHaveBeenCalled();
     expect(page.startSseCapture).not.toHaveBeenCalled();
@@ -421,7 +417,9 @@ describe('chatgpt-agent/ask recovery execution flow', () => {
 
     const result = await askCommand.func(page, { prompt: 'draw a cat' });
     expect(exportNewImagesLikeOfficial).toHaveBeenCalledWith(page, expect.objectContaining({
-      pollIterations: 60,
+      messageIds: [],
+      outputDir: '/tmp/pictures',
+      remainingMs: expect.any(Function),
       canContinue: expect.any(Function),
     }));
     expect(ensureIdleSurfaceWithRecovery).toHaveBeenCalledTimes(2);

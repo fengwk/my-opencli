@@ -42,7 +42,6 @@ import { ensureHealthyChatSurface, probeChatSurface } from './src/page-health.js
 import {
   exportNewImagesLikeOfficial,
   resolveImageOutputDir,
-  snapshotVisibleImageUrls,
 } from './src/image-export.js';
 import { collectDownloadsToOutputDir } from './src/artifact-collect.js';
 import {
@@ -371,9 +370,6 @@ export const askCommand = cli({
       }
     }
 
-    // Snapshot visible images before send (official image.js pattern).
-    const beforeImageUrls = await snapshotVisibleImageUrls(page);
-
     // Idle recovery or an upload can navigate away from the validated thread.
     // Allow hydration, but never reload an attached draft or retry submission.
     let finalSurface = await probeChatSurface(page, { session });
@@ -547,7 +543,7 @@ export const askCommand = cli({
 
       // Data-driven downloads from THIS turn only:
       //   files  → chip / flyout Download (chrome.downloads)
-      //   images → official-style DOM export (fetch/canvas → local file)
+      //   images → native Chrome image download scoped to protocol message IDs
       let downloads = [];
       const remainingMs = () => Math.max(0, timeoutMs - (Date.now() - t0));
       const fileNames = collectExpectedFileNames(artifacts);
@@ -568,7 +564,7 @@ export const askCommand = cli({
         }
       }
 
-      if ((artifacts.images || []).length > 0 && remainingMs() >= 3_000) {
+      if ((artifacts.images || []).length > 0) {
         const imageMessageIds = Array.from(
           new Set(
             (artifacts.images || [])
@@ -577,13 +573,11 @@ export const askCommand = cli({
           ),
         );
         const imgDl = await exportNewImagesLikeOfficial(page, {
-          beforeUrls: beforeImageUrls,
           expectedCount: artifacts.images.length,
           messageIds: imageMessageIds,
           outputDir: managedOutputDir,
-          settleMs: 1200,
-          pollIterations: 60,
-          canContinue: () => remainingMs() >= 2_000,
+          remainingMs,
+          canContinue: () => remainingMs() > 0,
           // Caller owns route validation: build the reload hook only for a
           // verified /c/<id> conversation URL. At most one reload happens when
           // an image is missing, unavailable or still a transparent placeholder.
