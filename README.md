@@ -2,6 +2,13 @@
 
 Personal OpenCLI plugins, installed via the official plugin mechanism.
 
+## v0.1.68
+
+- Align all five plugin versions at `0.1.68`; only `jimeng-agent` changes its page logic this release.
+- Fix the Jimeng AI-Agent prompt-composer clear false failure (`retained content after keyboard clear`): Jimeng migrated the composer placeholder from the legacy `rich-placeholder` markup to a `data-document-placeholder` paragraph containing a `.document-placeholder-widget` span, which the adapter misread as real input (36 text characters + 1 false mention node) and aborted every prepare before any submission.
+- Filter only the placeholder widget in the affected composer paths (clear state, prompt caret end point, content checkpoint). A `data-document-placeholder` paragraph that also holds real prompt text or `@图片N` mention chips still counts as non-empty, so no clear-safety check is relaxed.
+- Verified against the live Jimeng page (an empty composer now reads `0 text / 0 mention`) and by regression tests reproducing both placeholder DOM shapes; real-text and mention fixtures still fail the clear check as before.
+
 ## v0.1.67
 
 - Align all five plugin versions at `0.1.67`; other plugin business logic is unchanged.
