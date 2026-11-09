@@ -6,13 +6,14 @@
  * Sparse transparent ChatGPT loading placeholders (e.g. a `data:image/png` canvas
  * mounted before the real asset finishes rendering) must never be persisted as a
  * successful download. When protocol image pointers exist but the first visual
- * attempt yields no valid asset, the dedicated automation page may be reloaded
+ * attempt yields fewer than the expected assets, the automation page may be reloaded
  * once and the export pipeline re-run, gated by the caller's `canRetry` hook.
  */
 
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { createHash } from 'node:crypto';
 import { saveBase64ToFile } from '@jackwener/opencli/utils';
 import { modernImageExtractorScript, unwrapEvaluateResult } from './dom-helpers.js';
 import {
@@ -21,7 +22,6 @@ import {
 } from './host-chatgpt.js';
 
 const DEFAULT_POLL_ITERATIONS = 12;
-const DEFAULT_POLL_STABLE_INDEX = 3;
 const PLACEHOLDER_INSPECT_MAX_SIDE = 512;
 const PLACEHOLDER_INSPECT_SAMPLE_GRID = 16;
 const PLACEHOLDER_INSPECT_TIMEOUT_MS = 2000;
@@ -159,18 +159,36 @@ export async function snapshotVisibleImageUrls(page, messageIds) {
 // ChatGPT occasionally mounts a fully transparent 480x480 PNG canvas as a loading
 // placeholder for the generated image. Refreshing the page in the browser reveals
 // the genuine output; the placeholder is essentially alpha=0 with negligible RGB.
-// Detection is done in the dedicated automation page: load the data URL into a
-// temp Image, draw it into a bounded canvas (max side <= 512), and sample a
+// Detection is done in the dedicated automation page: reference its existing
+// image, draw it into a bounded canvas (max side <= 512), and sample a
 // 16x16 grid for mean alpha / non-transparent ratio. We fail open on any page /
 // canvas / decode error so an unknown image is never silently dropped.
 
-function buildPlaceholderInspectScript(dataUrl) {
+function buildPlaceholderInspectScript(source) {
   // The script is the only place page-context happens. It always resolves
   // with `{ inspected: bool, ... }` so the caller never has to handle a
   // thrown promise from page.evaluate.
   return `(async () => {
-    const dataUrl = ${JSON.stringify(dataUrl)};
+    const source = ${JSON.stringify(source)};
     try {
+      let imageUrl = source.url || '';
+      if (source.inlineSha256) {
+        // Inline images already live in this DOM. Send only a digest across the
+        // command channel, then resolve that exact source here, not its bytes.
+        const seen = new Set();
+        for (const node of document.querySelectorAll('img')) {
+          const candidate = node.currentSrc || node.src || '';
+          if (!candidate.startsWith('data:image/') || seen.has(candidate)) continue;
+          seen.add(candidate);
+          const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(candidate));
+          const hex = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
+          if (hex === source.inlineSha256) {
+            imageUrl = candidate;
+            break;
+          }
+        }
+        if (!imageUrl) return { inspected: false, reason: 'inline-source-not-in-dom' };
+      }
       const img = new Image();
       await new Promise((resolve, reject) => {
         let settled = false;
@@ -199,7 +217,7 @@ function buildPlaceholderInspectScript(dataUrl) {
         // synchronously, so a later onload assignment can miss the event.
         img.onload = settleResolve;
         img.onerror = () => settleReject(new Error('image-load-failed'));
-        img.src = dataUrl;
+        img.src = imageUrl;
         // Already complete (synchronous decode or cache hit): trust the
         // natural dimensions. Zero/NaN means the payload did not decode
         // into a real image — fail open instead of sampling a fake 1x1.
@@ -253,6 +271,8 @@ function buildPlaceholderInspectScript(dataUrl) {
         inspected: true,
         width: cw,
         height: ch,
+        originalWidth: w,
+        originalHeight: h,
         meanAlpha: totalAlpha / samples,
         nonTransparentRatio: nonTransparent / samples,
         samples,
@@ -269,16 +289,23 @@ function buildPlaceholderInspectScript(dataUrl) {
  * non-data-URL input yields `{ rejected: false }` so the asset is saved.
  *
  * @param {object} page  page object exposing `evaluate(script)`.
- * @returns {(dataUrl: string, mimeType?: string) => Promise<{ rejected: boolean, reason?: string, meanAlpha?: number, nonTransparentRatio?: number }>}
+ * @returns {(dataUrl: string, mimeType?: string, sourceUrl?: string) => Promise<{ rejected: boolean, reason?: string, meanAlpha?: number, nonTransparentRatio?: number, originalWidth?: number, originalHeight?: number }>}
  */
 export function makeInspectPlaceholder(page) {
-  return async (dataUrl, _mimeType) => {
+  return async (dataUrl, _mimeType, sourceUrl) => {
     if (typeof dataUrl !== 'string' || !/^data:image\/[a-z0-9.+-]+;/i.test(dataUrl)) {
       return { rejected: false, reason: 'not-data-url' };
     }
     let raw;
     try {
-      raw = await page.evaluate(buildPlaceholderInspectScript(dataUrl));
+      // The command channel carries references, never image contents. Blob and
+      // HTTP sources use their URL; inline DOM images use a fixed-size digest.
+      const originalSource = typeof sourceUrl === 'string'
+        && /^(blob:|https?:|data:image\/)/i.test(sourceUrl) ? sourceUrl : dataUrl;
+      const source = /^data:image\//i.test(originalSource)
+        ? { inlineSha256: createHash('sha256').update(originalSource).digest('hex') }
+        : { url: originalSource };
+      raw = await page.evaluate(buildPlaceholderInspectScript(source));
     } catch (err) {
       return { rejected: false, reason: 'evaluation-error', error: err?.message || String(err) };
     }
@@ -302,7 +329,14 @@ export function makeInspectPlaceholder(page) {
         nonTransparentRatio,
       };
     }
-    return { rejected: false, reason: 'looks-opaque-enough', meanAlpha, nonTransparentRatio };
+    return {
+      rejected: false,
+      reason: 'looks-opaque-enough',
+      meanAlpha,
+      nonTransparentRatio,
+      originalWidth: Number(result.originalWidth) || 0,
+      originalHeight: Number(result.originalHeight) || 0,
+    };
   };
 }
 
@@ -337,14 +371,14 @@ export function isContinueAllowed(predicate) {
  *   snapshotUrls: () => Promise<string[]>,
  *   fetchAssets: (urls: string[]) => Promise<Array<{ url: string, dataUrl: string, mimeType: string, width: number, height: number }>>,
  *   saveBase64: (base64: string, filePath: string) => Promise<void>,
- *   inspectPlaceholder: (dataUrl: string, mimeType?: string) => Promise<{ rejected: boolean, reason?: string, meanAlpha?: number, nonTransparentRatio?: number }>,
+ *   inspectPlaceholder: (dataUrl: string, mimeType?: string, sourceUrl?: string) => Promise<{ rejected: boolean, reason?: string, meanAlpha?: number, nonTransparentRatio?: number, originalWidth?: number, originalHeight?: number }>,
  *   beforeSet: Set<string>,
  *   expectedCount: number,
  *   outputDir: string,
  *   settleMs: number,
  *   pollIterations?: number,
- *   pollStableIndex?: number,
  *   canContinue?: () => boolean,
+ *   reuseDownloads?: object[],
  * }} deps
  * @returns {Promise<{ results: object[], hasValidDownload: boolean }>}
  */
@@ -360,8 +394,8 @@ export async function runImageExportAttempt(deps) {
     outputDir,
     settleMs,
     pollIterations = DEFAULT_POLL_ITERATIONS,
-    pollStableIndex = DEFAULT_POLL_STABLE_INDEX,
     canContinue,
+    reuseDownloads = [],
   } = deps;
 
   await sleep(settleMs / 1000);
@@ -377,7 +411,8 @@ export async function runImageExportAttempt(deps) {
     }
     urls = (Array.isArray(all) ? all : []).filter((u) => u && !beforeSet.has(u));
     if (urls.length >= expectedCount) break;
-    if (urls.length > 0 && i >= pollStableIndex) break;
+    // One loaded sibling is not a complete batch. Keep waiting until the
+    // protocol count is met, or the bounded poll / caller budget is exhausted.
     if (i < pollIterations - 1) {
       if (!isContinueAllowed(canContinue)) break;
       await sleep(1);
@@ -422,13 +457,24 @@ export async function runImageExportAttempt(deps) {
 
   const stamp = Date.now();
   const results = [];
+  // Reloading changes blob URLs, not file bytes. Reuse earlier successful files
+  // by content, with multiplicity (two identical outputs still count as two).
+  const reusable = new Map();
+  for (const saved of reuseDownloads) {
+    if (!saved?.downloaded || !saved.sha256) continue;
+    const matches = reusable.get(saved.sha256) || [];
+    matches.push(saved);
+    reusable.set(saved.sha256, matches);
+  }
   for (let index = 0; index < assets.length; index += 1) {
     const asset = assets[index];
+    const sourceIndex = urls.indexOf(asset.url);
+    const outputIndex = sourceIndex < 0 ? index : sourceIndex;
     const base64 = String(asset.dataUrl || '').replace(/^data:[^;]+;base64,/, '');
     if (!base64) {
       results.push({
         kind: 'image-export',
-        index,
+        index: outputIndex,
         downloaded: false,
         error: 'empty-data-url',
         url: asset.url || '',
@@ -436,11 +482,11 @@ export async function runImageExportAttempt(deps) {
       continue;
     }
 
-    const placeholder = await inspectPlaceholder(asset.dataUrl, asset.mimeType);
+    const placeholder = await inspectPlaceholder(asset.dataUrl, asset.mimeType, asset.url);
     if (placeholder && placeholder.rejected) {
       results.push({
         kind: 'image-export',
-        index,
+        index: outputIndex,
         downloaded: false,
         error: 'sparse-placeholder-rejected',
         url: asset.url || '',
@@ -454,21 +500,50 @@ export async function runImageExportAttempt(deps) {
       continue;
     }
 
-    const suffix = assets.length > 1 ? `_${index + 1}` : '';
+    const suffix = urls.length > 1 ? `_${outputIndex + 1}` : '';
+    // Lazy rail <img> nodes can still have 0x0 natural size (or 56px layout).
+    // Validate and report the decoded asset, not the thumbnail element.
+    const width = placeholder?.originalWidth || asset.width || 0;
+    const height = placeholder?.originalHeight || asset.height || 0;
+    if ((width > 0 && width < 128) || (height > 0 && height < 128)) {
+      results.push({
+        kind: 'image-export',
+        index: outputIndex,
+        downloaded: false,
+        error: 'image-too-small',
+        url: asset.url || '',
+        width,
+        height,
+      });
+      continue;
+    }
     const ext = extFromMime(asset.mimeType);
-    const filePath = nextAvailablePath(outputDir, `chatgpt-agent_${stamp}${suffix}`, ext);
-    await saveBase64(base64, filePath);
+    const sha256 = createHash('sha256').update(Buffer.from(base64, 'base64')).digest('hex');
+    const previous = reusable.get(sha256)?.shift();
+    const filePath = previous?.path
+      || nextAvailablePath(outputDir, `chatgpt-agent_${stamp}${suffix}`, ext);
+    if (!previous) await saveBase64(base64, filePath);
     results.push({
       kind: 'image-export',
-      index,
+      index: outputIndex,
       downloaded: true,
       path: filePath,
+      sha256,
       url: asset.url || '',
       mimeType: asset.mimeType || '',
-      width: asset.width || 0,
-      height: asset.height || 0,
+      width,
+      height,
     });
   }
+  // The host asset fetcher may silently omit failed blobs. Keep those failures
+  // explicit so incomplete exports can be diagnosed without generating again.
+  const fetched = new Set(assets.map((asset) => asset.url));
+  urls.forEach((url, index) => {
+    if (!fetched.has(url)) {
+      results.push({ kind: 'image-export', index, downloaded: false, error: 'image-asset-export-failed', url });
+    }
+  });
+  results.sort((a, b) => a.index - b.index);
 
   return {
     hasValidDownload: results.some((r) => r && r.downloaded === true),
@@ -482,7 +557,7 @@ export async function runImageExportAttempt(deps) {
  * Caller-owned retry policy: the caller passes a `reloadConversation` callback
  * (already validated as targeting a real conversation URL) and an optional
  * `canRetry` predicate. At most one reload happens when the first attempt
- * produced no valid download and `canRetry()` returns true. Reload failures
+ * produced fewer than the expected downloads and `canRetry()` returns true. Reload failures
  * fall back to the first attempt's results.
  *
  * @param {object} page
@@ -493,7 +568,6 @@ export async function runImageExportAttempt(deps) {
  *   outputDir?: string,
  *   settleMs?: number,
  *   pollIterations?: number,
- *   pollStableIndex?: number,
  *   canContinue?: () => boolean,
  *   reloadConversation?: () => Promise<void>,
  *   canRetry?: () => boolean,
@@ -506,7 +580,6 @@ export async function exportNewImagesLikeOfficial(page, opts = {}) {
   const outputDir = resolveImageOutputDir(opts.outputDir);
   const settleMs = opts.settleMs ?? 1500;
   const pollIterations = opts.pollIterations ?? DEFAULT_POLL_ITERATIONS;
-  const pollStableIndex = opts.pollStableIndex ?? DEFAULT_POLL_STABLE_INDEX;
   const canContinue = typeof opts.canContinue === 'function' ? opts.canContinue : null;
   const reloadConversation = typeof opts.reloadConversation === 'function'
     ? opts.reloadConversation
@@ -528,20 +601,20 @@ export async function exportNewImagesLikeOfficial(page, opts = {}) {
     outputDir,
     settleMs,
     pollIterations,
-    pollStableIndex,
     canContinue,
   };
 
   const first = await runImageExportAttempt(baseDeps);
 
   const retryAllowed = !!reloadConversation && isContinueAllowed(canRetry);
-  if (first.hasValidDownload || !retryAllowed) {
+  const successfulCount = (attempt) => attempt.results.filter((r) => r.downloaded === true).length;
+  if (successfulCount(first) >= expectedCount || !retryAllowed) {
     return first.results;
   }
 
   if (process.env.OPENCLI_VERBOSE) {
     console.error(
-      '[chatgpt-agent] image-export: no valid download, retrying after conversation reload',
+      '[chatgpt-agent] image-export: incomplete downloads, retrying after conversation reload',
     );
   }
   try {
@@ -555,6 +628,16 @@ export async function exportNewImagesLikeOfficial(page, opts = {}) {
     return first.results;
   }
 
-  const second = await runImageExportAttempt(baseDeps);
-  return second.results;
+  const second = await runImageExportAttempt({ ...baseDeps, reuseDownloads: first.results });
+  // A reload may fetch a different partial subset. Preserve earlier successes
+  // that were not reused, instead of replacing them with the second subset.
+  const secondPaths = new Set(second.results.filter((r) => r.downloaded).map((r) => r.path));
+  const retained = first.results.filter((r) => r.downloaded && !secondPaths.has(r.path));
+  const successes = [...retained, ...second.results.filter((r) => r.downloaded)];
+  if (successes.length >= expectedCount) return successes.sort((a, b) => a.index - b.index);
+  const successIndices = new Set(successes.map((r) => r.index));
+  return [
+    ...successes,
+    ...second.results.filter((r) => !r.downloaded && !successIndices.has(r.index)),
+  ].sort((a, b) => a.index - b.index);
 }

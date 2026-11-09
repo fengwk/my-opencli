@@ -22,6 +22,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { webcrypto } from 'node:crypto';
+import { runInNewContext } from 'node:vm';
 
 const getChatGPTVisibleImageUrls = vi.fn();
 const getChatGPTImageAssets = vi.fn();
@@ -118,6 +120,79 @@ const OPAQUE_STATS = {
 // --- Page-side inspector (fail-open semantics) -----------------------------------
 
 describe('makeInspectPlaceholder', () => {
+  // The HTTP/legacy source must not fall back to sending fetched image bytes.
+  it('inspects an HTTP image by URL without sending its base64 back to the browser', async () => {
+    const page = pageReturningInspection(OPAQUE_STATS);
+    const hugeData = `data:image/png;base64,${'B'.repeat(2_000_000)}`;
+    await makeInspectPlaceholder(page)(hugeData, 'image/png', 'https://chatgpt.com/image.png');
+    const script = page.evaluate.mock.calls[0][0];
+    expect(script).toContain('https://chatgpt.com/image.png');
+    expect(script.length).toBeLessThan(10_000);
+    expect(script).not.toContain(hugeData);
+  });
+
+  // Execute the generated lookup script: a digest finds the exact inline DOM
+  // image while the request remains small even for multi-megabyte data URLs.
+  it('resolves an inline image in the DOM by digest without retransmitting its contents', async () => {
+    const hugeData = `data:image/png;base64,${'C'.repeat(2_000_000)}`;
+    const canvasContext = {
+      drawImage() {},
+      getImageData: () => ({ data: [0, 0, 0, 255] }),
+    };
+    const page = {
+      evaluate: vi.fn(async (script) => runInNewContext(script, {
+        crypto: webcrypto,
+        TextEncoder,
+        Image: class {
+          complete = true;
+          naturalWidth = 1024;
+          naturalHeight = 1536;
+        },
+        document: {
+          querySelectorAll: () => [
+            { src: 'data:image/png;base64,unrelated' }, { src: hugeData },
+          ],
+          createElement: () => ({ getContext: () => canvasContext }),
+        },
+        setTimeout,
+        clearTimeout,
+      })),
+    };
+    const result = await makeInspectPlaceholder(page)(hugeData, 'image/png', hugeData);
+    const script = page.evaluate.mock.calls[0][0];
+    expect(script.length).toBeLessThan(10_000);
+    expect(script).not.toContain(hugeData);
+    expect(result).toMatchObject({
+      rejected: false, reason: 'looks-opaque-enough', originalWidth: 1024, originalHeight: 1536,
+    });
+  });
+
+  // Real PNGs exceed the daemon's request limit: inspect the existing blob URL
+  // rather than sending its multi-megabyte data URL back through page.evaluate.
+  it('inspects the page-owned blob without re-uploading the image bytes', async () => {
+    const page = pageReturningInspection({
+      ...OPAQUE_STATS, originalWidth: 1024, originalHeight: 1536,
+    });
+    const inspect = makeInspectPlaceholder(page);
+    const hugeData = `data:image/png;base64,${'A'.repeat(2_000_000)}`;
+    const result = await inspect(hugeData, 'image/png', 'blob:https://chatgpt.com/large');
+    const script = page.evaluate.mock.calls[0][0];
+    expect(script).toContain('blob:https://chatgpt.com/large');
+    expect(script.length).toBeLessThan(10_000);
+    expect(script).not.toContain(hugeData);
+    expect(result).toMatchObject({ rejected: false, originalWidth: 1024, originalHeight: 1536 });
+  });
+
+  // A lazy rail's layout/natural sizes are not the size of its underlying PNG.
+  it('returns original decoded dimensions separately from the inspection canvas', async () => {
+    const inspect = makeInspectPlaceholder(pageReturningInspection({
+      ...OPAQUE_STATS, originalWidth: 1024, originalHeight: 1536,
+    }));
+    expect(await inspect(VALID_IMAGE_DATA_URL, 'image/png')).toMatchObject({
+      rejected: false, originalWidth: 1024, originalHeight: 1536,
+    });
+  });
+
   it('reports rejected=true for a sparse transparent inspection result', async () => {
     const page = pageReturningInspection(SPARSE_STATS);
     const inspect = makeInspectPlaceholder(page);
@@ -167,6 +242,93 @@ describe('makeInspectPlaceholder', () => {
 describe('runImageExportAttempt', () => {
   const beforeSet = new Set(['https://chatgpt.com/old.png']);
   const outputDir = '/tmp/cga-imgexp-unused';
+
+  // Sibling images may load after the fourth poll; do not accept a partial batch.
+  it('waits for all expected images instead of stopping after one at poll 4', async () => {
+    const urls = ['blob:one', 'blob:two', 'blob:three'];
+    let polls = 0;
+    const saveBase64 = vi.fn(async () => {});
+    const result = await runImageExportAttempt({
+      sleep: async () => {},
+      snapshotUrls: async () => (++polls < 6 ? urls.slice(0, 1) : urls),
+      fetchAssets: async (found) => found.map((url) => ({
+        url, dataUrl: VALID_IMAGE_DATA_URL, mimeType: 'image/png', width: 1024, height: 1536,
+      })),
+      saveBase64,
+      inspectPlaceholder: async () => ({ rejected: false }),
+      beforeSet,
+      expectedCount: 3,
+      outputDir,
+      settleMs: 0,
+      pollIterations: 8,
+    });
+    expect(polls).toBe(6);
+    expect(result.results.filter((r) => r.downloaded)).toHaveLength(3);
+    expect(new Set(saveBase64.mock.calls.map(([, file]) => file)).size).toBe(3);
+  });
+
+  // A permanently missing sibling still respects the caller's bounded wait.
+  it('exhausts the polling budget when only one of three images loads', async () => {
+    const snapshotUrls = vi.fn(async () => [VALID_IMAGE_DATA_URL]);
+    const result = await runImageExportAttempt({
+      sleep: async () => {},
+      snapshotUrls,
+      fetchAssets: async () => [{
+        url: VALID_IMAGE_DATA_URL, dataUrl: VALID_IMAGE_DATA_URL, mimeType: 'image/png',
+      }],
+      saveBase64: async () => {},
+      inspectPlaceholder: async () => ({ rejected: false }),
+      beforeSet,
+      expectedCount: 3,
+      outputDir,
+      settleMs: 0,
+      pollIterations: 6,
+    });
+    expect(snapshotUrls).toHaveBeenCalledTimes(6);
+    expect(result.results.filter((r) => r.downloaded)).toHaveLength(1);
+  });
+
+  // Report the real asset size even when the DOM thumbnail is only 56px wide.
+  it('uses decoded asset dimensions instead of side-rail layout dimensions', async () => {
+    const result = await runImageExportAttempt({
+      sleep: async () => {},
+      snapshotUrls: async () => ['blob:lazy'],
+      fetchAssets: async () => [{
+        url: 'blob:lazy', dataUrl: VALID_IMAGE_DATA_URL, mimeType: 'image/png', width: 56, height: 56,
+      }],
+      saveBase64: async () => {},
+      inspectPlaceholder: async () => ({
+        rejected: false, originalWidth: 1024, originalHeight: 1536,
+      }),
+      beforeSet,
+      expectedCount: 1,
+      outputDir,
+      settleMs: 0,
+    });
+    expect(result.results[0]).toMatchObject({ downloaded: true, width: 1024, height: 1536 });
+  });
+
+  // Allowing lazy blob URLs must not admit an actual tiny thumbnail as an output.
+  it('rejects lazy assets whose decoded dimensions are below the image minimum', async () => {
+    const saveBase64 = vi.fn();
+    const result = await runImageExportAttempt({
+      sleep: async () => {},
+      snapshotUrls: async () => ['blob:tiny'],
+      fetchAssets: async () => [{
+        url: 'blob:tiny', dataUrl: VALID_IMAGE_DATA_URL, mimeType: 'image/png',
+      }],
+      saveBase64,
+      inspectPlaceholder: async () => ({
+        rejected: false, originalWidth: 56, originalHeight: 56,
+      }),
+      beforeSet,
+      expectedCount: 1,
+      outputDir,
+      settleMs: 0,
+    });
+    expect(result.results[0]).toMatchObject({ downloaded: false, error: 'image-too-small' });
+    expect(saveBase64).not.toHaveBeenCalled();
+  });
 
   it('rejects a sparse placeholder and never calls saveBase64', async () => {
     const saveBase64 = vi.fn(async () => undefined);
@@ -259,6 +421,77 @@ describe('exportNewImagesLikeOfficial', () => {
     saveBase64ToFile.mockReset();
     unwrapEvaluateResult.mockReset();
     unwrapEvaluateResult.mockImplementation((payload) => payload);
+  });
+
+  // Live three-image turns can lose one blob during fetch. A single reload
+  // should complete the batch without duplicating the two already saved files.
+  it('recovers a partial three-image fetch after reload and reuses saved files', async () => {
+    const outputDir = tmpOutputDir();
+    const page = pageReturningInspection(OPAQUE_STATS);
+    const firstUrls = ['blob:first-a', 'blob:first-b', 'blob:first-c'];
+    const nextUrls = ['blob:next-a', 'blob:next-b', 'blob:next-c'];
+    const asset = (url, bytes) => ({
+      url, dataUrl: `data:image/png;base64,${Buffer.from(bytes).toString('base64')}`,
+      mimeType: 'image/png', width: 1024, height: 1536,
+    });
+    getChatGPTVisibleImageUrls.mockResolvedValueOnce(firstUrls).mockResolvedValueOnce(nextUrls);
+    getChatGPTImageAssets
+      .mockResolvedValueOnce([asset(firstUrls[0], 'A'), asset(firstUrls[1], 'B')])
+      .mockResolvedValueOnce(nextUrls.map((url, index) => asset(url, ['A', 'B', 'C'][index])));
+    const reloadConversation = vi.fn(async () => {});
+    const results = await exportNewImagesLikeOfficial(page, {
+      expectedCount: 3, outputDir, settleMs: 0, pollIterations: 1,
+      reloadConversation, canRetry: () => true,
+    });
+    expect(reloadConversation).toHaveBeenCalledTimes(1);
+    expect(results.filter((r) => r.downloaded)).toHaveLength(3);
+    expect(results.map((r) => r.url)).toEqual(nextUrls);
+    expect(saveBase64ToFile).toHaveBeenCalledTimes(3); // Not 5: reuse the first two.
+    expect(new Set(results.map((r) => r.path)).size).toBe(3);
+  });
+
+  // A failed recovery must not replace an earlier usable partial batch with zero.
+  it('keeps partial downloads when the bounded reload cannot fetch any images', async () => {
+    const outputDir = tmpOutputDir();
+    const page = pageReturningInspection(OPAQUE_STATS);
+    getChatGPTVisibleImageUrls
+      .mockResolvedValueOnce(['blob:a', 'blob:b', 'blob:c'])
+      .mockResolvedValueOnce([]);
+    getChatGPTImageAssets.mockResolvedValueOnce([{
+      url: 'blob:a', dataUrl: VALID_IMAGE_DATA_URL, mimeType: 'image/png', width: 1024, height: 1536,
+    }]);
+    const reloadConversation = vi.fn(async () => {});
+    const results = await exportNewImagesLikeOfficial(page, {
+      expectedCount: 3, outputDir, settleMs: 0, pollIterations: 1,
+      reloadConversation, canRetry: () => true,
+    });
+    expect(reloadConversation).toHaveBeenCalledTimes(1);
+    expect(results.filter((r) => r.downloaded)).toHaveLength(1);
+    expect(saveBase64ToFile).toHaveBeenCalledTimes(1);
+  });
+
+  // Retry can fetch only the previously missing sibling; keep the first subset.
+  it('merges complementary partial downloads across the one reload', async () => {
+    const outputDir = tmpOutputDir();
+    const page = pageReturningInspection(OPAQUE_STATS);
+    const first = ['blob:a', 'blob:b', 'blob:c'];
+    const next = ['blob:next-a', 'blob:next-b', 'blob:next-c'];
+    const asset = (url, text) => ({
+      url, dataUrl: `data:image/png;base64,${Buffer.from(text).toString('base64')}`,
+      mimeType: 'image/png', width: 1024, height: 1536,
+    });
+    getChatGPTVisibleImageUrls.mockResolvedValueOnce(first).mockResolvedValueOnce(next);
+    getChatGPTImageAssets
+      .mockResolvedValueOnce([asset(first[0], 'A'), asset(first[1], 'B')])
+      .mockResolvedValueOnce([asset(next[2], 'C')]);
+    const results = await exportNewImagesLikeOfficial(page, {
+      expectedCount: 3, outputDir, settleMs: 0, pollIterations: 1,
+      reloadConversation: async () => {}, canRetry: () => true,
+    });
+    expect(results).toHaveLength(3);
+    expect(results.map((r) => r.index)).toEqual([0, 1, 2]);
+    expect(results.every((r) => r.downloaded)).toBe(true);
+    expect(saveBase64ToFile).toHaveBeenCalledTimes(3);
   });
 
   it('rejects an inspected sparse data placeholder and does not call saveBase64ToFile', async () => {

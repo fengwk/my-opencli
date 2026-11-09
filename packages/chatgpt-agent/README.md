@@ -62,9 +62,19 @@ non-invasively through CDP — the page's own `fetch`/XHR are never patched.
 ### Generated-image gallery compatibility
 
 - Modern generated-image galleries use loaded image dimensions rather than preview layout size, which can remain `0×0`.
+- Multi-image turns may mount only the selected image in the main preview. Export also reads the `Generated images` side rail, whose sources are full-size images, in rail order and deduplicates the active preview.
 - Export matches the nearest `data-chatgpt-search-message-ids` container against the current turn's protocol image message IDs. User uploads, unrelated thumbnails, and historical galleries are not modern-path export candidates.
+- Export waits for the protocol-reported image count within the polling/time budget. A partial export reports `IMAGE_EXPORT_INCOMPLETE` rather than success; downloaded files are preserved. Recover from the existing conversation instead of resubmitting a generation.
 - Missing message IDs or failed/malformed DOM evaluation fail closed. The legacy visible-image extractor is used only when modern gallery markers are absent.
-- If export initially fails and the timeout budget allows, the dedicated automation tab leaves and reopens the validated persisted conversation once. This really remounts the gallery even when the host skips navigation to the current URL; it never resubmits the prompt.
+- Lazy side-rail blobs can be fetched before thumbnail decoding completes; export checks and reports the decoded file's dimensions rather than the small thumbnail layout.
+- Inspection requests contain only a Blob/HTTP URL or an inline image's SHA-256 (resolved against the existing DOM), never the fetched image's Base64. This avoids the daemon's command-body limit without increasing it. If an inline source is no longer in the DOM, inspection reports that limitation and preserves the existing fail-open policy.
+- If export is incomplete and the timeout budget allows, the dedicated automation tab leaves and reopens the validated persisted conversation once. This really remounts the gallery even when the host skips navigation to the current URL; it never resubmits the prompt. Files already saved are reused by SHA-256 so the reload does not duplicate Hub resources.
+
+### Hub file boundary
+
+- Input: the Skill uploads attachments with Hub multipart resources first. Execution argv references `/resources/...`; Hub resolves it to an execution-host path. `uploadComposerFiles` passes that path to `page.setFileInput`, and Chrome reads the file through native CDP. Do not embed attachment bytes in command JSON.
+- Output: the plugin writes artifacts into `--op`, which Hub injects as a per-execution directory, then Hub scans it and returns resource download URLs. Images currently use the host's page Blob → Base64 **response** → local-file export; ordinary file downloads use Chrome's native download path and are copied into `--op`. Neither path sends image bytes through Hub command argv.
+- The Hub/CLI/Chrome deployment needs a shared filesystem for path-based upload and native-download collection. A browser on another host needs an explicit file-transfer facility; passing the caller's local path is not enough.
 
 ## Requirements
 

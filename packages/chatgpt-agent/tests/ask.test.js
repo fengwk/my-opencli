@@ -238,8 +238,8 @@ describe('assertSuccessfulImageExports', () => {
     }
   });
 
-  // Verifies that partial success (at least one image downloaded: true) succeeds without throwing.
-  it('does not throw when at least one image was successfully exported', () => {
+  // Partial files must remain on disk, but must not be reported as a complete turn.
+  it('reports incomplete export when only one of two protocol images was saved', () => {
     const artifacts = {
       images: [{ type: 'sediment', id: 'img-1' }, { type: 'sediment', id: 'img-2' }],
     };
@@ -248,6 +248,23 @@ describe('assertSuccessfulImageExports', () => {
       { kind: 'image-export', index: 2, downloaded: false, error: 'fetch failed' },
     ];
 
+    try {
+      assertSuccessfulImageExports(artifacts, downloads);
+      expect.unreachable('should have thrown CommandExecutionError');
+    } catch (err) {
+      expect(err).toBeInstanceOf(CommandExecutionError);
+      expect(err.message).toContain('IMAGE_EXPORT_INCOMPLETE');
+      expect(err.hint).toMatch(/expected=2, successful=1/);
+      expect(err.hint).toContain('Do not resubmit');
+    }
+  });
+
+  // All protocol images exported: ordinary multi-image turns remain successful.
+  it('accepts a complete three-image export', () => {
+    const artifacts = { images: [{ id: 'a' }, { id: 'b' }, { id: 'c' }] };
+    const downloads = ['a', 'b', 'c'].map((id) => ({
+      kind: 'image-export', downloaded: true, path: `/tmp/${id}.png`,
+    }));
     expect(() => assertSuccessfulImageExports(artifacts, downloads)).not.toThrow();
   });
 

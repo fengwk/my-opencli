@@ -416,20 +416,24 @@ export function previewCheckScript(basenames, minCount) {
  * Modern ChatGPT generated-image gallery extractor script.
  *
  * Targets:
+ *   main [role="group"][aria-label="Generated images"] button[aria-label^="Show generated image "] img
  *   main [data-testid="generated-image-gallery"] [data-testid="generated-image-preview"] img
  *
  * Rules:
- * 1. Checks strictly for presence of modern gallery within main / transcript scope.
+ * 1. Checks strictly for presence of modern gallery / side rail within main.
  *    If none exists, returns { modern: false, urls: [] } to trigger explicit legacy fallback.
  * 2. When messageIds are provided (array, even if empty):
- *    Strictly matches the nearest gallery.closest('[data-chatgpt-search-message-ids]') container.
+ *    Strictly matches the nearest scope.closest('[data-chatgpt-search-message-ids]') container.
  *    Does not ascend further to broader ancestral containers.
  *    If messageIds array is provided but contains no valid IDs, fails closed: returns { modern: true, urls: [] }.
  *    If messageIds are omitted (null/undefined), collects all loaded modern gallery images (e.g. beforeUrls snapshot).
  * 3. Does NOT require bounding rect dimensions > 0 (preview / img layout can be 0x0).
- * 4. Strictly requires loaded, reasonable natural dimensions (naturalWidth >= 128 && naturalHeight >= 128).
+ * 4. Requires loaded, reasonable natural dimensions, except lazy side-rail
+ *    blobs: those are already page-owned assets, decoded/size-checked on export.
  * 5. Single upward traversal on img to body checks hidden, inert, aria-hidden="true", display:none, visibility:hidden.
  * 6. Strictly excludes composer and user turn scopes.
+ * 7. Reads side rails first (full-size sources, not 56px thumbnails). Their
+ *    document order defines image order even if the main preview selects image 2.
  */
 export function modernImageExtractorScript(messageIds = null) {
   const idsJson = Array.isArray(messageIds)
@@ -442,7 +446,10 @@ export function modernImageExtractorScript(messageIds = null) {
       const main = document.querySelector('main') || document.querySelector('[role="main"]');
       if (!main) return { modern: false, urls: [] };
 
-      const galleries = Array.from(main.querySelectorAll('[data-testid="generated-image-gallery"]'));
+      const galleries = [
+        ...main.querySelectorAll('[role="group"][aria-label="Generated images"]'),
+        ...main.querySelectorAll('[data-testid="generated-image-gallery"]'),
+      ];
       if (galleries.length === 0) return { modern: false, urls: [] };
 
       const matchRequired = ${hasFilter};
@@ -487,15 +494,19 @@ export function modernImageExtractorScript(messageIds = null) {
           if (!tokens.some((t) => t && targetSet.has(t))) continue;
         }
 
-        const imgs = Array.from(gallery.querySelectorAll('[data-testid="generated-image-preview"] img'));
+        const imgs = Array.from(gallery.querySelectorAll(
+          '[data-testid="generated-image-preview"] img, button[aria-label^="Show generated image "] img'
+        ));
         for (const img of imgs) {
-          if (img.complete === false) continue;
+          const src = (img.currentSrc || img.src || '').trim();
           const nw = img.naturalWidth || 0;
           const nh = img.naturalHeight || 0;
-          if (nw < 128 || nh < 128) continue;
+          const lazyRailBlob = img.getAttribute('loading') === 'lazy'
+            && src.startsWith('blob:')
+            && !!img.closest('[role="group"][aria-label="Generated images"]');
+          if (!lazyRailBlob && (img.complete === false || nw < 128 || nh < 128)) continue;
           if (isExcluded(img) || isComposerOrUserScope(img)) continue;
 
-          const src = (img.currentSrc || img.src || '').trim();
           if (!src || seen.has(src)) continue;
           seen.add(src);
           urls.push(src);

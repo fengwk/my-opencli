@@ -20,6 +20,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import * as cheerio from 'cheerio';
 import * as vm from 'node:vm';
 import {
@@ -741,6 +742,54 @@ describe('DOM Regression: Modern Composer File Input Routing', () => {
 });
 
 describe('DOM Regression: Modern ChatGPT Generated-Image Gallery Extractor', () => {
+  const multiImageFixture = readFileSync(
+    new URL('./__fixtures__/generated-images.html', import.meta.url),
+    'utf8',
+  );
+
+  // Real UI mounts only the selected main preview; all full-size sources are in
+  // the side rail. Export must include siblings in rail order, without repeats.
+  it('extracts all three side-rail images in order even when image 2 is selected', () => {
+    const { runScript } = createDomSandbox(`<main>${multiImageFixture}</main>`);
+    const result = runScript(modernImageExtractorScript(['msg-current']));
+    expect(result.modern).toBe(true);
+    expect(result.urls).toEqual([
+      'blob:https://chatgpt.com/current-1',
+      'blob:https://chatgpt.com/current-2',
+      'blob:https://chatgpt.com/current-3',
+    ]);
+  });
+
+  // Live follow-up turns leave lazy thumbnails at 0x0 even though their full
+  // blobs already exist. Export can decode those without scrolling the UI.
+  it('collects page-owned lazy rail blobs before thumbnail decode completes', () => {
+    const html = multiImageFixture
+      .replaceAll(/naturalwidth="\d+"/g, 'naturalwidth="0"')
+      .replaceAll(/naturalheight="\d+"/g, 'naturalheight="0"')
+      .replaceAll('loading="lazy"', 'loading="lazy" data-complete="false"');
+    const { runScript } = createDomSandbox(`<main>${html}</main>`);
+    expect(runScript(modernImageExtractorScript(['msg-current'])).urls).toEqual([
+      'blob:https://chatgpt.com/current-1',
+      'blob:https://chatgpt.com/current-2',
+      'blob:https://chatgpt.com/current-3',
+    ]);
+  });
+
+  // Adding the side rail must not widen export into user uploads or old turns.
+  it('keeps side-rail exports isolated from historical and user image groups', () => {
+    const history = multiImageFixture.replaceAll('msg-current', 'msg-history')
+      .replaceAll('/current-', '/history-');
+    const user = multiImageFixture.replace('<section ', '<section data-conversation-role="user" ')
+      .replaceAll('/current-', '/user-');
+    const { runScript } = createDomSandbox(`<main>${history}${multiImageFixture}${user}</main>`);
+    const result = runScript(modernImageExtractorScript(['msg-current']));
+    expect(result.urls).toEqual([
+      'blob:https://chatgpt.com/current-1',
+      'blob:https://chatgpt.com/current-2',
+      'blob:https://chatgpt.com/current-3',
+    ]);
+  });
+
   // Verifies that a generated image with 0x0 layout rect but loaded 1254x1254 natural size
   // in the current turn is successfully extracted by URL.
   it('extracts loaded 1254x1254 image even when layout width/height is 0x0', () => {

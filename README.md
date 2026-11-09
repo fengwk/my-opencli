@@ -2,6 +2,15 @@
 
 Personal OpenCLI plugins, installed via the official plugin mechanism.
 
+## v0.1.71
+
+- Align all five plugin versions at `0.1.71`; retain the Jimeng fixes through `v0.1.70`. Only ChatGPT image-export logic changes in this release.
+- Export every image in the current turn's `Generated images` side rail instead of only the selected main preview. Preserve order and exclude history/user uploads; handle lazy side-rail blobs using decoded image dimensions.
+- Wait for the protocol-reported image count within the existing time budget. Report incomplete exports explicitly, preserve downloaded files, and permit one conversation remount without resubmitting the prompt. Reuse saved files by SHA-256 across that recovery.
+- Keep image inspection in the page: commands carry Blob/HTTP URLs or an inline image digest, never the image's Base64 contents. No Hub or OpenCLI daemon body-limit changes are required. Input attachments still use Hub multipart upload and path-based native CDP upload.
+- Live-verified a three-image production prompt end to end: three protocol images and three full-size `1672×941` image exports. File downloads may additionally contain copies of those same images; file count is not image count.
+- Update installed plugins explicitly on Hub; publishing this release does not update persisted plugin code.
+
 ## v0.1.70
 
 - Align all five plugin versions at `0.1.70`; only the shared `jimeng-agent` model prompt changes.

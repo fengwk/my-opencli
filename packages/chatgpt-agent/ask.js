@@ -220,6 +220,17 @@ export function assertSuccessfulImageExports(artifacts, downloads) {
         `expected=${expectedImageCount}, successful=0.${codeDetails} Check if images were rendered on page or time was insufficient.`,
       );
     }
+    if (successfulImages.length < expectedImageCount) {
+      const errorCodes = [...new Set(imageExports.map((d) => d.error).filter(Boolean))];
+      throw new CommandExecutionError(
+        'IMAGE_EXPORT_INCOMPLETE: not all protocol images were exported',
+        `expected=${expectedImageCount}, successful=${successfulImages.length}. `
+          + (errorCodes.length ? `errors=[${errorCodes.join(', ')}]. ` : '')
+          + (artifacts.conversationId ? `conversationId=${artifacts.conversationId}. ` : '')
+          + 'Successful files remain in the output directory. Do not resubmit the prompt; '
+          + 'export the missing images from the existing conversation.',
+      );
+    }
   }
 }
 
@@ -574,10 +585,9 @@ export const askCommand = cli({
           pollIterations: 60,
           canContinue: () => remainingMs() >= 2_000,
           // Caller owns route validation: build the reload hook only for a
-          // verified /c/<id> conversation URL. At most one reload happens in
-          // the dedicated automation tab when the first visual export has no
-          // valid asset (e.g. ChatGPT still shows a sparse transparent
-          // placeholder for the generated image).
+          // verified /c/<id> conversation URL. At most one reload happens when
+          // an image is missing, unavailable or still a transparent placeholder.
+          // Already downloaded images are reused, never generated again.
           reloadConversation: conversationUrl && /\/(?:g\/g-p-[^/]+\/)?c\/[A-Za-z0-9_-]{8,}/.test(conversationUrl)
             ? async () => {
               // goto(currentUrl) is a no-op on a loaded tab. Leave the persisted
