@@ -104,6 +104,11 @@ export function imageTargetsScript(messageIds) {
     };
     const scopeTokens = (scope) => [...new Set((scope.getAttribute('data-chatgpt-search-message-ids') || '')
       .trim().split(/[\\s,]+/).filter((token) => ids.has(token)))].sort();
+    const imageSource = (img) => {
+      const url = img?.currentSrc || img?.src || '';
+      // The control channel carries URL references only, never inline pixels.
+      return /^(?:blob:|https?:\\/\\/)/i.test(url) ? url : '';
+    };
     const tokenMatch = (scope) => scopeTokens(scope).length > 0;
     const mainSelector = document.querySelector('main') ? 'main' : '[role="main"]';
     const main = document.querySelector(mainSelector);
@@ -146,7 +151,7 @@ export function imageTargetsScript(messageIds) {
               + JSON.stringify(rail.button.getAttribute('aria-label')) + ']',
             previewSelector,
             order: rail.order,
-            sourceUrl: rail.button.querySelector('img')?.currentSrc || rail.button.querySelector('img')?.src || '',
+            sourceUrl: imageSource(rail.button.querySelector('img')),
           });
         }
         continue;
@@ -157,7 +162,7 @@ export function imageTargetsScript(messageIds) {
         const img = previews[0].querySelector('img');
         targets.push({
           key: scopeKey + ':1', kind: 'preview', previewSelector, order: 1,
-          sourceUrl: img?.currentSrc || img?.src || '',
+          sourceUrl: imageSource(img),
         });
       } else {
         return { targets: [], reason: 'ambiguous-gallery-without-rail' };

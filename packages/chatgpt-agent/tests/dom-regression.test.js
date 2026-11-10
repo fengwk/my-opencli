@@ -1145,6 +1145,20 @@ describe('DOM Regression: Native generated-image target discovery', () => {
     ]);
   });
 
+  // Even if a gallery unexpectedly uses inline pixels, discovery must never
+  // put those bytes in a daemon response or a later viewer-state command.
+  it('does not return inline image data as source URL metadata', () => {
+    const html = multiImageFixture.replaceAll(
+      /blob:https:\/\/chatgpt\.com\/current-\d/g,
+      'data:image/png;base64,PRIVATE-IMAGE-BYTES',
+    );
+    const result = createDomSandbox(`<main>${html}</main>`)
+      .runScript(imageTargetsScript(['msg-current']));
+    expect(result.targets).toHaveLength(3);
+    expect(result.targets.every((target) => target.sourceUrl === '')).toBe(true);
+    expect(JSON.stringify(result)).not.toContain('PRIVATE-IMAGE-BYTES');
+  });
+
   // Duplicate/reordered protocol IDs and DOM scope tokens identify the same
   // logical turn; raw attribute spelling must not alter target identity.
   it('normalizes scoped message-id sets independently of token order and duplicates', () => {
