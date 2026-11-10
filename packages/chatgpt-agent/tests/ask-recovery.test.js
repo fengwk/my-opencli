@@ -12,6 +12,7 @@ const ensureChatGPTLogin = vi.fn();
 const ensureChatGPTComposer = vi.fn();
 const openChatGPTConversation = vi.fn();
 const startNewChat = vi.fn();
+const reloadChatGPTPage = vi.fn(async () => {});
 const clearChatGPTDraft = vi.fn();
 const sendChatGPTMessage = vi.fn();
 const getChatGPTSendFailureState = vi.fn();
@@ -25,6 +26,7 @@ vi.mock('../src/host-chatgpt.js', async (importOriginal) => {
     ensureChatGPTComposer: (...args) => ensureChatGPTComposer(...args),
     openChatGPTConversation: (...args) => openChatGPTConversation(...args),
     startNewChat: (...args) => startNewChat(...args),
+    reloadChatGPTPage: (...args) => reloadChatGPTPage(...args),
     clearChatGPTDraft: (...args) => clearChatGPTDraft(...args),
     sendChatGPTMessage: (...args) => sendChatGPTMessage(...args),
     getChatGPTSendFailureState: (...args) => getChatGPTSendFailureState(...args),
@@ -129,7 +131,8 @@ describe('chatgpt-agent/ask recovery execution flow', () => {
 
     await askCommand.func(page, { prompt: 'hello' });
 
-    expect(startNewChat).toHaveBeenCalledTimes(2);
+    expect(startNewChat).toHaveBeenCalledTimes(1);
+    expect(reloadChatGPTPage).toHaveBeenCalledExactlyOnceWith(page, '');
     expect(sendChatGPTMessage).toHaveBeenCalledTimes(1);
   });
 
@@ -149,7 +152,8 @@ describe('chatgpt-agent/ask recovery execution flow', () => {
 
     expect(error.message).toMatch(/PAGE_BROKEN/);
     expect(`${error.message} ${error.hint || ''}`).not.toContain('hello');
-    expect(startNewChat).toHaveBeenCalledTimes(2);
+    expect(startNewChat).toHaveBeenCalledTimes(1);
+    expect(reloadChatGPTPage).toHaveBeenCalledExactlyOnceWith(page, '');
     expect(sendChatGPTMessage).not.toHaveBeenCalled();
     expect(page.startSseCapture).not.toHaveBeenCalled();
   });

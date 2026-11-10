@@ -23,6 +23,7 @@ import {
   requirePositiveInt,
   sendChatGPTMessage,
   startNewChat,
+  reloadChatGPTPage,
 } from './src/host-chatgpt.js';
 import {
   SSE_CAPTURE_INCOMPLETE,
@@ -322,11 +323,16 @@ export const askCommand = cli({
 
     await bootConversation();
 
+    const reloadConversation = async () => {
+      await reloadChatGPTPage(page, session);
+      await ensureChatGPTLogin(page, 'ChatGPT login must remain valid after pre-send recovery.');
+    };
+
     // The composer can mount before resumed history. Wait for the requested
     // route and rendered messages, with at most one reload before sending.
     const health = await ensureHealthyChatSurface(page, {
       session,
-      reload: bootConversation,
+      reload: reloadConversation,
     });
     requireReadyChatSurface(health.after, health.recovered, 'boot');
     await ensureChatGPTComposer(
@@ -339,7 +345,7 @@ export const askCommand = cli({
     const preSendIdle = await ensureIdleSurfaceWithRecovery(page, {
       timeoutSec: Math.min(45, timeoutSec),
       session,
-      hardReset: bootConversation,
+      hardReset: reloadConversation,
     });
     if (!preSendIdle.ok) {
       throw new CommandExecutionError(

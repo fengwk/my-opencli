@@ -134,12 +134,44 @@ export async function activateCurrentChatGPTTab(page) {
 }
 
 export async function startNewChat(page) {
-  await utils.startNewChat(page);
+  // Use the canonical new-chat route, not the /new redirect. A complete but
+  // unhydrated /new can otherwise be caught by goto's same-URL fast path.
+  await page.goto(CHATGPT_URL, { settleMs: 2000 });
   await activateCurrentChatGPTTab(page);
+  try {
+    await page.wait({ selector: '#prompt-textarea,[data-testid="prompt-textarea"],[contenteditable="true"][role="textbox"]', timeout: 8 });
+  } catch { /* The bounded health check owns hydration and fail-closed errors. */ }
 }
 
 export async function openChatGPTConversation(page, value) {
   const id = await utils.openChatGPTConversation(page, value);
   await activateCurrentChatGPTTab(page);
   return id;
+}
+
+/**
+ * Real pre-send recovery. Repeating goto(currentURL) is not a reload: the host
+ * deliberately fast-paths complete same-URL tabs. evaluateOnce schedules one
+ * document reload after acknowledgement, so navigation cannot replay it.
+ * Callers must revalidate login/composer/history; never call after upload/send.
+ */
+export async function reloadChatGPTPage(page, session = '') {
+  const desired = session
+    ? `${CHATGPT_URL}/c/${parseChatGPTConversationId(session)}`
+    : CHATGPT_URL;
+  const current = await currentChatGPTUrl(page);
+  const route = (url) => {
+    try { const parsed = new URL(url); return parsed.origin + parsed.pathname.replace(/\/$/, ''); }
+    catch { return ''; }
+  };
+  if (route(current) !== route(desired)) {
+    await page.goto(desired, { settleMs: 2000 });
+  } else {
+    if (typeof page.evaluateOnce !== 'function') {
+      throw new Error('PAGE_RELOAD_UNSUPPORTED: host must support non-replayed evaluateOnce');
+    }
+    await page.evaluateOnce('(() => { setTimeout(() => window.location.reload(), 0); return true; })()');
+    await page.sleep(0.5);
+  }
+  await activateCurrentChatGPTTab(page);
 }

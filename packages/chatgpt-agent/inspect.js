@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   CHATGPT_DOMAIN, CHATGPT_URL, currentChatGPTUrl, openChatGPTConversation,
-  parseChatGPTConversationId, startNewChat, ensureChatGPTLogin, chatGPTHostVersion,
+  parseChatGPTConversationId, startNewChat, reloadChatGPTPage, ensureChatGPTLogin, chatGPTHostVersion,
 } from './src/host-chatgpt.js';
 import { unwrapEvaluateResult } from './src/dom-helpers.js';
 import { ensureHealthyChatSurface } from './src/page-health.js';
@@ -66,7 +66,12 @@ export async function probeNewChat(page, { onUnready } = {}) {
     await boot();
     stage = 'health';
     const health = await ensureHealthyChatSurface(page, {
-      reload: async () => { stage = 'reload'; await boot(); },
+      reload: async () => {
+        stage = 'reload';
+        await reloadChatGPTPage(page);
+        await ensureChatGPTLogin(page);
+        await recordTabs();
+      },
       onProbe: async (state, phase) => {
         if (timeline.length < 80) timeline.push({ phase, elapsedMs: Date.now() - startedAt, ...surfaceMetadata(state) });
         if (!state.composer && state.messages === 0) await onUnready?.(state, phase);

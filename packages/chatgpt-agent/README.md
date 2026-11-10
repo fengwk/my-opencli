@@ -42,7 +42,7 @@ or lifecycle updates.
 
 ## Session & concurrency model
 
-- `chatgpt-agent ask` does not declare `persistent`, relying on OpenCLI's default ephemeral site session: overlapping runs get separate logical tab leases, while sequential runs may reuse an idle cleared physical placeholder tab.
+- `chatgpt-agent ask` does not declare `persistent`, relying on OpenCLI's default ephemeral site session: overlapping runs get separate logical tab leases, while sequential runs may reuse a released physical tab. Lease release alone does not reset its page/draft; ask validates the route and readiness before clearing its own draft.
 - Login state (profile / cookies) is shared across tabs from the same browser profile.
 - Conversation continuity is provided by `--session <conversationId>`, not by pinning a persistent tab. Serializing concurrent writes to the same conversation is the caller's responsibility.
 - Parallel file downloads require the paired extension's tab-scoped download wait (`>=1.0.31`).
@@ -52,6 +52,7 @@ or lifecycle updates.
 - Readiness supports both legacy message attributes and the current turn/search-unit DOM. A conversation must have a visible composer and at least one rendered message/turn marker; UI text length alone is not evidence of loaded history.
 - With `--session`, the active ChatGPT conversation ID must match the requested ID. An inaccessible conversation, a redirect to a new chat, or an unreadable URL never falls back to the supplied ID and never receives a prompt.
 - Hydration is polled every 500 ms for up to 15 seconds, with at most one page-health reload and another 15-second hydration window. These windows exclude navigation/transport time and are separate from the turn's `--timeout`.
+- New chats enter the canonical `https://chatgpt.com/` homepage directly. Same-route recovery schedules one actual document reload with `evaluateOnce`; it does not repeat `goto`, which the host can skip on a complete same-URL page. A wrong route navigates to the requested canonical conversation instead. Recovery only runs before attachments/submission.
 - The surface is checked again after idle recovery, before draft cleanup or uploads, and once more before capture/send. If still hydrating, each check gets one polling window without another reload. A final URL check guards redirects during capture setup.
 - After navigation only the exact leased target may be reactivated, never another ChatGPT tab chosen by URL. Readiness remains strict for visible composer and requested history. `PAGE_BROKEN` includes boot/post-idle/post-upload stage, visibility, bounded editor geometry, message-marker count, main-text length, blank-thread, session-mismatch and unavailable-conversation flags, without echoing prompt/history text. Definite unavailable-conversation notices fail before sending; submission itself is never automatically retried.
 
@@ -95,6 +96,12 @@ opencli chatgpt-agent inspect --mode new-chat
 opencli chatgpt-agent images <conversation-id> \
   --message-id <image-message-id> --expected 3 --timeout 180 --op /absolute/output
 ```
+
+`inspect --mode new-chat --fresh-tab` distinguishes a new physical tab from a
+reclaimed one. Optional `--capture-unready --op /absolute/output` saves at most
+one screenshot per unready hydration phase before the lease is released.
+Screenshots can contain visible account or draft content; they are strictly
+opt-in and are diagnostic artifacts, never a generated-image export fallback.
 
 `images` requires explicit message IDs and expected count (1–20). Repeat `--message-id`
 when a turn has multiple IDs; a single ID can scope a three-image gallery.

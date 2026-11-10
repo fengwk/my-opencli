@@ -6,11 +6,12 @@ import path from 'node:path';
 vi.mock('../src/host-chatgpt.js', async (importOriginal) => ({
   ...await importOriginal(),
   startNewChat: vi.fn(async () => {}),
+  reloadChatGPTPage: vi.fn(async () => {}),
   ensureChatGPTLogin: vi.fn(async () => {}),
 }));
 
 import { inspectCommand, probeNewChat, surfaceMetadata } from '../inspect.js';
-import { startNewChat, ensureChatGPTLogin } from '../src/host-chatgpt.js';
+import { startNewChat, reloadChatGPTPage, ensureChatGPTLogin } from '../src/host-chatgpt.js';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -44,7 +45,8 @@ describe('read-only new-chat diagnostics', () => {
     const result = await probeNewChat(page);
     expect(result.ready).toBe(true);
     expect(result.recovered).toBe(true);
-    expect(startNewChat).toHaveBeenCalledTimes(2);
+    expect(startNewChat).toHaveBeenCalledTimes(1);
+    expect(reloadChatGPTPage).toHaveBeenCalledTimes(1);
     expect(ensureChatGPTLogin).toHaveBeenCalledTimes(2);
     expect(result.timeline[0]).toMatchObject({ phase: 'initial', composer: false, visibility: 'hidden' });
     expect(result.timeline.at(-1)).toMatchObject({ phase: 'reload', composer: true });

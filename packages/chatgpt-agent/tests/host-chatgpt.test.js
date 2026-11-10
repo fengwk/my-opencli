@@ -3,8 +3,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { describe, expect, it, vi } from 'vitest';
-import { activateCurrentChatGPTTab } from '../src/host-chatgpt.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { activateCurrentChatGPTTab, reloadChatGPTPage, startNewChat } from '../src/host-chatgpt.js';
+import { ensureHealthyChatSurface } from '../src/page-health.js';
+
+afterEach(() => { vi.useRealTimers(); });
 
 const hostChatGptSource = fs.readFileSync(
   fileURLToPath(new URL('../src/host-chatgpt.js', import.meta.url)),
@@ -95,5 +98,61 @@ describe('post-navigation leased tab activation', () => {
     const page = { getActivePage: () => target, tabs: async () => tabs, selectTab: vi.fn() };
     await activateCurrentChatGPTTab(page);
     expect(page.selectTab).not.toHaveBeenCalled();
+  });
+});
+
+describe('canonical new-chat boot and physical pre-send reload', () => {
+  // A complete-but-stalled page cannot be repaired by same-URL goto, whose
+  // native fast path is intentionally a no-op. Run actual health+reload code
+  // and the actual scheduled browser script; only reload mounts the editor.
+  it('recovers a stalled complete page with exactly one physical reload', async () => {
+    vi.useFakeTimers();
+    const pending = [];
+    let composer = false;
+    const location = { href: 'https://chatgpt.com/', reload: vi.fn(() => { composer = true; }) };
+    const page = {
+      goto: vi.fn(async () => {}),
+      evaluate: async (script) => script === 'window.location.href' ? location.href : {
+        url: location.href, composer, messages: 0, mainLen: 3772,
+        errorish: false, generationFailed: false, conversationUnavailable: false, mainText: '',
+      },
+      evaluateOnce: vi.fn(async (script) => Function('window', 'setTimeout', `return ${script}`)(
+        { location }, (callback) => { pending.push(callback); },
+      )),
+      sleep: async (seconds) => {
+        vi.advanceTimersByTime(seconds * 1000);
+        pending.splice(0).forEach((callback) => callback());
+      },
+    };
+    const result = await ensureHealthyChatSurface(page, {
+      settleMs: 1000, reload: () => reloadChatGPTPage(page),
+    });
+    expect(result.before.composer).toBe(false);
+    expect(result.recovered).toBe(true);
+    expect(result.after.broken).toBe(false);
+    expect(page.goto).not.toHaveBeenCalled();
+    expect(page.evaluateOnce).toHaveBeenCalledTimes(1);
+    expect(location.reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('starts at the canonical homepage instead of depending on /new redirects', async () => {
+    const page = { goto: vi.fn(async () => {}), wait: vi.fn(async () => {}) };
+    await startNewChat(page);
+    expect(page.goto).toHaveBeenCalledExactlyOnceWith('https://chatgpt.com', { settleMs: 2000 });
+  });
+
+  // Route correction must retain the requested history, never silently resume
+  // another conversation or treat a homepage reload as a successful resume.
+  it('navigates to the requested conversation when the route is wrong', async () => {
+    const page = {
+      evaluate: async () => 'https://chatgpt.com/',
+      goto: vi.fn(async () => {}),
+      evaluateOnce: vi.fn(),
+    };
+    await reloadChatGPTPage(page, 'conversation-expected');
+    expect(page.goto).toHaveBeenCalledExactlyOnceWith(
+      'https://chatgpt.com/c/conversation-expected', { settleMs: 2000 },
+    );
+    expect(page.evaluateOnce).not.toHaveBeenCalled();
   });
 });
