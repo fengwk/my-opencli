@@ -460,15 +460,24 @@ async function downloadOne(page, target, messageIds, index, outputDir, remaining
 
 async function closeImageViewer(page, remainingMs) {
   try {
-    const state = await evaluate(page, imageDialogStateScript());
-    if (!state?.closeSelector || remainingMs() <= 0) return;
-    await page.click(state.closeSelector);
-    const deadline = Date.now() + Math.min(5_000, remainingMs());
-    while (Date.now() < deadline && remainingMs() > 0) {
-      if ((await evaluate(page, imageDialogStateScript()))?.dialog !== true) break;
-      await page.sleep(Math.min(0.2, remainingMs() / 1000));
+    let state = await evaluate(page, imageDialogStateScript());
+    if (state?.menu && remainingMs() > 0) {
+      await page.pressKey('Escape');
+      state = await evaluate(page, imageDialogStateScript());
     }
+    for (let attempt = 0; attempt < 2 && state?.dialog && remainingMs() > 0; attempt += 1) {
+      if (!state.closeSelector) return false;
+      await page.click(state.closeSelector);
+      const deadline = Date.now() + Math.min(5_000, remainingMs());
+      while (Date.now() < deadline && remainingMs() > 0) {
+        state = await evaluate(page, imageDialogStateScript());
+        if (!state?.dialog) break;
+        await page.sleep(Math.min(0.2, remainingMs() / 1000));
+      }
+    }
+    return !state?.dialog && !state?.blocked;
   } catch { /* keep completed files even if the page cannot clean up */ }
+  return false;
 }
 
 /**
@@ -491,7 +500,9 @@ export async function exportNewImagesLikeOfficial(page, opts = {}) {
   if (!ids.length) {
     return [{ kind: 'image-export', method: 'chrome-download', downloaded: false, error: 'missing-message-ids' }];
   }
-  await closeImageViewer(page, remainingMs);
+  if (!await closeImageViewer(page, remainingMs)) {
+    return [{ kind: 'image-export', method: 'chrome-download', downloaded: false, error: 'image-viewer-close-failed' }];
+  }
 
   const successful = new Map();
   let retryBlocked = false;

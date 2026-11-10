@@ -2,6 +2,14 @@
 
 Personal OpenCLI plugins, installed via the official plugin mechanism.
 
+## v0.1.73
+
+- Fix generated-image native-download compatibility: arm the Chrome waiter before activating `Download`, accept a direct image receipt, or wait for an asynchronously populated menu and click only the exact single-image item. Recognize a unique expanded portal menu without `aria-controls`; never select a series/bulk download.
+- Replace raw whitespace-scope attribute matching with normalized message-ID token selectors. Rediscover a same-identity preview before activation; preserve its proven source when opening the viewer unmounts the gallery. Completed files survive the one allowed conversation remount, without resending a prompt.
+- Stop the sequence after an unconfirmed download so a late receipt cannot be counted as a different image. Image bytes still stay in native Chrome downloads; no Base64 fallback or daemon-limit change.
+- Classify SSE arm failures using safe fixed diagnostic tokens (`method-not-found`, `arm-timeout`, `resource-gone`, `target-detached`, `unknown`) without returning raw browser errors or URLs. This improves diagnosis; it does not bypass an incomplete response or claim that every search-capture failure is fixed.
+- Align all five plugin versions at `0.1.73`; other plugins' business logic and the OpenCLI `.6` / published Bridge `1.0.39` pairing are unchanged. Update persisted Hub plugins explicitly; a plugin-only fix does not require rebuilding the Hub image.
+
 ## v0.1.72
 
 - Align all five plugin versions at `0.1.72`; only ChatGPT image download logic changes.
@@ -84,12 +92,12 @@ These plugins **require an OpenCLI fork**, not stock upstream alone:
 | Component | Minimum | Current verified release | Why |
 |-----------|---------|--------------------------|-----|
 | Node.js | **`>=20.18.1`** | `24.14.0` | Matches OpenCLI and Cheerio runtime engines |
-| CLI (`@jackwener/opencli`) | **`>=1.8.7`** (shared baseline; per-plugin floors below) | package `2.0.2-fengwk.2` (git tag `fork-v2.0.2-fengwk.2`) | Browser window/session controls, network/frame APIs, SSE/WS capture, hardened file input, `Arg.repeatable`, full Hub catalog export |
-| Browser Bridge / Extension | **`>=1.0.32`** (shared baseline) | paired Extension **`1.0.37`** | Browser/frame/CDP/SSE/WS capture, tab-scoped downloads, and context-scoped adapter tab reclamation |
+| CLI (`@jackwener/opencli`) | **`>=1.8.7`** (shared baseline; per-plugin floors below) | package `2.0.2-fengwk.6` (git tag `fork-v2.0.2-fengwk.6`) | Browser window/session controls, network/frame APIs, SSE/WS capture, hardened file input, `Arg.repeatable`, full Hub catalog export |
+| Browser Bridge / Extension | **`>=1.0.32`** (shared baseline) | published paired Extension **`1.0.39`** | Browser/frame/CDP/SSE/WS capture, tab-scoped downloads, and context-scoped adapter tab reclamation |
 
-`chatgpt-agent ask` requires fork CLI `>=1.8.8-fengwk.3` and Browser Bridge `>=1.0.35` for HTTP SSE capture and scoped composer submission. `douyin-ext download` requires CLI `>=2.0.2-fengwk.1`; use the current paired release above for OpenCLI Hub, which additionally requires `list --manifest`. Other plugins retain their existing compatibility floors; each manifest entry declares its own minimum.
+`chatgpt-agent ask` requires fork CLI `>=2.0.2-fengwk.6` for reliable native image activation and Browser Bridge `>=1.0.35` for HTTP SSE capture and scoped composer submission. `douyin-ext download` requires CLI `>=2.0.2-fengwk.1`; use the current paired release above for OpenCLI Hub, which additionally requires `list --manifest`. Other plugins retain their existing compatibility floors; each manifest entry declares its own minimum.
 
-Minimum ranges are the compatibility floor; the verified columns name the paired fork Release used for repository checks. Package version (`2.0.2-fengwk.2`) and git tag (`fork-v2.0.2-fengwk.2`) are related but not the same string — do not treat the package version as a tag name.
+Minimum ranges are the compatibility floor; the release columns name the paired fork Release used for repository checks, not proof of a remote deployment. Package version (`2.0.2-fengwk.6`) and git tag (`fork-v2.0.2-fengwk.6`) are related but not the same string — do not treat the package version as a tag name.
 
 Install and reload **both** the forked CLI and its matching Browser Bridge / Extension. Mismatched CLI/extension pairs will fail at runtime even if the plugin installs cleanly.
 `gemini-agent` specifically requires Browser Bridge `1.0.30` for raw CDP input, network capture, hardened file input, and download lifecycle support.

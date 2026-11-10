@@ -26,12 +26,13 @@ function pngAt(filePath) {
 }
 
 function makePage({ targets, receipts, clickFailure = null, waiterFailure = null, previewNoOps = 0,
+  initialViewer = false, closeNoOps = 0,
   direct = false, menuDelay = 0, menuItemDelay = 0, menuItems = null } = {}) {
   let menuOpen = false;
   let menuCountdown = 0;
   let menuItemCountdown = 0;
   let pendingReceipt;
-  let viewerOpen = false;
+  let viewerOpen = initialViewer;
   let selectedViewer = 0;
   let targetRun = 0;
   const page = {
@@ -67,7 +68,10 @@ function makePage({ targets, receipts, clickFailure = null, waiterFailure = null
         if (previewNoOps > 0) previewNoOps -= 1;
         else viewerOpen = true;
       }
-      if (selector.includes('Close viewer')) viewerOpen = false;
+      if (selector.includes('Close viewer')) {
+        if (closeNoOps > 0) closeNoOps -= 1;
+        else viewerOpen = false;
+      }
       if (selector.includes('data-image-thumbnail')) {
         selectedViewer = Number(selector.match(/Generated image (\d+)/)[1]) - 12;
       }
@@ -142,6 +146,25 @@ const viewerSelectors = [13, 14, 15].map((n) =>
   `[role="dialog"] button[data-image-thumbnail][aria-label="Generated image ${n}"]`);
 
 describe('native Chrome generated-image export', () => {
+  // A close click may be swallowed by a pending menu/mount transition. Retry
+  // only the close UI, and never discover or download behind an open viewer.
+  it('confirms an existing viewer closed before discovering the current turn', async () => {
+    vi.useFakeTimers();
+    const dir = makeOutputDir();
+    const page = makePage({
+      targets: [threeRailTargets[0]], initialViewer: true, closeNoOps: 1,
+      receipts: [receipt(pngAt(path.join(dir, 'reopened.png')))],
+    });
+    page.sleep.mockImplementation(async (seconds) => { vi.advanceTimersByTime(seconds * 1000); });
+    const results = await exportNewImagesLikeOfficial(page, {
+      messageIds: MESSAGE_IDS, expectedCount: 1, outputDir: makeOutputDir(),
+    });
+    expect(results[0].downloaded).toBe(true);
+    const closeClicks = page.actions.filter((a) => a.type === 'click' && a.selector.includes('Close viewer'));
+    expect(closeClicks).toHaveLength(3); // two confirmed preflight attempts + final cleanup
+    expect(page.waitForDownload).toHaveBeenCalledTimes(1);
+  });
+
   it('fails closed without current-turn message IDs', async () => {
     const page = makePage({ targets: threeRailTargets });
     const results = await exportNewImagesLikeOfficial(page, {

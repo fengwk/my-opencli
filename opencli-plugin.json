@@ -1,37 +1,37 @@
 {
   "name": "my-opencli",
-  "version": "0.1.72",
+  "version": "0.1.73",
   "opencli": ">=1.8.7",
   "description": "Personal OpenCLI plugins (chatgpt-agent, douyin-ext, gemini-agent, jimeng-agent, utils)",
   "plugins": {
     "utils": {
       "path": "packages/utils",
       "description": "Host-Chrome utilities, including background/foreground scrape with my-mcp content cleaning",
-      "version": "0.1.72",
+      "version": "0.1.73",
       "opencli": ">=1.8.7"
     },
     "chatgpt-agent": {
       "path": "packages/chatgpt-agent",
       "description": "Protocol-stream ChatGPT agent: HTTP SSE + WS capture, sequential upload, file/image export",
-      "version": "0.1.72",
+      "version": "0.1.73",
       "opencli": ">=2.0.2-fengwk.6"
     },
     "douyin-ext": {
       "path": "packages/douyin-ext",
       "description": "Douyin video downloads and user cursor pagination via in-page read-only metadata fetch and local streaming MP4 download",
-      "version": "0.1.72",
+      "version": "0.1.73",
       "opencli": ">=2.0.2-fengwk.1"
     },
     "gemini-agent": {
       "path": "packages/gemini-agent",
       "description": "Protocol-stream Gemini agent: StreamGenerate capture, sequential attachment upload, generated-image download",
-      "version": "0.1.72",
+      "version": "0.1.73",
       "opencli": ">=1.8.7"
     },
     "jimeng-agent": {
       "path": "packages/jimeng-agent",
       "description": "Jimeng Agent video drafts with Canvas preparation, exact resource correlation, status search and official download",
-      "version": "0.1.72",
+      "version": "0.1.73",
       "opencli": ">=1.8.7"
     }
   }

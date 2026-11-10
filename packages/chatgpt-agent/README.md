@@ -5,7 +5,7 @@ Protocol-first ChatGPT web adapter:
 1. Arm HTTP-stream + WS capture → send composer message
 2. Collect stream text / sandbox files / image gen pointers
 3. Files: human-like chip / flyout Download via `waitForDownload`
-4. Images: select current-turn gallery images, then use ChatGPT viewer → Download → `Download image` with `waitForDownload`
+4. Images: select current-turn gallery images, then use ChatGPT viewer → Download (direct, or exact `Download image` menu item) with `waitForDownload`
 5. Uploads: sequential `setFileInput` (path) — native CDP path only, no DataTransfer / base64 fallback
 6. Managed collect: receipt-proven Chrome downloads are remapped (`C:\...` → `/mnt/c/...` on WSL) and copied into `--op`
 
@@ -21,6 +21,7 @@ non-invasively through CDP — the page's own `fetch`/XHR are never patched.
 - The captured bytes are decoded with a streaming UTF-8 decoder and parsed across arbitrary chunk/event boundaries (CRLF, comments, multi-line data).
 - Once the turn's own response has started, only its terminal `[DONE]` frame ends the turn: a quiet or timed-out response is discarded (waiting out `--timeout` first) rather than returned as a truncated answer. A WebSocket-only empty terminal state is ignored for a bounded startup window, so the handshake frame cannot produce `EMPTY_REPLY`. Turns that never stream over HTTP keep their previous classification and timing.
 - An incomplete stream never passes as success: evicted chunks, truncated payloads, a rejected arm, undecodable bytes, or a response that never terminated abort the turn with `SSE_CAPTURE_INCOMPLETE` / `SSE_CAPTURE_UNSUPPORTED` instead of returning partial text. Errors never echo captured content or the browser's raw failure text.
+- Arm failures include a fixed safe classification in the hint: `method-not-found`, `arm-timeout`, `resource-gone`, `target-detached`, or `unknown`. These distinguish support, timing and resource failures without exposing raw URLs; they are diagnostics, not an automatic resubmission or a partial-response fallback.
 - `source` reports which transport delivered the turn (`sse` or `ws`).
 
 ## Attachment limits & capabilities
@@ -62,11 +63,12 @@ non-invasively through CDP — the page's own `fetch`/XHR are never patched.
 ### Generated-image gallery compatibility
 
 - Generated-image export requires non-empty protocol image `messageId` values. It only targets galleries whose nearest `data-chatgpt-search-message-ids` scope matches those IDs; missing IDs, historical galleries, user uploads, and ambiguous targets fail closed.
+- Whitespace-separated scope attributes are matched by message-ID tokens rather than their raw spelling. Before a preview is activated it is rediscovered by the same logical identity; an unmounted viewer source uses only the URL previously proved by that scoped gallery.
 - Output targets follow the current turn's `Generated images` side-rail order. Zero-layout virtualized galleries remain valid when not explicitly hidden. A single preview without a rail is allowed only inside one unambiguous scoped gallery.
 - Open the viewer once, then map each scoped gallery source to its exact viewer thumbnail. Verify both the current thumbnail and the decoded full-size viewer image before downloading; main-gallery selection alone is not proof. The history-wide viewer rail is never used to discover outputs. An ignored preview activation may be retried once before any download starts.
-- Each image uses the viewer's `Download` menu trigger and the exact `Download image` menu item; `waitForDownload` is armed before the final CDP click. The completed Chrome receipt's local file is validated as a non-empty image and copied to `--op`. Results retain `kind: image-export` and report `method: chrome-download`, the original filename, download id, managed path, byte count and SHA-256.
+- Each image arms one `waitForDownload` before activating the viewer's `Download` control. A direct image receipt is accepted; otherwise a bounded poll waits for the exact `Download image` item (also `下载图片` / `下载图像`), including asynchronously populated portal menus without `aria-controls`. Series/bulk items are never selected. The completed Chrome receipt's local file is validated as a non-empty image and copied to `--op`. Results retain `kind: image-export` and report `method: chrome-download`, the original filename, download id, managed path, byte count and SHA-256.
 - Image bytes never pass through the daemon command or response. There is no image Base64 extraction, host asset fetch, or fallback export path.
-- Downloads use the caller's remaining timeout for discovery, UI actions and the receipt waiter. On incomplete output, the validated persisted conversation may be remounted once without resubmitting the prompt. Successful files are retained by stable image identity across the remount; a clicked-but-unconfirmed download is not blindly retried.
+- Downloads use the caller's remaining timeout for discovery and UI actions; each receipt waiter is capped at 60 seconds and never exceeds the remaining turn budget. On incomplete output, the validated persisted conversation may be remounted once without resubmitting the prompt. Successful files are retained by stable image identity across the remount; a clicked-but-unconfirmed download stops the sequence rather than being blindly retried or attributed to the next image.
 
 ### Hub file boundary
 
