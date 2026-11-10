@@ -96,6 +96,7 @@ describe('read-only new-chat diagnostics', () => {
   it('selects the newly created target before the cold boot', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false })));
     const page = {
+      goto: vi.fn(async () => {}),
       newTab: vi.fn(async () => 'cold-target'),
       selectTab: vi.fn(async () => {}),
       evaluate: async () => ({

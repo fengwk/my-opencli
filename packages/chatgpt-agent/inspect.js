@@ -162,6 +162,10 @@ export const inspectCommand = cli({
     if (mode === 'new-chat') {
       let freshTarget;
       if (kwargs['fresh-tab']) {
+        // The Bridge's first tabs-new creates a lease by reclaiming an idle
+        // tab. Establish that lease first; only the subsequent newTab really
+        // allocates a fresh physical tab.
+        await page.goto(CHATGPT_URL, { settleMs: 0 });
         freshTarget = await page.newTab();
         if (!freshTarget) throw new CommandExecutionError('INSPECT_FRESH_TAB_UNAVAILABLE: no target ID returned');
         await page.selectTab(freshTarget);
