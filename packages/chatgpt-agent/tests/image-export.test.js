@@ -220,6 +220,28 @@ describe('native Chrome generated-image export', () => {
     expect(results.map((item) => item.sha256)).toHaveLength(3);
   });
 
+  // Remote message placeholders can outlive the old six-second discovery
+  // window. Let the original mount finish rather than resetting it prematurely.
+  it('waits for a late gallery mount without remounting or resending', async () => {
+    vi.useFakeTimers();
+    const dir = makeOutputDir();
+    const page = makePage({
+      targets: { runs: [
+        ...Array.from({ length: 20 }, () => []),
+        ...Array.from({ length: 3 }, () => [threeRailTargets[0]]),
+      ] },
+      receipts: [receipt(pngAt(path.join(dir, 'late-gallery.png')))],
+    });
+    const reloadConversation = vi.fn(async () => {});
+    page.sleep.mockImplementation(async (seconds) => { vi.advanceTimersByTime(seconds * 1000); });
+    const results = await exportNewImagesLikeOfficial(page, {
+      messageIds: MESSAGE_IDS, expectedCount: 1, outputDir: makeOutputDir(), reloadConversation,
+    });
+    expect(results[0].downloaded).toBe(true);
+    expect(reloadConversation).not.toHaveBeenCalled();
+    expect(page.waitForDownload).toHaveBeenCalledTimes(1);
+  });
+
   // Some viewers download directly from the trigger. The waiter must already
   // be armed, and the trigger must never be clicked again to hunt for a menu.
   it('accepts a direct trigger receipt without requiring a menu', async () => {
@@ -421,7 +443,7 @@ describe('native Chrome generated-image export', () => {
     const reloadConversation = vi.fn(async () => {});
     const page = makePage({
       targets: { runs: [
-        ...Array.from({ length: 13 }, () => [threeRailTargets[0]]),
+        ...Array.from({ length: 61 }, () => [threeRailTargets[0]]),
         threeRailTargets.slice(0, 2),
         threeRailTargets.slice(0, 2),
         threeRailTargets.slice(0, 2),
@@ -491,7 +513,7 @@ describe('native Chrome generated-image export', () => {
     const file = pngAt(path.join(dir, 'original.png'));
     const page = makePage({
       targets: { runs: [
-        ...Array.from({ length: 14 }, () => [threeRailTargets[0]]),
+        ...Array.from({ length: 62 }, () => [threeRailTargets[0]]),
         [{ ...threeRailTargets[0], key: 'different:1' }, threeRailTargets[1]],
       ] },
       receipts: [receipt(file)],

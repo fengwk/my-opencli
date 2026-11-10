@@ -514,12 +514,15 @@ export async function exportNewImagesLikeOfficial(page, opts = {}) {
   const runAttempt = async () => {
     let discovery;
     try {
-      // Protocol completion can precede the gallery controls mounting.
-      for (let attempt = 0; attempt < 12; attempt += 1) {
+      // Real remote conversations initially expose message placeholders, with
+      // galleries appearing only after hydration/image loading. Give that
+      // mount a bounded 30s before the one allowed remount resets its progress.
+      const mountDeadline = Date.now() + Math.min(30_000, remainingMs());
+      for (let attempt = 0; attempt < 60 && Date.now() < mountDeadline; attempt += 1) {
         if (!isAllowed(continuePredicate) || remainingMs() <= 0) break;
         discovery = await evaluate(page, imageTargetsScript(ids));
         if (discovery?.targets?.length >= expectedCount) break;
-        if (attempt < 11) await page.sleep(Math.min(0.5, remainingMs() / 1000));
+        if (attempt < 59) await page.sleep(Math.min(0.5, remainingMs() / 1000));
       }
     } catch (error) {
       return [{ kind: 'image-export', method: 'chrome-download', downloaded: false, error: `image-target-discovery-failed: ${error?.message || error}` }];

@@ -206,6 +206,10 @@ export function resolveResultConversation(urlInfo, collectorConversationId) {
 export function assertSuccessfulImageExports(artifacts, downloads) {
   const expectedImageCount = (artifacts && Array.isArray(artifacts.images)) ? artifacts.images.length : 0;
   if (expectedImageCount > 0) {
+    const messageIds = [...new Set(artifacts.images.map((image) => image?.messageId)
+      .filter((id) => typeof id === 'string' && /^[A-Za-z0-9_-]{8,}$/.test(id)))];
+    const recoveryContext = (artifacts.conversationId ? `conversationId=${artifacts.conversationId}. ` : '')
+      + (messageIds.length ? `messageIds=${messageIds.join(',')}. ` : '');
     const imageExports = (downloads || []).filter((d) => d && d.kind === 'image-export');
     const successfulImages = imageExports.filter((d) => d.downloaded === true);
     if (successfulImages.length === 0) {
@@ -216,7 +220,8 @@ export function assertSuccessfulImageExports(artifacts, downloads) {
       const codeDetails = uniqueCodes.length > 0 ? ` errors=[${uniqueCodes.join(', ')}].` : '';
       throw new CommandExecutionError(
         'IMAGE_EXPORT_FAILED: protocol reported generated image(s) but no image export succeeded',
-        `expected=${expectedImageCount}, successful=0.${codeDetails} Check if images were rendered on page or time was insufficient.`,
+        `expected=${expectedImageCount}, successful=0.${codeDetails} ${recoveryContext}`
+          + 'Do not resubmit the prompt; use chatgpt-agent images to export from the existing conversation.',
       );
     }
     if (successfulImages.length < expectedImageCount) {
@@ -225,7 +230,7 @@ export function assertSuccessfulImageExports(artifacts, downloads) {
         'IMAGE_EXPORT_INCOMPLETE: not all protocol images were exported',
         `expected=${expectedImageCount}, successful=${successfulImages.length}. `
           + (errorCodes.length ? `errors=[${errorCodes.join(', ')}]. ` : '')
-          + (artifacts.conversationId ? `conversationId=${artifacts.conversationId}. ` : '')
+          + recoveryContext
           + 'Successful files remain in the output directory. Do not resubmit the prompt; '
           + 'export the missing images from the existing conversation.',
       );
@@ -600,7 +605,7 @@ export const askCommand = cli({
         downloads = downloads.concat(imgDl);
       }
 
-      assertSuccessfulImageExports(artifacts, downloads);
+      assertSuccessfulImageExports({ ...artifacts, conversationId }, downloads);
 
       // Successful image turns may leave the web UI in a lagging "Thinking" / stop state
       // even after protocol stream and DOM export finish. Run bounded idle recovery so subsequent
