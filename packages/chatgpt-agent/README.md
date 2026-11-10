@@ -62,10 +62,11 @@ non-invasively through CDP — the page's own `fetch`/XHR are never patched.
 ### Generated-image gallery compatibility
 
 - Generated-image export requires non-empty protocol image `messageId` values. It only targets galleries whose nearest `data-chatgpt-search-message-ids` scope matches those IDs; missing IDs, historical galleries, user uploads, and ambiguous targets fail closed.
-- Multi-image galleries are selected in `Generated images` side-rail order. Each rail selection is verified against its selected preview before opening the viewer. A single preview without a rail is allowed only inside one unambiguous scoped gallery.
+- Output targets follow the current turn's `Generated images` side-rail order. Zero-layout virtualized galleries remain valid when not explicitly hidden. A single preview without a rail is allowed only inside one unambiguous scoped gallery.
+- Open the viewer once, then map each scoped gallery source to its exact viewer thumbnail. Verify both the current thumbnail and the decoded full-size viewer image before downloading; main-gallery selection alone is not proof. The history-wide viewer rail is never used to discover outputs. An ignored preview activation may be retried once before any download starts.
 - Each image uses the viewer's `Download` menu trigger and the exact `Download image` menu item; `waitForDownload` is armed before the final CDP click. The completed Chrome receipt's local file is validated as a non-empty image and copied to `--op`. Results retain `kind: image-export` and report `method: chrome-download`, the original filename, download id, managed path, byte count and SHA-256.
 - Image bytes never pass through the daemon command or response. There is no image Base64 extraction, host asset fetch, or fallback export path.
-- Downloads use the caller's remaining timeout for discovery, UI actions and the receipt waiter. On incomplete output, the validated persisted conversation may be remounted once without resubmitting the prompt. Successful files are retained across the remount and already completed indices are skipped.
+- Downloads use the caller's remaining timeout for discovery, UI actions and the receipt waiter. On incomplete output, the validated persisted conversation may be remounted once without resubmitting the prompt. Successful files are retained by stable image identity across the remount; a clicked-but-unconfirmed download is not blindly retried.
 
 ### Hub file boundary
 

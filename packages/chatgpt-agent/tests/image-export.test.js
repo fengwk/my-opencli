@@ -8,6 +8,7 @@ const tempDirs = [];
 const MESSAGE_IDS = ['message-current'];
 
 afterEach(() => {
+  vi.useRealTimers();
   for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -24,9 +25,10 @@ function pngAt(filePath) {
   return filePath;
 }
 
-function makePage({ targets, receipts, clickFailure = null, waiterFailure = null } = {}) {
+function makePage({ targets, receipts, clickFailure = null, waiterFailure = null, previewNoOps = 0 } = {}) {
   let menuOpen = false;
   let viewerOpen = false;
+  let selectedViewer = 0;
   let targetRun = 0;
   const page = {
     actions: [],
@@ -40,8 +42,14 @@ function makePage({ targets, receipts, clickFailure = null, waiterFailure = null
       page.actions.push({ type: 'click', selector, options });
       if (clickFailure && selector.includes('menuitem')) throw new Error(clickFailure);
       if (selector.includes('menuitem')) menuOpen = false;
-      if (selector.includes('generated-image-preview')) viewerOpen = true;
+      if (selector.includes('generated-image-preview')) {
+        if (previewNoOps > 0) previewNoOps -= 1;
+        else viewerOpen = true;
+      }
       if (selector.includes('Close viewer')) viewerOpen = false;
+      if (selector.includes('data-image-thumbnail')) {
+        selectedViewer = Number(selector.match(/Generated image (\d+)/)[1]) - 12;
+      }
       // Page SDK returns locator metadata; only the CLI envelope adds `clicked`.
       return { matches_n: 1, click_method: 'cdp' };
     }),
@@ -60,11 +68,18 @@ function makePage({ targets, receipts, clickFailure = null, waiterFailure = null
         targetRun += 1;
         return { targets: current };
       }
-      if (script.includes('const rail = document.querySelector(')) return true;
+      if (script.includes('const target = ')) {
+        const target = JSON.parse(script.match(/const target = (.*);/)[1]);
+        return {
+          ready: viewerOpen && selectedViewer === target.order,
+          selector: viewerSelectors[target.order - 1],
+          reason: 'viewer-image-not-matched',
+        };
+      }
       if (script.includes('triggerSelector:')) {
         return {
           dialog: viewerOpen,
-          triggerSelector: '[role="dialog"] [aria-label="Download"]',
+          triggerSelector: viewerOpen ? '[role="dialog"] [aria-label="Download"]' : '',
           menu: menuOpen,
           menuSelector: '[role="menu"] [role="menuitem"]',
           items: menuOpen
@@ -73,7 +88,7 @@ function makePage({ targets, receipts, clickFailure = null, waiterFailure = null
               { index: 1, text: 'Download image', visible: true },
             ]
             : [],
-          closeSelector: '[role="dialog"] button[aria-label="Close viewer"]',
+          closeSelector: viewerOpen ? '[role="dialog"] button[aria-label="Close viewer"]' : '',
         };
       }
       throw new Error(`Unexpected page.evaluate script: ${script.slice(0, 100)}`);
@@ -98,6 +113,8 @@ const threeRailTargets = [
   { key: 'message-current:2', kind: 'rail', selector: 'button[aria-label="Show generated image 2"]', previewSelector: 'button[data-testid="generated-image-preview"]', order: 2 },
   { key: 'message-current:3', kind: 'rail', selector: 'button[aria-label="Show generated image 3"]', previewSelector: 'button[data-testid="generated-image-preview"]', order: 3 },
 ];
+const viewerSelectors = [13, 14, 15].map((n) =>
+  `[role="dialog"] button[data-image-thumbnail][aria-label="Generated image ${n}"]`);
 
 describe('native Chrome generated-image export', () => {
   it('fails closed without current-turn message IDs', async () => {
@@ -147,8 +164,9 @@ describe('native Chrome generated-image export', () => {
       .filter((i) => i >= 0);
     expect(finalClicks).toHaveLength(3);
     expect(armIndices.every((arm, i) => arm < clickIndices[i])).toBe(true);
-    expect(actions.filter((action) => action.type === 'click' && action.selector.includes('Show generated image')).map((a) => a.selector))
-      .toEqual(threeRailTargets.map((target) => target.selector));
+    expect(actions.filter((action) => action.type === 'click' && action.selector.includes('data-image-thumbnail')).map((a) => a.selector))
+      .toEqual(viewerSelectors);
+    expect(actions.filter((action) => action.type === 'click' && action.selector.includes('generated-image-preview'))).toHaveLength(1);
     expect(actions.filter((action) => action.type === 'click' && action.selector.includes('menuitem')).map((a) => a.options.nth))
       .toEqual([1, 1, 1]);
     expect(results.map((item) => item.sha256)).toHaveLength(3);
@@ -185,6 +203,18 @@ describe('native Chrome generated-image export', () => {
       downloaded: false, uncertain: true, error: expect.stringContaining('image-download-wait-failed'),
     });
     expect(reloadConversation).not.toHaveBeenCalled();
+  });
+
+  // A timed-out click can still produce a late Chrome event. Starting the
+  // next blank-pattern waiter would risk attributing that file to another image.
+  it('stops the image sequence after an unconfirmed download', async () => {
+    const page = makePage({ targets: threeRailTargets, waiterFailure: 'download timed out' });
+    const results = await exportNewImagesLikeOfficial(page, {
+      messageIds: MESSAGE_IDS, expectedCount: 3, outputDir: makeOutputDir(),
+    });
+    expect(results[0]).toMatchObject({ downloaded: false, uncertain: true });
+    expect(page.waitForDownload).toHaveBeenCalledTimes(1);
+    expect(page.actions.filter((a) => a.type === 'click' && a.selector.includes('menuitem'))).toHaveLength(1);
   });
 
   it('rejects missing receipts, unavailable files, and non-image files', async () => {
@@ -232,8 +262,8 @@ describe('native Chrome generated-image export', () => {
     expect(reloadConversation).toHaveBeenCalledTimes(1);
     expect(results.filter((item) => item.downloaded).map((item) => item.index)).toEqual([0, 1]);
     expect(page.waitForDownload).toHaveBeenCalledTimes(2);
-    expect(page.actions.filter((action) => action.type === 'click' && action.selector.includes('Show generated image')).map((a) => a.selector))
-      .toEqual(threeRailTargets.slice(0, 2).map((target) => target.selector));
+    expect(page.actions.filter((action) => action.type === 'click' && action.selector.includes('data-image-thumbnail')).map((a) => a.selector))
+      .toEqual(viewerSelectors.slice(0, 2));
   });
 
   it('preserves output-dir resolution and does not use any Base64 / host image fetch path', async () => {
@@ -252,6 +282,25 @@ describe('native Chrome generated-image export', () => {
     expect(results.some((item) => item.downloaded)).toBe(false);
     expect(page.click).not.toHaveBeenCalled();
     expect(page.waitForDownload).not.toHaveBeenCalled();
+  });
+
+  // During virtualization/mount the first preview activation can be a no-op.
+  // Only the preview may be retried, with no repeated generation or download.
+  it('retries one ignored preview activation before arming a single download', async () => {
+    vi.useFakeTimers();
+    const dir = makeOutputDir();
+    const page = makePage({
+      targets: [threeRailTargets[0]],
+      receipts: [receipt(pngAt(path.join(dir, 'image.png')))],
+      previewNoOps: 1,
+    });
+    page.sleep.mockImplementation(async (seconds) => { vi.advanceTimersByTime(seconds * 1000); });
+    const results = await exportNewImagesLikeOfficial(page, {
+      messageIds: MESSAGE_IDS, expectedCount: 1, outputDir: makeOutputDir(),
+    });
+    expect(results[0].downloaded).toBe(true);
+    expect(page.actions.filter((a) => a.type === 'click' && a.selector.includes('generated-image-preview'))).toHaveLength(2);
+    expect(page.waitForDownload).toHaveBeenCalledTimes(1);
   });
 
   // Replacing a previously completed target on remount must not inflate success

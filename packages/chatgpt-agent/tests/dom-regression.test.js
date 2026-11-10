@@ -40,7 +40,7 @@ import {
   COMPOSER_GENERAL_FILE_SELECTORS,
   COMPOSER_IMAGE_FILE_SELECTORS,
 } from '../src/upload-dom.js';
-import { imageTargetsScript, selectedImageMatchesScript } from '../src/image-export.js';
+import { imageTargetsScript, viewerImageStateScript } from '../src/image-export.js';
 
 /**
  * Creates an execution environment exposing standard DOM interfaces to node:vm.
@@ -1136,13 +1136,28 @@ describe('DOM Regression: Native generated-image target discovery', () => {
     expect(result.targets.every((target) => target.selector.includes('data-chatgpt-search-message-ids="msg-current msg-current msg-current"'))).toBe(true);
   });
 
-  // The rail's selected state and page-owned image source must match before
-  // the viewer opens; an unselected historical image is not sufficient.
-  it('confirms that only the selected rail source matches the preview', () => {
-    const { runScript } = createDomSandbox(`<main>${multiImageFixture}</main>`);
-    const { targets } = runScript(imageTargetsScript(['msg-current']));
-    expect(runScript(selectedImageMatchesScript(['msg-current'], targets[1]))).toBe(true);
-    expect(runScript(selectedImageMatchesScript(['msg-current'], targets[0]))).toBe(false);
+  // Main gallery selection can be ahead of the actual viewer. Only the
+  // viewer's decoded full image + current thumbnail can authorize a download.
+  it('rejects a stale or undecoded viewer and maps only the scoped source', () => {
+    const viewer = (src, loading = false) => `<div role="dialog" id="viewer">
+      <button aria-label="Download"></button>
+      <button data-image-thumbnail="true" aria-label="Generated image 99" aria-current="true">
+        <img src="blob:https://chatgpt.com/current-2" naturalwidth="1672" naturalheight="941" />
+      </button>
+      <img src="${src}" naturalwidth="1672" naturalheight="941" data-complete="${!loading}" />
+    </div>`;
+    for (const [src, loading, expected] of [
+      ['blob:https://chatgpt.com/current-1', false, false],
+      ['blob:https://chatgpt.com/current-2', true, false],
+      ['blob:https://chatgpt.com/current-2', false, true],
+    ]) {
+      const { runScript } = createDomSandbox(`<main>${multiImageFixture}</main>${viewer(src, loading)}`);
+      const { targets } = runScript(imageTargetsScript(['msg-current']));
+      const result = runScript(viewerImageStateScript(['msg-current'], targets[1]));
+      expect(result.ready).toBe(expected);
+      expect(result.selector).toContain('Generated image 99');
+      expect(runScript(viewerImageStateScript(['wrong-message'], targets[1])).ready).toBe(false);
+    }
   });
 
   // Historical and user scopes, plus a matching broad ancestor, cannot widen
@@ -1185,5 +1200,18 @@ describe('DOM Regression: Native generated-image target discovery', () => {
     expect(runScript(imageTargetsScript(['msg-current']))).toMatchObject({
       targets: [], reason: 'ambiguous-gallery-scope',
     });
+  });
+
+  // Live virtualized galleries report height=0 with real images already loaded.
+  // This must not be confused with an explicitly hidden or inert gallery.
+  it('keeps zero-layout gallery controls but still excludes explicitly hidden scopes', () => {
+    const zeroLayout = multiImageFixture
+      .replace('data-testid="generated-image-gallery"', 'data-testid="generated-image-gallery" style="height:0px"')
+      .replaceAll('<button ', '<button style="width:0px;height:0px" ');
+    expect(createDomSandbox(`<main>${zeroLayout}</main>`)
+      .runScript(imageTargetsScript(['msg-current'])).targets).toHaveLength(3);
+    const hidden = zeroLayout.replace('<section ', '<section hidden ');
+    expect(createDomSandbox(`<main>${hidden}</main>`)
+      .runScript(imageTargetsScript(['msg-current'])).targets).toEqual([]);
   });
 });

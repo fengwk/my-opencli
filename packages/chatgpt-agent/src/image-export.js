@@ -90,15 +90,17 @@ export function imageTargetsScript(messageIds) {
     const ids = new Set(${JSON.stringify(messageIds)});
     if (!ids.size) return { targets: [], reason: 'missing-message-ids' };
     const visible = (el) => {
-      if (!el || el.hidden || el.hasAttribute('hidden') || el.closest('[inert], [aria-hidden="true"]')) return false;
+      if (!el || el.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
       let node = el;
       while (node) {
         const style = getComputedStyle(node);
         if (style.display === 'none' || style.visibility === 'hidden') return false;
         node = node.parentElement;
       }
-      const r = el.getBoundingClientRect();
-      return r.width > 0 && r.height > 0;
+      // Virtualized galleries can report 0px layout height even after their
+      // controls and full-size sources mount. The Page click API handles
+      // scrolling/activation; layout size alone must not discard the target.
+      return true;
     };
     const tokenMatch = (scope) => (scope.getAttribute('data-chatgpt-search-message-ids') || '')
       .trim().split(/[\\s,]+/).some((token) => ids.has(token));
@@ -154,26 +156,45 @@ export function imageTargetsScript(messageIds) {
   })()`;
 }
 
-export function selectedImageMatchesScript(messageIds, target) {
+export function viewerImageStateScript(messageIds, target) {
   return `(() => {
     const ids = new Set(${JSON.stringify(messageIds)});
-    const rail = document.querySelector(${JSON.stringify(target.selector)});
-    if (!rail) return false;
-    const scope = rail.closest('[data-chatgpt-search-message-ids]');
+    const target = ${JSON.stringify(target)};
+    const control = document.querySelector(target.kind === 'rail' ? target.selector : target.previewSelector);
+    const scope = control?.closest('[data-chatgpt-search-message-ids]');
     const tokens = (scope?.getAttribute('data-chatgpt-search-message-ids') || '').trim().split(/[\\s,]+/);
-    if (!tokens.some((token) => ids.has(token))) return false;
+    if (!tokens.some((token) => ids.has(token))) return { ready: false, reason: 'source-scope-missing' };
     const scopeKey = [...new Set(tokens.filter((token) => ids.has(token)))].sort().join(',');
-    const order = Number((rail.getAttribute('aria-label') || '').match(/(\\d+)$/)?.[1]);
-    if (${JSON.stringify(target.key || '')} && scopeKey + ':' + order !== ${JSON.stringify(target.key || '')}) return false;
-    if (rail.getAttribute('aria-pressed') !== 'true') return false;
-    const source = rail.querySelector('img')?.currentSrc || rail.querySelector('img')?.src || '';
-    if (!source) return false;
-    const preview = [...scope.querySelectorAll('button[data-testid="generated-image-preview"]')]
-      .find((button) => {
+    if (target.key !== scopeKey + ':' + target.order) return { ready: false, reason: 'source-identity-changed' };
+    const source = control?.querySelector('img')?.currentSrc || control?.querySelector('img')?.src || '';
+    if (!source) return { ready: false, reason: 'source-unavailable' };
+    const visible = (el) => {
+      if (!el || el.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
+      const r = el.getBoundingClientRect(), s = getComputedStyle(el);
+      return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
+    };
+    const dialog = [...document.querySelectorAll('[role="dialog"]')]
+      .find((el) => visible(el) && el.querySelector('button[aria-label="Download"]'));
+    if (!dialog) return { ready: false, reason: 'viewer-missing' };
+    // The viewer rail spans history. It is NOT an output source: select only
+    // the exact page-owned source proved by this turn's scoped gallery above.
+    const thumbnails = [...dialog.querySelectorAll('button[data-image-thumbnail]')]
+      .filter((button) => {
         const img = button.querySelector('img');
         return img && (img.currentSrc || img.src || '') === source;
       });
-    return !!preview;
+    if (thumbnails.length > 1) return { ready: false, reason: 'ambiguous-viewer-image' };
+    const thumbnail = thumbnails[0];
+    const dialogSelector = dialog.id ? '[role="dialog"][id=' + JSON.stringify(dialog.id) + ']' : '[role="dialog"]';
+    const selector = thumbnail?.getAttribute('aria-label')
+      ? dialogSelector + ' button[data-image-thumbnail][aria-label=' + JSON.stringify(thumbnail.getAttribute('aria-label')) + ']'
+      : '';
+    const images = [...dialog.querySelectorAll('img')].filter((img) =>
+      !img.closest('button[data-image-thumbnail]') && visible(img)
+      && img.complete && img.naturalWidth >= 128 && img.naturalHeight >= 128);
+    const ready = images.length === 1 && (images[0].currentSrc || images[0].src || '') === source
+      && (!thumbnail || thumbnail.getAttribute('aria-current') === 'true');
+    return { ready, selector, reason: ready ? '' : 'viewer-image-not-matched' };
   })()`;
 }
 
@@ -188,8 +209,9 @@ function dialogStateScript() {
     const dialog = [...document.querySelectorAll('[role="dialog"]')]
       .find((el) => visible(el) && el.querySelector('[aria-label="Download"]'));
     const trigger = dialog?.querySelector('[aria-label="Download"]');
-    const menu = trigger?.getAttribute('aria-expanded') === 'true'
-      ? [...document.querySelectorAll('[role="menu"]')].find(visible) : null;
+    const menuId = trigger?.getAttribute('aria-controls');
+    const menu = trigger?.getAttribute('aria-expanded') === 'true' && menuId
+      ? document.getElementById(menuId) : null;
     const items = menu ? [...menu.querySelectorAll('[role="menuitem"]')].map((el) => ({
       index: [...menu.querySelectorAll('[role="menuitem"]')].indexOf(el),
       text: (el.innerText || el.textContent || '').trim(),
@@ -203,6 +225,7 @@ function dialogStateScript() {
     const close = closeButtons.length === 1 ? closeButtons[0] : null;
     return {
       dialog: !!dialog,
+      blocked: !dialog && [...document.querySelectorAll('[role="dialog"][aria-modal="true"]')].some(visible),
       triggerSelector: trigger ? dialogSelector + ' [aria-label="Download"]' : '',
       menu: !!menu,
       menuSelector: menu?.id ? '[role="menu"][id=' + JSON.stringify(menu.id) + '] [role="menuitem"]' : '[role="menu"] [role="menuitem"]',
@@ -286,36 +309,39 @@ async function downloadOne(page, target, messageIds, index, outputDir, remaining
     kind: 'image-export', method: 'chrome-download', index, downloaded: false, error, ...(uncertain ? { uncertain: true } : {}),
   });
   const actionAllowed = () => isAllowed(canContinue) && remainingMs() > 0;
-  let viewerOpened = false;
   let downloadSubmitted = false;
   let waiter = null;
   try {
     if (!actionAllowed()) return failed('image-download-time-budget-exhausted');
-    if (target.kind === 'rail') {
-      const click = await page.click(target.selector);
-      if (!(click?.matches_n > 0)) return failed('image-rail-selection-click-failed');
-      let selected = false;
-      for (let attempt = 0; attempt < 20 && actionAllowed(); attempt += 1) {
-        selected = await evaluate(page, selectedImageMatchesScript(messageIds, target));
-        if (selected) break;
+    let state = await evaluate(page, dialogStateScript());
+    for (let openAttempt = 0; openAttempt < 2 && !state?.dialog && actionAllowed(); openAttempt += 1) {
+      if (state?.blocked) return failed('image-viewer-blocked-by-dialog');
+      // Open once; subsequent images are selected inside this same viewer.
+      // A virtualized preview can ignore the first activation during mount.
+      // Retry only this UI activation after confirming no viewer has opened;
+      // no generation or download action has been submitted at this point.
+      const preview = await page.click(target.previewSelector);
+      if (!(preview?.matches_n > 0)) return failed('image-preview-click-failed');
+      const openDeadline = Date.now() + Math.min(10_000, remainingMs());
+      while (actionAllowed() && Date.now() < openDeadline) {
+        state = await evaluate(page, dialogStateScript());
+        if (state?.dialog && state.triggerSelector) break;
         await page.sleep(Math.min(0.2, remainingMs() / 1000));
       }
-      if (!selected) return failed('selected-image-preview-not-matched');
-    }
-
-    if (!actionAllowed()) return failed('image-download-time-budget-exhausted');
-    const preview = await page.click(target.previewSelector);
-    if (!(preview?.matches_n > 0)) return failed('image-preview-click-failed');
-    viewerOpened = true;
-
-    let state = null;
-    for (let attempt = 0; attempt < 20 && actionAllowed(); attempt += 1) {
-      state = await evaluate(page, dialogStateScript());
-      if (state?.dialog && state.triggerSelector) break;
-      await page.sleep(Math.min(0.2, remainingMs() / 1000));
     }
     if (!state?.dialog || !state.triggerSelector) return failed('image-viewer-not-open');
 
+    let image = await evaluate(page, viewerImageStateScript(messageIds, target));
+    if (!image?.ready && image?.selector && actionAllowed()) {
+      await page.click(image.selector);
+    }
+    const readyDeadline = Date.now() + Math.min(30_000, remainingMs());
+    while (!image?.ready && actionAllowed() && Date.now() < readyDeadline) {
+      await page.sleep(Math.min(0.2, remainingMs() / 1000));
+      image = await evaluate(page, viewerImageStateScript(messageIds, target));
+    }
+    if (!image?.ready) return failed(image?.reason || 'viewer-image-not-matched');
+    state = await evaluate(page, dialogStateScript());
     if (!state.menu) {
       if (!actionAllowed()) return failed('image-download-time-budget-exhausted');
       await page.focus(state.triggerSelector);
@@ -354,22 +380,20 @@ async function downloadOne(page, target, messageIds, index, outputDir, remaining
   } catch (error) {
     if (waiter) await waiter;
     return failed(error?.message || String(error), downloadSubmitted);
-  } finally {
-    if (viewerOpened) {
-      try {
-        const state = await evaluate(page, dialogStateScript());
-        if (state?.closeSelector) {
-          await page.click(state.closeSelector);
-          // Wait for the viewer to release the underlying gallery before the
-          // next image is selected; a completed file survives cleanup failure.
-          for (let attempt = 0; attempt < 20 && actionAllowed(); attempt += 1) {
-            if ((await evaluate(page, dialogStateScript()))?.dialog !== true) break;
-            await page.sleep(Math.min(0.2, remainingMs() / 1000));
-          }
-        }
-      } catch { /* retain the completed receipt even if the viewer cannot close */ }
-    }
   }
+}
+
+async function closeImageViewer(page, remainingMs) {
+  try {
+    const state = await evaluate(page, dialogStateScript());
+    if (!state?.closeSelector || remainingMs() <= 0) return;
+    await page.click(state.closeSelector);
+    const deadline = Date.now() + Math.min(5_000, remainingMs());
+    while (Date.now() < deadline && remainingMs() > 0) {
+      if ((await evaluate(page, dialogStateScript()))?.dialog !== true) break;
+      await page.sleep(Math.min(0.2, remainingMs() / 1000));
+    }
+  } catch { /* keep completed files even if the page cannot clean up */ }
 }
 
 /**
@@ -392,6 +416,7 @@ export async function exportNewImagesLikeOfficial(page, opts = {}) {
   if (!ids.length) {
     return [{ kind: 'image-export', method: 'chrome-download', downloaded: false, error: 'missing-message-ids' }];
   }
+  await closeImageViewer(page, remainingMs);
 
   const successful = new Map();
   let retryBlocked = false;
@@ -432,7 +457,12 @@ export async function exportNewImagesLikeOfficial(page, opts = {}) {
       const result = await downloadOne(page, targets[index], ids, index, outputDir, remainingMs, continuePredicate);
       results.push(result);
       if (result.downloaded) successful.set(key, result);
-      if (result.uncertain) retryBlocked = true;
+      if (result.uncertain) {
+        // A late download from this click must not be mistaken for the next
+        // image by a new filename-agnostic waiter. Stop the entire sequence.
+        retryBlocked = true;
+        break;
+      }
       if (index < Math.min(expectedCount, targets.length) - 1 && isAllowed(continuePredicate) && remainingMs() > 0) {
         await page.sleep(Math.min(0.4, remainingMs() / 1000));
       }
@@ -443,23 +473,27 @@ export async function exportNewImagesLikeOfficial(page, opts = {}) {
     return results;
   };
 
-  let results = await runAttempt();
-  if (successful.size < expectedCount && !retryBlocked && typeof opts.reloadConversation === 'function'
-      && isAllowed(opts.canRetry) && remainingMs() > 0) {
-    try {
-      await opts.reloadConversation();
-      results = await runAttempt();
-    } catch (error) {
-      results.push({ kind: 'image-export', method: 'chrome-download', downloaded: false, error: `image-remount-failed: ${error?.message || error}` });
+  try {
+    let results = await runAttempt();
+    if (successful.size < expectedCount && !retryBlocked && typeof opts.reloadConversation === 'function'
+        && isAllowed(opts.canRetry) && remainingMs() > 0) {
+      try {
+        await opts.reloadConversation();
+        results = await runAttempt();
+      } catch (error) {
+        results.push({ kind: 'image-export', method: 'chrome-download', downloaded: false, error: `image-remount-failed: ${error?.message || error}` });
+      }
     }
-  }
-  const final = [...successful.values()];
-  const finalIndices = new Set(final.map((entry) => entry.index));
-  for (const result of results) {
-    if (!result.downloaded && !finalIndices.has(result.index)) {
-      final.push(result);
-      if (Number.isInteger(result.index)) finalIndices.add(result.index);
+    const final = [...successful.values()];
+    const finalIndices = new Set(final.map((entry) => entry.index));
+    for (const result of results) {
+      if (!result.downloaded && !finalIndices.has(result.index)) {
+        final.push(result);
+        if (Number.isInteger(result.index)) finalIndices.add(result.index);
+      }
     }
+    return final.sort((a, b) => (a.index ?? Number.MAX_SAFE_INTEGER) - (b.index ?? Number.MAX_SAFE_INTEGER));
+  } finally {
+    await closeImageViewer(page, remainingMs);
   }
-  return final.sort((a, b) => (a.index ?? Number.MAX_SAFE_INTEGER) - (b.index ?? Number.MAX_SAFE_INTEGER));
 }
