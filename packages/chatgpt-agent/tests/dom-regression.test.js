@@ -40,7 +40,7 @@ import {
   COMPOSER_GENERAL_FILE_SELECTORS,
   COMPOSER_IMAGE_FILE_SELECTORS,
 } from '../src/upload-dom.js';
-import { imageTargetsScript, viewerImageStateScript } from '../src/image-export.js';
+import { imageDialogStateScript, imageTargetsScript, viewerImageStateScript } from '../src/image-export.js';
 
 /**
  * Creates an execution environment exposing standard DOM interfaces to node:vm.
@@ -173,6 +173,10 @@ function createDomSandbox(html, { origin = 'https://chatgpt.com', href = 'https:
     },
     querySelectorAll(sel) {
       return $(sel).toArray().map(wrap);
+    },
+    getElementById(id) {
+      const found = $(`#${String(id).replace(/([:.])/g, '\\$1')}`).first().get(0);
+      return found ? wrap(found) : null;
     },
   };
 
@@ -1133,7 +1137,31 @@ describe('DOM Regression: Native generated-image target discovery', () => {
       { kind: 'rail', order: 2 },
       { kind: 'rail', order: 3 },
     ]);
-    expect(result.targets.every((target) => target.selector.includes('data-chatgpt-search-message-ids="msg-current msg-current msg-current"'))).toBe(true);
+    expect(result.targets.every((target) => target.selector.includes('data-chatgpt-search-message-ids~="msg-current"'))).toBe(true);
+    expect(result.targets.map(({ sourceUrl }) => sourceUrl)).toEqual([
+      'blob:https://chatgpt.com/current-1',
+      'blob:https://chatgpt.com/current-2',
+      'blob:https://chatgpt.com/current-3',
+    ]);
+  });
+
+  // Duplicate/reordered protocol IDs and DOM scope tokens identify the same
+  // logical turn; raw attribute spelling must not alter target identity.
+  it('normalizes scoped message-id sets independently of token order and duplicates', () => {
+    const firstHtml = multiImageFixture.replace(
+      'msg-current msg-current msg-current', 'msg-a msg-b msg-a',
+    );
+    const reorderedHtml = multiImageFixture.replace(
+      'msg-current msg-current msg-current', 'msg-b msg-a',
+    );
+    const first = createDomSandbox(`<main>${firstHtml}</main>`)
+      .runScript(imageTargetsScript(['msg-b', 'msg-a', 'msg-a'])).targets;
+    const reordered = createDomSandbox(`<main>${reorderedHtml}</main>`)
+      .runScript(imageTargetsScript(['msg-a', 'msg-b'])).targets;
+    expect(first.map(({ key }) => key)).toEqual(reordered.map(({ key }) => key));
+    expect(first[0].key).toBe('msg-a,msg-b:1');
+    expect(first[0].selector).toContain('[data-chatgpt-search-message-ids~="msg-a"]');
+    expect(first[0].selector).toContain('[data-chatgpt-search-message-ids~="msg-b"]');
   });
 
   // Main gallery selection can be ahead of the actual viewer. Only the
@@ -1213,5 +1241,40 @@ describe('DOM Regression: Native generated-image target discovery', () => {
     const hidden = zeroLayout.replace('<section ', '<section hidden ');
     expect(createDomSandbox(`<main>${hidden}</main>`)
       .runScript(imageTargetsScript(['msg-current'])).targets).toEqual([]);
+  });
+
+  // The viewer can detach the proven gallery. Its previously captured exact URL
+  // must still map one thumbnail and one decoded full-size image, never history.
+  it('maps the captured source after the scoped gallery is unmounted', () => {
+    const { targets } = createDomSandbox(`<main>${multiImageFixture}</main>`)
+      .runScript(imageTargetsScript(['msg-current']));
+    const target = targets[1];
+    const viewer = `<div role="dialog" id="viewer">
+      <button aria-label="Download"></button>
+      <button data-image-thumbnail="true" aria-label="Generated image current" aria-current="true">
+        <img src="${target.sourceUrl}" naturalwidth="200" naturalheight="200" />
+      </button><img src="${target.sourceUrl}" naturalwidth="200" naturalheight="200" />
+    </div>`;
+    const state = createDomSandbox(viewer).runScript(viewerImageStateScript(['msg-current'], target));
+    expect(state.ready).toBe(true);
+  });
+
+  // aria-controls binds a menu explicitly; portal menus without it are accepted
+  // only when the activated trigger advertises an expanded menu and one is visible.
+  it('recognizes controlled and causally associated portal menus with exact item labels', () => {
+    const controlled = `<div role="dialog" id="viewer"><button aria-label="下载" aria-haspopup="menu"
+      aria-expanded="true" aria-controls="download-menu"></button></div>
+      <div role="menu" id="download-menu"><button role="menuitem">下载图像</button>
+      <button role="menuitem">下载全部图像</button></div>`;
+    const control = createDomSandbox(controlled).runScript(imageDialogStateScript());
+    expect(control.menu).toBe(true);
+    expect(control).toMatchObject({ triggerPopup: 'menu', triggerExpanded: true });
+    expect(control.items.map(({ text }) => text)).toEqual(['下载图像', '下载全部图像']);
+
+    const portal = `<div role="dialog" id="viewer"><button aria-label="Download" aria-haspopup="menu"
+      aria-expanded="true"></button></div><div role="menu"><button role="menuitem">Download image</button></div>`;
+    const portalState = createDomSandbox(portal).runScript(imageDialogStateScript());
+    expect(portalState.menu).toBe(true);
+    expect(portalState.items[0].text).toBe('Download image');
   });
 });
