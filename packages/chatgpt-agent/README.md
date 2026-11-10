@@ -65,7 +65,7 @@ non-invasively through CDP — the page's own `fetch`/XHR are never patched.
 - Generated-image export requires non-empty protocol image `messageId` values. It only targets galleries whose nearest `data-chatgpt-search-message-ids` scope matches those IDs; missing IDs, historical galleries, user uploads, and ambiguous targets fail closed.
 - Whitespace-separated scope attributes are matched by message-ID tokens rather than their raw spelling. Discovery allows up to 30 seconds for message placeholders to become gallery controls before the one permitted remount. Before a preview is activated it is rediscovered by the same logical identity; an unmounted viewer source uses only the URL previously proved by that scoped gallery.
 - Output targets follow the current turn's `Generated images` side-rail order. Zero-layout virtualized galleries remain valid when not explicitly hidden. A single preview without a rail is allowed only inside one unambiguous scoped gallery.
-- Open the viewer once, then map each scoped gallery source to its exact viewer thumbnail. Verify both the current thumbnail and the decoded full-size viewer image before downloading; main-gallery selection alone is not proof. The history-wide viewer rail is never used to discover outputs. An ignored preview activation may be retried once before any download starts.
+- Close the viewer before preparing each image, so a modal-hidden main gallery cannot hide the next target. Activate a source-less scoped rail item and boundedly wait for its source before opening the viewer. Map each proven source to its exact viewer thumbnail and decoded full-size image; main-gallery selection alone is not proof. The history-wide viewer rail is never used to discover outputs. An ignored preview activation may be retried once before any download starts.
 - Each image arms one `waitForDownload` before activating the viewer's `Download` control. A direct image receipt is accepted; otherwise a bounded poll waits for the exact `Download image` item (also `下载图片` / `下载图像`), including asynchronously populated portal menus without `aria-controls`. Series/bulk items are never selected. The completed Chrome receipt's local file is validated as a non-empty image and copied to `--op`. Results retain `kind: image-export` and report `method: chrome-download`, the original filename, download id, managed path, byte count and SHA-256.
 - Image bytes never pass through the daemon command or response. There is no image Base64 extraction, host asset fetch, or fallback export path.
 - Downloads use the caller's remaining timeout for discovery and UI actions; each receipt waiter is capped at 60 seconds and never exceeds the remaining turn budget. On incomplete output, the validated persisted conversation may be remounted once without resubmitting the prompt. Successful files are retained by stable image identity across the remount; a clicked-but-unconfirmed download stops the sequence rather than being blindly retried or attributed to the next image.
@@ -78,6 +78,11 @@ These commands never send a prompt or change a composer draft:
 # Metadata only: bounded composer/gallery/visibility/message-ID diagnostics.
 # No prompt/history text, image source bytes, cookies or arbitrary script input.
 opencli chatgpt-agent inspect --session <conversation-id>
+
+# Exercise the real new-chat boot/readiness (including at most one reload).
+# Returns version, visibility, editor geometry and phase metadata, never content.
+# Stops before clearing drafts, uploading files or sending any prompt.
+opencli chatgpt-agent inspect --mode new-chat
 
 # Recover exact already-generated images with the same native exporter as ask.
 # Obtain IDs from ask's error hint or the scoped gallery diagnostics above.

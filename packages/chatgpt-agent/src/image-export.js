@@ -560,7 +560,7 @@ export async function exportNewImagesLikeOfficial(page, opts = {}) {
         successful.get(key).index = index;
         continue;
       }
-      if (index > 0 && !await closeImageViewer(page, remainingMs)) {
+      if (!await closeImageViewer(page, remainingMs)) {
         for (let failedIndex = index; failedIndex < expectedCount; failedIndex += 1) {
           results.push({ kind: 'image-export', method: 'chrome-download', index: failedIndex, downloaded: false, error: 'image-viewer-close-failed' });
         }

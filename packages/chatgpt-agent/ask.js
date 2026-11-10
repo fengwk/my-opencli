@@ -141,14 +141,15 @@ export async function resolvePreSendConversationId(page, session) {
   return actualId;
 }
 
-function requireReadyChatSurface(surface, recovered = false) {
+function requireReadyChatSurface(surface, recovered = false, stage = 'unknown') {
   if (surface?.broken === false) return;
   throw new CommandExecutionError(
     'PAGE_BROKEN: ChatGPT composer or thread did not become ready before send',
-    `reloadAttempted=${!!recovered} composer=${!!surface?.composer} errorish=${!!surface?.errorish} `
+    `stage=${stage} reloadAttempted=${!!recovered} composer=${!!surface?.composer} errorish=${!!surface?.errorish} `
       + `messages=${surface?.messages ?? 'unknown'} mainLen=${surface?.mainLen ?? 'unknown'} `
       + `blankThread=${!!surface?.blankThread} sessionMismatch=${!!surface?.sessionMismatch} `
-      + `conversationUnavailable=${!!surface?.conversationUnavailable}. `
+      + `conversationUnavailable=${!!surface?.conversationUnavailable} visibility=${surface?.visibility || 'unknown'} `
+      + `composerCandidates=${JSON.stringify(surface?.composerCandidates || [])}. `
       + 'Verify the requested conversation is accessible in this browser profile and finish any login or interstitial before retrying.',
   );
 }
@@ -323,7 +324,7 @@ export const askCommand = cli({
       session,
       reload: bootConversation,
     });
-    requireReadyChatSurface(health.after, health.recovered);
+    requireReadyChatSurface(health.after, health.recovered, 'boot');
     await ensureChatGPTComposer(
       page,
       'chatgpt-agent ask requires a visible composer. Open chatgpt.com and finish any interstitial.',
@@ -345,7 +346,7 @@ export const askCommand = cli({
     // The idle recovery may have navigated again; revalidate before touching
     // the composer or arming capture, with no automatic retry after a send.
     const postIdleHealth = await ensureHealthyChatSurface(page, { session, allowReload: false });
-    requireReadyChatSurface(postIdleHealth.after, health.recovered || preSendIdle.recovered);
+    requireReadyChatSurface(postIdleHealth.after, health.recovered || preSendIdle.recovered, 'post-idle');
     await ensureChatGPTComposer(
       page,
       'chatgpt-agent ask requires a visible composer after idle recovery.',
@@ -382,7 +383,7 @@ export const askCommand = cli({
       const finalHealth = await ensureHealthyChatSurface(page, { session, allowReload: false });
       finalSurface = finalHealth.after;
     }
-    requireReadyChatSurface(finalSurface, health.recovered || preSendIdle.recovered);
+    requireReadyChatSurface(finalSurface, health.recovered || preSendIdle.recovered, 'post-upload');
 
     // Always disarm both captures after the turn so the tab lease does not keep
     // buffering frames/chunks between commands (bounded rings, but they still

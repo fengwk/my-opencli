@@ -68,6 +68,21 @@ export async function probeChatSurface(page, opts = {}) {
       return style.display !== 'none' && style.visibility !== 'hidden'
         && rect.width > 0 && rect.height > 0;
     });
+    // Metadata only: distinguish a missing editor from a mounted but hidden
+    // editor without returning draft text or weakening the readiness predicate.
+    const composerCandidates = Array.from(document.querySelectorAll(
+      '#prompt-textarea, textarea, [contenteditable], [role="textbox"]',
+    )).slice(0, 10).map((node) => {
+      const style = window.getComputedStyle(node), rect = node.getBoundingClientRect();
+      return {
+        tag: node.tagName, id: node.id,
+        role: node.getAttribute?.('role'), editable: node.getAttribute?.('contenteditable'),
+        testid: node.getAttribute?.('data-testid'),
+        width: rect.width, height: rect.height,
+        display: style.display, visibility: style.visibility,
+        hiddenAncestor: !!node.closest?.('[hidden],[inert],[aria-hidden="true"]'),
+      };
+    });
     const messages = document.querySelectorAll(${JSON.stringify(MESSAGE_SELECTOR)}).length;
     const main = document.querySelector('main') || document.body;
     const mainText = ((main && (main.innerText || main.textContent)) || '').trim();
@@ -116,6 +131,11 @@ export async function probeChatSurface(page, opts = {}) {
     return {
       url,
       composer,
+      composerCandidates,
+      visibility: document.visibilityState || 'unknown',
+      documentHasFocus: document.hasFocus?.() ?? null,
+      readyState: document.readyState || 'unknown',
+      userAgent: typeof navigator === 'object' ? navigator.userAgent : '',
       messages,
       mainLen,
       // Keep the latest text for diagnostics, but classify the full non-user
@@ -175,15 +195,17 @@ export async function probeChatSurface(page, opts = {}) {
  *   reload?: (page: object) => Promise<void>,
  *   allowReload?: boolean,
  *   settleMs?: number,
+ *   onProbe?: (state: object, phase: string) => void,
  * }} opts
  * @returns {Promise<{ recovered: boolean, before: object, after: object }>}
  */
 export async function ensureHealthyChatSurface(page, opts = {}) {
   const settleMs = opts.settleMs ?? 15_000;
   const pollMs = 500;
-  const waitForReady = async () => {
+  const waitForReady = async (phase) => {
     const deadline = Date.now() + settleMs;
     let state = await probeChatSurface(page, { session: opts.session });
+    opts.onProbe?.(state, phase);
     // The attempt cap also bounds tests and custom pages with non-blocking sleep.
     for (let attempt = 0; attempt < Math.ceil(settleMs / pollMs); attempt += 1) {
       if (!state.broken || state.conversationUnavailable) break;
@@ -191,11 +213,12 @@ export async function ensureHealthyChatSurface(page, opts = {}) {
       if (remaining <= 0) break;
       await page.sleep(Math.min(pollMs, remaining) / 1000);
       state = await probeChatSurface(page, { session: opts.session });
+      opts.onProbe?.(state, phase);
     }
     return state;
   };
 
-  const before = await waitForReady();
+  const before = await waitForReady('initial');
   if (!before.broken || before.conversationUnavailable || opts.allowReload === false) {
     return { recovered: false, before, after: before };
   }
@@ -218,7 +241,7 @@ export async function ensureHealthyChatSurface(page, opts = {}) {
     return { recovered: false, before, after: before };
   }
 
-  const after = await waitForReady();
+  const after = await waitForReady('reload');
   if (process.env.OPENCLI_VERBOSE) {
     const { mainText, ...diagnostics } = after;
     console.error(`[chatgpt-agent] page-health after reload ${JSON.stringify(diagnostics)}`);

@@ -3,12 +3,81 @@
  * modifies a draft, fetches conversation APIs or returns image/content bytes.
  */
 import { cli, Strategy } from '@jackwener/opencli/registry';
-import { CommandExecutionError } from '@jackwener/opencli/errors';
+import { ArgumentError, CommandExecutionError } from '@jackwener/opencli/errors';
 import {
   CHATGPT_DOMAIN, CHATGPT_URL, currentChatGPTUrl, openChatGPTConversation,
-  parseChatGPTConversationId,
+  parseChatGPTConversationId, startNewChat, ensureChatGPTLogin, chatGPTHostVersion,
 } from './src/host-chatgpt.js';
 import { unwrapEvaluateResult } from './src/dom-helpers.js';
+import { ensureHealthyChatSurface } from './src/page-health.js';
+
+function safeUrl(value) {
+  try { const url = new URL(value); return url.origin + url.pathname; }
+  catch { return ''; }
+}
+
+export function surfaceMetadata(state) {
+  const keys = [
+    'composer', 'composerCandidates', 'visibility', 'documentHasFocus', 'readyState', 'userAgent',
+    'messages', 'mainLen', 'errorish', 'generationFailed', 'conversationUnavailable',
+    'generating', 'conversationId', 'onConversation', 'sessionMismatch', 'blankThread', 'broken',
+  ];
+  return { url: safeUrl(state?.url), ...Object.fromEntries(keys
+    .filter((key) => state?.[key] !== undefined).map((key) => [key, state[key]])) };
+}
+
+async function runtimeVersions() {
+  const result = { hostVersion: chatGPTHostVersion() };
+  try {
+    // Read the host daemon's fixed, loopback-only status API. Never return its
+    // leases, owners, paths or profile IDs; only software versions are useful.
+    const response = await fetch('http://127.0.0.1:19825/status', {
+      headers: { 'X-OpenCLI': '1' }, signal: AbortSignal.timeout(2000),
+    });
+    if (response.ok) {
+      const status = await response.json();
+      result.daemonVersion = status.daemonVersion;
+      result.extensionVersions = [...new Set([
+        status.extensionVersion, ...(status.profiles || []).map((p) => p.extensionVersion),
+      ].filter(Boolean))];
+    }
+  } catch { /* An unavailable status endpoint must not hide page evidence. */ }
+  return result;
+}
+
+export async function probeNewChat(page) {
+  const startedAt = Date.now(), timeline = [], tabs = [];
+  let stage = 'boot';
+  const recordTabs = async () => {
+    if (typeof page.tabs !== 'function') return;
+    const rows = await page.tabs().catch(() => []);
+    tabs.push({ stage, page: page.getActivePage?.(), tabs: Array.isArray(rows)
+      ? rows.slice(0, 10).map((t) => ({ page: t.page, active: t.active, url: safeUrl(t.url) })) : [] });
+  };
+  const boot = async () => {
+    await startNewChat(page);
+    await ensureChatGPTLogin(page, 'Read-only readiness probe requires a logged-in ChatGPT session.');
+    await recordTabs();
+  };
+  const runtime = await runtimeVersions();
+  try {
+    await boot();
+    stage = 'health';
+    const health = await ensureHealthyChatSurface(page, {
+      reload: async () => { stage = 'reload'; await boot(); },
+      onProbe: (state, phase) => {
+        if (timeline.length < 80) timeline.push({ phase, elapsedMs: Date.now() - startedAt, ...surfaceMetadata(state) });
+      },
+    });
+    await recordTabs();
+    return { mode: 'new-chat', runtime, ready: !health.after.broken,
+      recovered: health.recovered, timeline, tabs };
+  } catch (error) {
+    // Error messages may quote content or URLs. The phase and bounded DOM
+    // metadata suffice; never expose an arbitrary host exception.
+    return { mode: 'new-chat', runtime, ready: false, stage, errorType: error?.name || 'Error', timeline, tabs };
+  }
+}
 
 export function chatDiagnosticsScript() {
   return `(() => {
@@ -67,9 +136,18 @@ export const inspectCommand = cli({
   strategy: Strategy.COOKIE,
   browser: true,
   navigateBefore: false,
-  args: [{ name: 'session', valueRequired: true, help: 'Existing conversation id or /c/<id> URL; omit to inspect home' }],
+  args: [
+    { name: 'session', valueRequired: true, help: 'Existing conversation id or /c/<id> URL; omit to inspect home' },
+    { name: 'mode', valueRequired: true, default: 'page', choices: ['page', 'new-chat'],
+      help: 'page: inspect existing DOM; new-chat: probe real boot/readiness, never clears, uploads or sends' },
+  ],
   columns: ['conversationId', 'diagnostics'],
   func: async (page, kwargs) => {
+    const mode = kwargs.mode || 'page';
+    if (!['page', 'new-chat'].includes(mode) || (mode === 'new-chat' && kwargs.session)) {
+      throw new ArgumentError('Use --mode page with an optional session, or --mode new-chat without a session');
+    }
+    if (mode === 'new-chat') return [{ conversationId: '', diagnostics: JSON.stringify(await probeNewChat(page)) }];
     const id = kwargs.session ? parseChatGPTConversationId(kwargs.session) : '';
     if (id) await openChatGPTConversation(page, id);
     else await page.goto(CHATGPT_URL, { settleMs: 2000 });
