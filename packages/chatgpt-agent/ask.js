@@ -598,9 +598,9 @@ export const askCommand = cli({
             : null,
           // Don't add a navigation reload unless there is enough remaining
           // user-timeout for reload + settle + a second polling pass
-          // (~25s in practice). Below that the reload itself risks
+          // (30s gallery mount window plus navigation headroom). Below that the reload risks
           // exceeding the outer bound.
-          canRetry: () => remainingMs() >= 25_000,
+          canRetry: () => remainingMs() >= 35_000,
         });
         downloads = downloads.concat(imgDl);
       }
