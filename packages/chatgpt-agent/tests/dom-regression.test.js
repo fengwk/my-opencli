@@ -20,7 +20,9 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import * as cheerio from 'cheerio';
 import * as vm from 'node:vm';
 import {
@@ -40,7 +42,12 @@ import {
   COMPOSER_GENERAL_FILE_SELECTORS,
   COMPOSER_IMAGE_FILE_SELECTORS,
 } from '../src/upload-dom.js';
-import { imageDialogStateScript, imageTargetsScript, viewerImageStateScript } from '../src/image-export.js';
+import {
+  exportNewImagesLikeOfficial,
+  imageDialogStateScript,
+  imageTargetsScript,
+  viewerImageStateScript,
+} from '../src/image-export.js';
 import { chatDiagnosticsScript } from '../inspect.js';
 
 /**
@@ -755,7 +762,7 @@ describe('DOM Regression: Modern Composer File Input Routing', () => {
 });
 
 describe('DOM Regression: Modern ChatGPT Generated-Image Gallery Extractor', () => {
-  const multiImageFixture = readFileSync(
+  const multiImageFixture = fs.readFileSync(
     new URL('./__fixtures__/generated-images.html', import.meta.url),
     'utf8',
   );
@@ -1123,10 +1130,111 @@ describe('DOM Regression: Modern ChatGPT Generated-Image Gallery Extractor', () 
 });
 
 describe('DOM Regression: Native generated-image target discovery', () => {
-  const multiImageFixture = readFileSync(
+  const multiImageFixture = fs.readFileSync(
     new URL('./__fixtures__/generated-images.html', import.meta.url),
     'utf8',
   );
+  const lazyImageFixture = fs.readFileSync(
+    new URL('./__fixtures__/generated-images-lazy.html', import.meta.url),
+    'utf8',
+  );
+
+  function createLazyImagePage(downloadPaths) {
+    const { runScript, $ } = createDomSandbox(lazyImageFixture);
+    const scripts = [];
+    const evaluated = [];
+    const actions = [];
+    let selectedOrder = 1;
+    let nextReceipt = 0;
+    const page = {
+      evaluate: async (script) => {
+        scripts.push(script);
+        const result = runScript(script);
+        evaluated.push(result);
+        return result;
+      },
+      click: async (selector) => {
+        actions.push(selector);
+        const matches = $(selector);
+        if (matches.length !== 1) return { matches_n: matches.length };
+        if (selector.includes('Show generated image')) {
+          selectedOrder = Number(selector.match(/Show generated image (\d+)/)?.[1]);
+          const railImage = matches.find('img');
+          const source = `blob:https://chatgpt.com/current-${selectedOrder}`;
+          railImage.attr('src', source);
+          $('button[data-testid="generated-image-preview"] img').attr('src', source);
+        } else if (selector.includes('generated-image-preview')) {
+          const source = $('button[data-testid="generated-image-preview"] img').attr('src');
+          $('main').attr('aria-hidden', 'true');
+          $('body').append(`<div role="dialog" id="viewer" style="width:500px;height:500px">
+            <button aria-label="Download" aria-haspopup="menu" aria-expanded="false" aria-controls="download-menu"></button>
+            <button aria-label="Close viewer"></button>
+            <button data-image-thumbnail="true" aria-label="Generated image ${selectedOrder}" aria-current="true">
+              <img src="${source}" naturalwidth="1024" naturalheight="1536" />
+            </button>
+            <img src="${source}" naturalwidth="1024" naturalheight="1536" />
+          </div>`);
+        } else if (selector.includes('Close viewer')) {
+          $('[role="dialog"]').remove();
+          $('main').removeAttr('aria-hidden');
+        } else if (selector.includes('[aria-label="Download"]')) {
+          $('[role="dialog"] [aria-label="Download"]').attr('aria-expanded', 'true');
+          $('body').append('<div role="menu" id="download-menu" style="width:100px;height:50px"><button role="menuitem">Download image</button></div>');
+        } else if (selector.includes('menuitem')) {
+          $('[role="menu"]').remove();
+        }
+        return { matches_n: 1 };
+      },
+      waitForDownload: async () => {
+        const index = nextReceipt++;
+        return {
+          downloaded: true, state: 'complete', filename: downloadPaths[index],
+          id: 900 + index, mime: 'image/png',
+        };
+      },
+      sleep: async () => {},
+      pressKey: async () => {},
+    };
+    return { page, scripts, evaluated, actions, runScript };
+  }
+
+  // Opening the first viewer hides the main gallery; the old discovery flow
+  // therefore lost all siblings. The production exporter must close it before
+  // selecting each lazy rail item, then attribute three native receipts.
+  it('exports all lazy rail images through the modal-hidden state transition', async () => {
+    const downloadDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chatgpt-lazy-downloads-'));
+    const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chatgpt-lazy-output-'));
+    const downloadPaths = [1, 2, 3].map((index) => {
+      const file = path.join(downloadDir, `receipt-${index}.png`);
+      fs.writeFileSync(file, Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, index]));
+      return file;
+    });
+    try {
+      const baseline = createLazyImagePage(downloadPaths);
+      const before = baseline.runScript(imageTargetsScript(['msg-current']));
+      expect(before.targets).toHaveLength(3);
+      await baseline.page.click(before.targets[0].previewSelector);
+      expect(baseline.runScript(imageTargetsScript(['msg-current'])).targets).toEqual([]);
+
+      const { page, scripts, evaluated, actions } = createLazyImagePage(downloadPaths);
+      const results = await exportNewImagesLikeOfficial(page, {
+        messageIds: ['msg-current'], expectedCount: 3, outputDir, timeoutMs: 5_000,
+      });
+      expect(results).toHaveLength(3);
+      expect(results.map(({ index }) => index)).toEqual([0, 1, 2]);
+      expect(results.every((result) => result.downloaded)).toBe(true);
+      expect(results.map(({ downloadId }) => downloadId)).toEqual([900, 901, 902]);
+      expect(new Set(results.map(({ path: file }) => fs.readFileSync(file).toString('hex'))).size).toBe(3);
+      expect(actions.filter((selector) => selector.includes('Show generated image'))).toHaveLength(2);
+      expect(actions.filter((selector) => selector.includes('Close viewer'))).toHaveLength(3);
+      expect(scripts.every((script) => !/fetch\s*\(|canvas|base64|data:image/i.test(script))).toBe(true);
+      expect(JSON.stringify(scripts)).not.toMatch(/PRIVATE|PNG_BYTES/);
+      expect(JSON.stringify(evaluated)).not.toMatch(/PRIVATE|PNG_BYTES|data:image|base64/i);
+    } finally {
+      fs.rmSync(downloadDir, { recursive: true, force: true });
+      fs.rmSync(outputDir, { recursive: true, force: true });
+    }
+  });
 
   // The production discovery script must enumerate all current-turn rail
   // controls in canonical order, independent of which image is selected.

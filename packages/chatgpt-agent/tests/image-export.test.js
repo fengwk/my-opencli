@@ -165,6 +165,41 @@ describe('native Chrome generated-image export', () => {
     expect(page.waitForDownload).toHaveBeenCalledTimes(1);
   });
 
+  it('fails closed when an existing image viewer cannot be dismissed', async () => {
+    vi.useFakeTimers();
+    const page = makePage({ targets: threeRailTargets, initialViewer: true, closeNoOps: 10 });
+    page.sleep.mockImplementation(async (seconds) => { vi.advanceTimersByTime(seconds * 1000); });
+    const results = await exportNewImagesLikeOfficial(page, {
+      messageIds: MESSAGE_IDS, expectedCount: 3, outputDir: makeOutputDir(),
+    });
+    expect(results[0]).toMatchObject({ downloaded: false, error: 'image-viewer-close-failed' });
+    expect(page.waitForDownload).not.toHaveBeenCalled();
+    expect(page.actions.filter((action) => action.type === 'click' && action.selector.includes('Close viewer'))).toHaveLength(2);
+  });
+
+  it('fails closed on duplicate logical image targets', async () => {
+    const duplicate = { ...threeRailTargets[0] };
+    const page = makePage({ targets: [threeRailTargets[0], duplicate] });
+    const results = await exportNewImagesLikeOfficial(page, {
+      messageIds: MESSAGE_IDS, expectedCount: 2, outputDir: makeOutputDir(),
+    });
+    expect(results[0]).toMatchObject({ downloaded: false, error: 'ambiguous-image-targets' });
+    expect(page.waitForDownload).not.toHaveBeenCalled();
+    expect(page.actions.filter((action) => action.type === 'click' && action.selector.includes('generated-image-preview'))).toHaveLength(0);
+  });
+
+  it('activates a source-less rail target but never downloads without its proven source', async () => {
+    vi.useFakeTimers();
+    const page = makePage({ targets: [{ ...threeRailTargets[0], sourceUrl: '' }] });
+    page.sleep.mockImplementation(async (seconds) => { vi.advanceTimersByTime(seconds * 1000); });
+    const results = await exportNewImagesLikeOfficial(page, {
+      messageIds: MESSAGE_IDS, expectedCount: 1, outputDir: makeOutputDir(), timeoutMs: 1_000,
+    });
+    expect(results[0]).toMatchObject({ downloaded: false, error: 'image-source-unavailable' });
+    expect(page.actions.filter((action) => action.type === 'click' && action.selector.includes('Show generated image'))).toHaveLength(1);
+    expect(page.waitForDownload).not.toHaveBeenCalled();
+  });
+
   it('fails closed without current-turn message IDs', async () => {
     const page = makePage({ targets: threeRailTargets });
     const results = await exportNewImagesLikeOfficial(page, {
@@ -214,7 +249,7 @@ describe('native Chrome generated-image export', () => {
     expect(armIndices.every((arm, i) => arm < clickIndices[i])).toBe(true);
     expect(actions.filter((action) => action.type === 'click' && action.selector.includes('data-image-thumbnail')).map((a) => a.selector))
       .toEqual(viewerSelectors);
-    expect(actions.filter((action) => action.type === 'click' && action.selector.includes('generated-image-preview'))).toHaveLength(1);
+    expect(actions.filter((action) => action.type === 'click' && action.selector.includes('generated-image-preview'))).toHaveLength(3);
     expect(actions.filter((action) => action.type === 'click' && action.selector.includes('menuitem')).map((a) => a.options.nth))
       .toEqual([1, 1, 1]);
     expect(results.map((item) => item.sha256)).toHaveLength(3);
@@ -444,9 +479,7 @@ describe('native Chrome generated-image export', () => {
     const page = makePage({
       targets: { runs: [
         ...Array.from({ length: 61 }, () => [threeRailTargets[0]]),
-        threeRailTargets.slice(0, 2),
-        threeRailTargets.slice(0, 2),
-        threeRailTargets.slice(0, 2),
+        ...Array.from({ length: 8 }, () => threeRailTargets.slice(0, 2)),
       ] },
       receipts: [receipt(firstFile, 1), receipt(secondFile, 2)],
     });

@@ -337,16 +337,32 @@ function isImageBuffer(bytes) {
 }
 
 async function refreshScopedTarget(page, target, messageIds, remainingMs, canContinue) {
+  const deadline = Date.now() + Math.min(30_000, remainingMs());
+  let activated = false;
   let sawKeyWithoutSource = false;
-  for (let attempt = 0; attempt < 4 && isAllowed(canContinue) && remainingMs() > 0; attempt += 1) {
+  let missingAttempts = 0;
+  while (isAllowed(canContinue) && remainingMs() > 0 && Date.now() < deadline) {
     const discovery = await evaluate(page, imageTargetsScript(messageIds));
     const matches = (discovery?.targets || []).filter((item) => item.key === target.key);
     if (matches.length > 1) return { error: 'ambiguous-image-targets' };
     if (matches.length === 1 && matches[0].sourceUrl) return { target: matches[0] };
-    if (matches.length === 1) sawKeyWithoutSource = true;
-    if (attempt < 3 && remainingMs() > 0) {
-      await page.sleep(Math.min(0.2, remainingMs() / 1000));
+    if (matches.length === 1) {
+      sawKeyWithoutSource = true;
+      target = matches[0];
+      if (target.kind === 'rail' && !activated) {
+        activated = true;
+        let result;
+        try { result = await page.click(target.selector); } catch { result = null; }
+        if (!(result?.matches_n === 1)) return { error: 'image-rail-activation-failed' };
+      }
+    } else {
+      // A vanished scoped identity is never replaced with an index neighbor.
+      // Before it has appeared, preserve the existing bounded remount recovery.
+      if (sawKeyWithoutSource) return { error: 'image-preview-target-unavailable' };
+      missingAttempts += 1;
+      if (missingAttempts >= 4) return { error: 'image-preview-target-unavailable' };
     }
+    if (remainingMs() > 0) await page.sleep(Math.max(0, Math.min(0.2, remainingMs() / 1000, (deadline - Date.now()) / 1000)));
   }
   return { error: sawKeyWithoutSource ? 'image-source-unavailable' : 'image-preview-target-unavailable' };
 }
@@ -543,6 +559,12 @@ export async function exportNewImagesLikeOfficial(page, opts = {}) {
       if (successful.has(key)) {
         successful.get(key).index = index;
         continue;
+      }
+      if (index > 0 && !await closeImageViewer(page, remainingMs)) {
+        for (let failedIndex = index; failedIndex < expectedCount; failedIndex += 1) {
+          results.push({ kind: 'image-export', method: 'chrome-download', index: failedIndex, downloaded: false, error: 'image-viewer-close-failed' });
+        }
+        break;
       }
       if (!isAllowed(continuePredicate) || remainingMs() <= 0) {
         results.push({ kind: 'image-export', method: 'chrome-download', index, downloaded: false, error: 'image-download-time-budget-exhausted' });
