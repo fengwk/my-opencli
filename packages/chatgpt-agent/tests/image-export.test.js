@@ -25,23 +25,44 @@ function pngAt(filePath) {
   return filePath;
 }
 
-function makePage({ targets, receipts, clickFailure = null, waiterFailure = null, previewNoOps = 0 } = {}) {
+function makePage({ targets, receipts, clickFailure = null, waiterFailure = null, previewNoOps = 0,
+  direct = false, menuDelay = 0, menuItemDelay = 0, menuItems = null } = {}) {
   let menuOpen = false;
+  let menuCountdown = 0;
+  let menuItemCountdown = 0;
+  let pendingReceipt;
   let viewerOpen = false;
   let selectedViewer = 0;
   let targetRun = 0;
   const page = {
     actions: [],
+    menuEmptyStates: 0,
     waitForDownload: vi.fn((_pattern, timeoutMs) => {
       page.actions.push({ type: 'wait', timeoutMs });
       const receipt = receipts?.shift();
-      return waiterFailure ? Promise.reject(new Error(waiterFailure))
-        : Promise.resolve(receipt);
+      if (waiterFailure) return new Promise((_, reject) => {
+        setTimeout(() => reject(new Error(waiterFailure)), 15);
+      });
+      return new Promise((resolve) => { pendingReceipt = () => resolve(receipt); });
     }),
     click: vi.fn(async (selector, options) => {
       page.actions.push({ type: 'click', selector, options });
-      if (clickFailure && selector.includes('menuitem')) throw new Error(clickFailure);
-      if (selector.includes('menuitem')) menuOpen = false;
+      if (clickFailure && selector.includes('menuitem')) {
+        pendingReceipt?.();
+        throw new Error(clickFailure);
+      }
+      if (selector.includes('menuitem')) {
+        menuOpen = false;
+        pendingReceipt?.();
+      }
+      if (selector.includes('aria-label=') && selector.includes('Download')) {
+        if (direct) pendingReceipt?.();
+        else {
+          menuOpen = true;
+          menuCountdown = menuDelay;
+          menuItemCountdown = menuItemDelay;
+        }
+      }
       if (selector.includes('generated-image-preview')) {
         if (previewNoOps > 0) previewNoOps -= 1;
         else viewerOpen = true;
@@ -57,11 +78,8 @@ function makePage({ targets, receipts, clickFailure = null, waiterFailure = null
       page.actions.push({ type: 'focus', selector, options });
       return { focused: true };
     }),
-    pressKey: vi.fn(async (key) => {
-      page.actions.push({ type: 'key', key });
-      menuOpen = true;
-    }),
-    sleep: vi.fn(async () => {}),
+    pressKey: vi.fn(async (key) => { page.actions.push({ type: 'key', key }); }),
+    sleep: vi.fn(async () => new Promise((resolve) => setTimeout(resolve, 0))),
     evaluate: vi.fn(async (script) => {
       if (script.includes("const ids = new Set(") && script.includes("const galleries =")) {
         const current = targets?.runs ? targets.runs[targetRun] || [] : targets || [];
@@ -77,13 +95,20 @@ function makePage({ targets, receipts, clickFailure = null, waiterFailure = null
         };
       }
       if (script.includes('triggerSelector:')) {
+        if (menuCountdown > 0) menuCountdown -= 1;
+        const showMenu = menuOpen && menuCountdown === 0;
+        if (showMenu && menuItemCountdown > 0) {
+          menuItemCountdown -= 1;
+          page.menuEmptyStates += 1;
+        }
+        const showItems = showMenu && menuItemCountdown === 0;
         return {
           dialog: viewerOpen,
           triggerSelector: viewerOpen ? '[role="dialog"] [aria-label="Download"]' : '',
-          menu: menuOpen,
+          menu: showMenu,
           menuSelector: '[role="menu"] [role="menuitem"]',
-          items: menuOpen
-            ? [
+          items: showItems
+            ? menuItems || [
               { index: 0, text: 'Download 3 images in this series', visible: true },
               { index: 1, text: 'Download image', visible: true },
             ]
@@ -109,9 +134,9 @@ function receipt(filename, id = 1001) {
 }
 
 const threeRailTargets = [
-  { key: 'message-current:1', kind: 'rail', selector: 'button[aria-label="Show generated image 1"]', previewSelector: 'button[data-testid="generated-image-preview"]', order: 1 },
-  { key: 'message-current:2', kind: 'rail', selector: 'button[aria-label="Show generated image 2"]', previewSelector: 'button[data-testid="generated-image-preview"]', order: 2 },
-  { key: 'message-current:3', kind: 'rail', selector: 'button[aria-label="Show generated image 3"]', previewSelector: 'button[data-testid="generated-image-preview"]', order: 3 },
+  { key: 'message-current:1', kind: 'rail', selector: 'button[aria-label="Show generated image 1"]', previewSelector: 'button[data-testid="generated-image-preview"]', order: 1, sourceUrl: 'blob:current-1' },
+  { key: 'message-current:2', kind: 'rail', selector: 'button[aria-label="Show generated image 2"]', previewSelector: 'button[data-testid="generated-image-preview"]', order: 2, sourceUrl: 'blob:current-2' },
+  { key: 'message-current:3', kind: 'rail', selector: 'button[aria-label="Show generated image 3"]', previewSelector: 'button[data-testid="generated-image-preview"]', order: 3, sourceUrl: 'blob:current-3' },
 ];
 const viewerSelectors = [13, 14, 15].map((n) =>
   `[role="dialog"] button[data-image-thumbnail][aria-label="Generated image ${n}"]`);
@@ -172,6 +197,133 @@ describe('native Chrome generated-image export', () => {
     expect(results.map((item) => item.sha256)).toHaveLength(3);
   });
 
+  // Some viewers download directly from the trigger. The waiter must already
+  // be armed, and the trigger must never be clicked again to hunt for a menu.
+  it('accepts a direct trigger receipt without requiring a menu', async () => {
+    const dir = makeOutputDir();
+    const page = makePage({
+      targets: [threeRailTargets[0]], direct: true,
+      receipts: [receipt(pngAt(path.join(dir, 'direct.png')))],
+    });
+    const result = await exportNewImagesLikeOfficial(page, {
+      messageIds: MESSAGE_IDS, expectedCount: 1, outputDir: makeOutputDir(),
+    });
+    expect(result[0].downloaded).toBe(true);
+    const waitIndex = page.actions.findIndex((action) => action.type === 'wait');
+    const triggerIndices = page.actions.map((action, i) => action.type === 'click'
+      && action.selector.includes('aria-label') && action.selector.includes('Download') ? i : -1).filter((i) => i >= 0);
+    expect(waitIndex).toBeGreaterThan(-1);
+    expect(triggerIndices).toHaveLength(1);
+    expect(waitIndex).toBeLessThan(triggerIndices[0]);
+    expect(page.actions.some((action) => action.type === 'click' && action.selector.includes('menuitem'))).toBe(false);
+  });
+
+  // A delayed menu is observed after one trigger activation, while the original
+  // waiter remains armed for the eventual exact image item.
+  it('waits for a delayed menu and clicks only its exact image item', async () => {
+    const dir = makeOutputDir();
+    const page = makePage({
+      targets: [threeRailTargets[0]], menuDelay: 3,
+      receipts: [receipt(pngAt(path.join(dir, 'delayed.png')))],
+    });
+    const result = await exportNewImagesLikeOfficial(page, {
+      messageIds: MESSAGE_IDS, expectedCount: 1, outputDir: makeOutputDir(),
+    });
+    expect(result[0].downloaded).toBe(true);
+    expect(page.actions.filter((action) => action.type === 'click'
+      && action.selector.includes('aria-label') && action.selector.includes('Download'))).toHaveLength(1);
+    expect(page.actions.filter((action) => action.type === 'click' && action.selector.includes('menuitem'))).toHaveLength(1);
+  });
+
+  // React can mount the menu before populating its items. Keep polling under the
+  // original bounded waiter instead of treating an empty intermediate state as final.
+  it('waits for exact menu items to populate after the menu itself mounts', async () => {
+    const dir = makeOutputDir();
+    const page = makePage({
+      targets: [threeRailTargets[0]], menuItemDelay: 3,
+      receipts: [receipt(pngAt(path.join(dir, 'populated.png')))],
+    });
+    const result = await exportNewImagesLikeOfficial(page, {
+      messageIds: MESSAGE_IDS, expectedCount: 1, outputDir: makeOutputDir(),
+    });
+    expect(result[0].downloaded).toBe(true);
+    expect(page.menuEmptyStates).toBeGreaterThan(0);
+    expect(page.actions.filter((action) => action.type === 'click' && action.selector.includes('menuitem'))).toHaveLength(1);
+  });
+
+  // A virtualized rerender can replace the preview selector and blob URL while
+  // retaining logical scope/order; refresh must replace the stale selector.
+  it('refreshes a same-identity target before activating its preview', async () => {
+    const dir = makeOutputDir();
+    const oldTarget = { ...threeRailTargets[0], selector: 'stale-rail', previewSelector: 'button[data-testid="generated-image-preview"].stale' };
+    const freshTarget = { ...threeRailTargets[0], selector: 'fresh-rail', previewSelector: 'button[data-testid="generated-image-preview"].fresh', sourceUrl: 'blob:refreshed' };
+    const page = makePage({
+      targets: { runs: [[oldTarget], [freshTarget], [freshTarget]] },
+      receipts: [receipt(pngAt(path.join(dir, 'fresh.png')))],
+    });
+    const result = await exportNewImagesLikeOfficial(page, {
+      messageIds: MESSAGE_IDS, expectedCount: 1, outputDir: makeOutputDir(),
+    });
+    expect(result[0].downloaded).toBe(true);
+    expect(page.actions.some((action) => action.type === 'click' && action.selector === freshTarget.previewSelector)).toBe(true);
+    expect(page.actions.some((action) => action.type === 'click' && action.selector === oldTarget.previewSelector)).toBe(false);
+  });
+
+  // A preview can disappear between initial discovery and the click. Poll for
+  // the same logical key and retry with the returned live selector, never stale.
+  it('rediscoveries a missing preview before activating the reappeared same-key target', async () => {
+    const dir = makeOutputDir();
+    const stale = { ...threeRailTargets[0], previewSelector: 'button[data-testid="generated-image-preview"].stale' };
+    const fresh = { ...threeRailTargets[0], previewSelector: 'button[data-testid="generated-image-preview"].fresh', sourceUrl: 'blob:reappeared' };
+    const page = makePage({
+      targets: { runs: [[stale], [stale], [], [fresh]] },
+      receipts: [receipt(pngAt(path.join(dir, 'reappeared.png')))],
+    });
+    const results = await exportNewImagesLikeOfficial(page, {
+      messageIds: MESSAGE_IDS, expectedCount: 1, outputDir: makeOutputDir(),
+    });
+    expect(results[0].downloaded).toBe(true);
+    expect(page.actions.some((action) => action.type === 'click' && action.selector === fresh.previewSelector)).toBe(true);
+    expect(page.actions.some((action) => action.type === 'click' && action.selector === stale.previewSelector)).toBe(false);
+  });
+
+  // If the preview never reappears in the current mount, fail without a stale
+  // click and let the existing single conversation remount retry it once.
+  it('leaves a missing preview to the single remount retry without stale activation', async () => {
+    const dir = makeOutputDir();
+    const stale = { ...threeRailTargets[0], previewSelector: 'button[data-testid="generated-image-preview"].stale' };
+    const fresh = { ...threeRailTargets[0], previewSelector: 'button[data-testid="generated-image-preview"].fresh', sourceUrl: 'blob:after-remount' };
+    const reloadConversation = vi.fn(async () => {});
+    const page = makePage({
+      targets: { runs: [[stale], [stale], [], [], [], [], [fresh], [fresh], [fresh]] },
+      receipts: [receipt(pngAt(path.join(dir, 'after-remount.png')))],
+    });
+    const results = await exportNewImagesLikeOfficial(page, {
+      messageIds: MESSAGE_IDS, expectedCount: 1, outputDir: makeOutputDir(),
+      reloadConversation, canRetry: () => true,
+    });
+    expect(reloadConversation).toHaveBeenCalledTimes(1);
+    expect(results[0].downloaded).toBe(true);
+    expect(page.actions.some((action) => action.type === 'click' && action.selector === stale.previewSelector)).toBe(false);
+    expect(page.actions.some((action) => action.type === 'click' && action.selector === fresh.previewSelector)).toBe(true);
+  });
+
+  // A bulk/series label is not an image receipt action. Its unconfirmed waiter
+  // marks the sequence uncertain and prevents any next image attribution.
+  it('rejects series-only menu labels and stops after the one uncertain trigger', async () => {
+    const page = makePage({
+      targets: threeRailTargets,
+      waiterFailure: 'download timed out',
+      menuItems: [{ index: 0, text: 'Download 3 images in this series', visible: true }],
+    });
+    const results = await exportNewImagesLikeOfficial(page, {
+      messageIds: MESSAGE_IDS, expectedCount: 3, outputDir: makeOutputDir(),
+    });
+    expect(results[0]).toMatchObject({ downloaded: false, uncertain: true });
+    expect(page.waitForDownload).toHaveBeenCalledTimes(1);
+    expect(page.actions.filter((action) => action.type === 'click' && action.selector.includes('menuitem'))).toHaveLength(0);
+  });
+
   it('does not return success after a final menu click failure or waiter rejection', async () => {
     const outputDir = makeOutputDir();
     const file = pngAt(path.join(outputDir, 'download.png'));
@@ -183,7 +335,7 @@ describe('native Chrome generated-image export', () => {
     const clickResult = await exportNewImagesLikeOfficial(failedClick, {
       messageIds: MESSAGE_IDS, expectedCount: 1, outputDir, remainingMs: () => 1000,
     });
-    expect(clickResult[0]).toMatchObject({ downloaded: false, error: expect.stringContaining('image-download-click-failed') });
+    expect(clickResult[0]).toMatchObject({ downloaded: false, error: expect.stringContaining('image-download-menuitem-click-failed') });
     expect(failedClick.waitForDownload).toHaveBeenCalledTimes(1);
 
     const rejectedWaiter = makePage({
@@ -246,7 +398,9 @@ describe('native Chrome generated-image export', () => {
     const reloadConversation = vi.fn(async () => {});
     const page = makePage({
       targets: { runs: [
-        ...Array.from({ length: 12 }, () => [threeRailTargets[0]]),
+        ...Array.from({ length: 13 }, () => [threeRailTargets[0]]),
+        threeRailTargets.slice(0, 2),
+        threeRailTargets.slice(0, 2),
         threeRailTargets.slice(0, 2),
       ] },
       receipts: [receipt(firstFile, 1), receipt(secondFile, 2)],
@@ -289,8 +443,10 @@ describe('native Chrome generated-image export', () => {
   it('retries one ignored preview activation before arming a single download', async () => {
     vi.useFakeTimers();
     const dir = makeOutputDir();
+    const stale = { ...threeRailTargets[0], previewSelector: 'button[data-testid="generated-image-preview"].stale' };
+    const fresh = { ...threeRailTargets[0], previewSelector: 'button[data-testid="generated-image-preview"].fresh', sourceUrl: 'blob:retry-fresh' };
     const page = makePage({
-      targets: [threeRailTargets[0]],
+      targets: { runs: [[stale], [stale], [stale], [fresh]] },
       receipts: [receipt(pngAt(path.join(dir, 'image.png')))],
       previewNoOps: 1,
     });
@@ -300,6 +456,8 @@ describe('native Chrome generated-image export', () => {
     });
     expect(results[0].downloaded).toBe(true);
     expect(page.actions.filter((a) => a.type === 'click' && a.selector.includes('generated-image-preview'))).toHaveLength(2);
+    expect(page.actions.filter((a) => a.type === 'click' && a.selector.includes('generated-image-preview'))
+      .map(({ selector }) => selector)).toEqual([stale.previewSelector, fresh.previewSelector]);
     expect(page.waitForDownload).toHaveBeenCalledTimes(1);
   });
 
@@ -310,7 +468,7 @@ describe('native Chrome generated-image export', () => {
     const file = pngAt(path.join(dir, 'original.png'));
     const page = makePage({
       targets: { runs: [
-        ...Array.from({ length: 12 }, () => [threeRailTargets[0]]),
+        ...Array.from({ length: 14 }, () => [threeRailTargets[0]]),
         [{ ...threeRailTargets[0], key: 'different:1' }, threeRailTargets[1]],
       ] },
       receipts: [receipt(file)],

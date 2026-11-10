@@ -102,8 +102,9 @@ export function imageTargetsScript(messageIds) {
       // scrolling/activation; layout size alone must not discard the target.
       return true;
     };
-    const tokenMatch = (scope) => (scope.getAttribute('data-chatgpt-search-message-ids') || '')
-      .trim().split(/[\\s,]+/).some((token) => ids.has(token));
+    const scopeTokens = (scope) => [...new Set((scope.getAttribute('data-chatgpt-search-message-ids') || '')
+      .trim().split(/[\\s,]+/).filter((token) => ids.has(token)))].sort();
+    const tokenMatch = (scope) => scopeTokens(scope).length > 0;
     const mainSelector = document.querySelector('main') ? 'main' : '[role="main"]';
     const main = document.querySelector(mainSelector);
     if (!main) return { targets: [], reason: 'main-not-found' };
@@ -117,10 +118,15 @@ export function imageTargetsScript(messageIds) {
       ) || !visible(gallery)) continue;
       if (seenScopes.has(scope)) continue;
       seenScopes.add(scope);
-      const scopeKey = [...new Set((scope.getAttribute('data-chatgpt-search-message-ids') || '')
-        .trim().split(/[\\s,]+/).filter((token) => ids.has(token)))].sort().join(',');
-      const scopeSelector = mainSelector + ' [data-chatgpt-search-message-ids='
-        + JSON.stringify(scope.getAttribute('data-chatgpt-search-message-ids')) + ']';
+      const matchedTokens = scopeTokens(scope);
+      const scopeKey = matchedTokens.join(',');
+      const rawScope = scope.getAttribute('data-chatgpt-search-message-ids') || '';
+      // Use token conjunctions for whitespace scopes; comma legacy scopes are
+      // resolved by exact value, never by a broad substring selector.
+      const scopeSelector = mainSelector + ' ' + (rawScope.includes(',')
+        ? '[data-chatgpt-search-message-ids=' + JSON.stringify(rawScope) + ']'
+        : matchedTokens.map((token) =>
+          '[data-chatgpt-search-message-ids~=' + JSON.stringify(token) + ']').join(''));
       if (document.querySelectorAll(scopeSelector).length !== 1
           || [...scope.querySelectorAll('[data-testid="generated-image-gallery"]')]
             .filter((other) => other.closest('[data-chatgpt-search-message-ids]') === scope).length !== 1) {
@@ -140,6 +146,7 @@ export function imageTargetsScript(messageIds) {
               + JSON.stringify(rail.button.getAttribute('aria-label')) + ']',
             previewSelector,
             order: rail.order,
+            sourceUrl: rail.button.querySelector('img')?.currentSrc || rail.button.querySelector('img')?.src || '',
           });
         }
         continue;
@@ -147,7 +154,11 @@ export function imageTargetsScript(messageIds) {
       const previews = [...gallery.querySelectorAll('button[data-testid="generated-image-preview"]')]
         .filter((button) => visible(button));
       if (previews.length === 1 && galleries.filter((other) => other.closest('[data-chatgpt-search-message-ids]') === scope).length === 1) {
-        targets.push({ key: scopeKey + ':1', kind: 'preview', previewSelector, order: 1 });
+        const img = previews[0].querySelector('img');
+        targets.push({
+          key: scopeKey + ':1', kind: 'preview', previewSelector, order: 1,
+          sourceUrl: img?.currentSrc || img?.src || '',
+        });
       } else {
         return { targets: [], reason: 'ambiguous-gallery-without-rail' };
       }
@@ -163,10 +174,14 @@ export function viewerImageStateScript(messageIds, target) {
     const control = document.querySelector(target.kind === 'rail' ? target.selector : target.previewSelector);
     const scope = control?.closest('[data-chatgpt-search-message-ids]');
     const tokens = (scope?.getAttribute('data-chatgpt-search-message-ids') || '').trim().split(/[\\s,]+/);
-    if (!tokens.some((token) => ids.has(token))) return { ready: false, reason: 'source-scope-missing' };
-    const scopeKey = [...new Set(tokens.filter((token) => ids.has(token)))].sort().join(',');
-    if (target.key !== scopeKey + ':' + target.order) return { ready: false, reason: 'source-identity-changed' };
-    const source = control?.querySelector('img')?.currentSrc || control?.querySelector('img')?.src || '';
+    if (scope && !tokens.some((token) => ids.has(token))) return { ready: false, reason: 'source-scope-missing' };
+    if (scope) {
+      const scopeKey = [...new Set(tokens.filter((token) => ids.has(token)))].sort().join(',');
+      if (target.key !== scopeKey + ':' + target.order) return { ready: false, reason: 'source-identity-changed' };
+    } else if (!target.sourceUrl) return { ready: false, reason: 'source-scope-missing' };
+    // Gallery DOM can be unmounted after the viewer opens. Trust only the URL
+    // captured while the exact current-turn target was still scoped.
+    const source = target.sourceUrl || control?.querySelector('img')?.currentSrc || control?.querySelector('img')?.src || '';
     if (!source) return { ready: false, reason: 'source-unavailable' };
     const visible = (el) => {
       if (!el || el.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
@@ -174,7 +189,8 @@ export function viewerImageStateScript(messageIds, target) {
       return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
     };
     const dialog = [...document.querySelectorAll('[role="dialog"]')]
-      .find((el) => visible(el) && el.querySelector('button[aria-label="Download"]'));
+      .find((el) => visible(el) && [...el.querySelectorAll('button,[role="button"]')]
+        .some((button) => ['Download', '下载'].includes((button.getAttribute('aria-label') || '').trim())));
     if (!dialog) return { ready: false, reason: 'viewer-missing' };
     // The viewer rail spans history. It is NOT an output source: select only
     // the exact page-owned source proved by this turn's scoped gallery above.
@@ -198,7 +214,7 @@ export function viewerImageStateScript(messageIds, target) {
   })()`;
 }
 
-function dialogStateScript() {
+export function imageDialogStateScript() {
   return `(() => {
     const visible = (el) => {
       if (!el || el.hidden || el.closest('[inert], [aria-hidden="true"]')) return false;
@@ -206,12 +222,20 @@ function dialogStateScript() {
       const s = getComputedStyle(el);
       return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
     };
-    const dialog = [...document.querySelectorAll('[role="dialog"]')]
-      .find((el) => visible(el) && el.querySelector('[aria-label="Download"]'));
-    const trigger = dialog?.querySelector('[aria-label="Download"]');
-    const menuId = trigger?.getAttribute('aria-controls');
-    const menu = trigger?.getAttribute('aria-expanded') === 'true' && menuId
-      ? document.getElementById(menuId) : null;
+    const dialogs = [...document.querySelectorAll('[role="dialog"]')]
+      .filter((el) => visible(el) && [...el.querySelectorAll('button,[role="button"]')]
+        .some((button) => ['Download', '下载'].includes((button.getAttribute('aria-label') || '').trim())));
+    const dialog = dialogs.length === 1 ? dialogs[0] : null;
+    const trigger = dialog && [...dialog.querySelectorAll('button,[role="button"]')]
+      .find((button) => ['Download', '下载'].includes((button.getAttribute('aria-label') || '').trim()));
+    const rawMenuId = (trigger?.getAttribute('aria-controls') || '').trim();
+    const menuId = rawMenuId.toLowerCase() === 'null' ? '' : rawMenuId;
+    const popup = trigger?.getAttribute('aria-haspopup');
+    const expanded = trigger?.getAttribute('aria-expanded') === 'true';
+    const controlled = expanded && menuId ? document.getElementById(menuId) : null;
+    const visibleMenus = [...document.querySelectorAll('[role="menu"]')].filter(visible);
+    const menu = controlled && visible(controlled) ? controlled
+      : (!menuId && expanded && popup === 'menu' && visibleMenus.length === 1 ? visibleMenus[0] : null);
     const items = menu ? [...menu.querySelectorAll('[role="menuitem"]')].map((el) => ({
       index: [...menu.querySelectorAll('[role="menuitem"]')].indexOf(el),
       text: (el.innerText || el.textContent || '').trim(),
@@ -226,7 +250,10 @@ function dialogStateScript() {
     return {
       dialog: !!dialog,
       blocked: !dialog && [...document.querySelectorAll('[role="dialog"][aria-modal="true"]')].some(visible),
-      triggerSelector: trigger ? dialogSelector + ' [aria-label="Download"]' : '',
+      triggerSelector: trigger ? dialogSelector + ' [aria-label='
+        + JSON.stringify(trigger.getAttribute('aria-label')) + ']' : '',
+      triggerPopup: popup || '',
+      triggerExpanded: expanded,
       menu: !!menu,
       menuSelector: menu?.id ? '[role="menu"][id=' + JSON.stringify(menu.id) + '] [role="menuitem"]' : '[role="menu"] [role="menuitem"]',
       items,
@@ -304,6 +331,21 @@ function isImageBuffer(bytes) {
   return isPng || isJpeg || isGif || isWebp;
 }
 
+async function refreshScopedTarget(page, target, messageIds, remainingMs, canContinue) {
+  let sawKeyWithoutSource = false;
+  for (let attempt = 0; attempt < 4 && isAllowed(canContinue) && remainingMs() > 0; attempt += 1) {
+    const discovery = await evaluate(page, imageTargetsScript(messageIds));
+    const matches = (discovery?.targets || []).filter((item) => item.key === target.key);
+    if (matches.length > 1) return { error: 'ambiguous-image-targets' };
+    if (matches.length === 1 && matches[0].sourceUrl) return { target: matches[0] };
+    if (matches.length === 1) sawKeyWithoutSource = true;
+    if (attempt < 3 && remainingMs() > 0) {
+      await page.sleep(Math.min(0.2, remainingMs() / 1000));
+    }
+  }
+  return { error: sawKeyWithoutSource ? 'image-source-unavailable' : 'image-preview-target-unavailable' };
+}
+
 async function downloadOne(page, target, messageIds, index, outputDir, remainingMs, canContinue) {
   const failed = (error, uncertain = false) => ({
     kind: 'image-export', method: 'chrome-download', index, downloaded: false, error, ...(uncertain ? { uncertain: true } : {}),
@@ -313,18 +355,24 @@ async function downloadOne(page, target, messageIds, index, outputDir, remaining
   let waiter = null;
   try {
     if (!actionAllowed()) return failed('image-download-time-budget-exhausted');
-    let state = await evaluate(page, dialogStateScript());
+    let state = await evaluate(page, imageDialogStateScript());
     for (let openAttempt = 0; openAttempt < 2 && !state?.dialog && actionAllowed(); openAttempt += 1) {
       if (state?.blocked) return failed('image-viewer-blocked-by-dialog');
-      // Open once; subsequent images are selected inside this same viewer.
-      // A virtualized preview can ignore the first activation during mount.
-      // Retry only this UI activation after confirming no viewer has opened;
-      // no generation or download action has been submitted at this point.
-      const preview = await page.click(target.previewSelector);
-      if (!(preview?.matches_n > 0)) return failed('image-preview-click-failed');
+      // Resolve a fresh same-key preview immediately before each activation.
+      // A missing virtualized node is rediscovered, never clicked stale.
+      const refreshed = await refreshScopedTarget(page, target, messageIds, remainingMs, canContinue);
+      if (!refreshed.target) return failed(refreshed.error || 'image-preview-target-unavailable');
+      target = refreshed.target;
+      let preview;
+      try {
+        preview = await page.click(target.previewSelector);
+      } catch {
+        preview = null;
+      }
+      if (!(preview?.matches_n > 0)) continue;
       const openDeadline = Date.now() + Math.min(10_000, remainingMs());
       while (actionAllowed() && Date.now() < openDeadline) {
-        state = await evaluate(page, dialogStateScript());
+        state = await evaluate(page, imageDialogStateScript());
         if (state?.dialog && state.triggerSelector) break;
         await page.sleep(Math.min(0.2, remainingMs() / 1000));
       }
@@ -341,38 +389,65 @@ async function downloadOne(page, target, messageIds, index, outputDir, remaining
       image = await evaluate(page, viewerImageStateScript(messageIds, target));
     }
     if (!image?.ready) return failed(image?.reason || 'viewer-image-not-matched');
-    state = await evaluate(page, dialogStateScript());
-    if (!state.menu) {
-      if (!actionAllowed()) return failed('image-download-time-budget-exhausted');
-      await page.focus(state.triggerSelector);
-      await page.pressKey('Enter');
-      state = await evaluate(page, dialogStateScript());
+    state = await evaluate(page, imageDialogStateScript());
+    if (!state?.dialog || !state.triggerSelector || !actionAllowed()) {
+      return failed('image-download-trigger-unavailable');
     }
-    const matches = (state?.items || []).filter((item) => item.visible && item.text === 'Download image');
-    if (!state?.menu || matches.length !== 1) return failed('exact-download-image-menuitem-not-found');
-    if (!actionAllowed()) return failed('image-download-time-budget-exhausted');
-
-    const timeoutMs = Math.max(1, Math.floor(remainingMs()));
-    // The waiter is armed synchronously, before the real Chrome/CDP click.
-    waiter = page.waitForDownload('', timeoutMs);
-    waiter = Promise.resolve(waiter).then((receipt) => ({ receipt }), (error) => ({ error }));
-    let clickResult;
+    // Arm once before the trigger: it may itself start a native download, or
+    // reveal a menu whose exact image item starts it.
+    const timeoutMs = Math.max(1, Math.floor(Math.min(60_000, remainingMs())));
+    let settled = false;
+    waiter = Promise.resolve(page.waitForDownload('', timeoutMs)).then(
+      (receipt) => { settled = true; return { receipt }; },
+      (error) => { settled = true; return { error }; },
+    );
     try {
       downloadSubmitted = true;
-      clickResult = await page.click(state.menuSelector, { nth: matches[0].index });
+      const triggerResult = await page.click(state.triggerSelector);
+      if (!(triggerResult?.matches_n > 0)) {
+        const drained = await waiter;
+        waiter = null;
+        return failed(`image-download-trigger-click-failed${drained.error ? `: ${drained.error?.message || drained.error}` : ''}`, true);
+      }
     } catch (error) {
       await waiter;
       waiter = null;
-      return failed(`image-download-click-failed: ${error?.message || error}`, true);
+      return failed(`image-download-trigger-click-failed: ${error?.message || error}`, true);
     }
-    if (!(clickResult?.matches_n > 0)) {
-      await waiter;
-      waiter = null;
-      return failed('image-download-click-failed', true);
+    let waited;
+    let menuSeenWithoutExactItem = false;
+    const menuDeadline = Date.now() + Math.min(10_000, remainingMs());
+    while (!settled && actionAllowed() && Date.now() < menuDeadline) {
+      state = await evaluate(page, imageDialogStateScript());
+      const matches = (state?.items || []).filter((item) => item.visible
+        && ['Download image', '下载图片', '下载图像'].includes(item.text));
+      if (state?.menu && matches.length === 1) {
+        try {
+          const clickResult = await page.click(state.menuSelector, { nth: matches[0].index });
+          if (!(clickResult?.matches_n > 0)) {
+            waited = await waiter;
+            waiter = null;
+            return failed('image-download-menuitem-click-failed', true);
+          }
+        } catch (error) {
+          await waiter;
+          waiter = null;
+          return failed(`image-download-menuitem-click-failed: ${error?.message || error}`, true);
+        }
+        break;
+      }
+      if (state?.menu && matches.length !== 1) menuSeenWithoutExactItem = true;
+      await page.sleep(Math.min(0.2, remainingMs() / 1000));
     }
-    const waited = await waiter;
+    waited = waited || await waiter;
     waiter = null;
     if (waited.error) return failed(`image-download-wait-failed: ${waited.error?.message || waited.error}`, true);
+    // A complete direct-trigger receipt remains valid even if the menu never
+    // finished populating. Otherwise do not fail an intermediate empty menu.
+    if (menuSeenWithoutExactItem
+        && (!waited.receipt || waited.receipt.downloaded !== true || waited.receipt.state !== 'complete')) {
+      return failed('exact-download-image-menuitem-not-found', true);
+    }
     if (!waited.receipt || waited.receipt.downloaded !== true || waited.receipt.state !== 'complete') {
       return failed('download-receipt-incomplete', true);
     }
@@ -385,12 +460,12 @@ async function downloadOne(page, target, messageIds, index, outputDir, remaining
 
 async function closeImageViewer(page, remainingMs) {
   try {
-    const state = await evaluate(page, dialogStateScript());
+    const state = await evaluate(page, imageDialogStateScript());
     if (!state?.closeSelector || remainingMs() <= 0) return;
     await page.click(state.closeSelector);
     const deadline = Date.now() + Math.min(5_000, remainingMs());
     while (Date.now() < deadline && remainingMs() > 0) {
-      if ((await evaluate(page, dialogStateScript()))?.dialog !== true) break;
+      if ((await evaluate(page, imageDialogStateScript()))?.dialog !== true) break;
       await page.sleep(Math.min(0.2, remainingMs() / 1000));
     }
   } catch { /* keep completed files even if the page cannot clean up */ }
@@ -454,7 +529,27 @@ export async function exportNewImagesLikeOfficial(page, opts = {}) {
         results.push({ kind: 'image-export', method: 'chrome-download', index, downloaded: false, error: 'image-download-time-budget-exhausted' });
         continue;
       }
-      const result = await downloadOne(page, targets[index], ids, index, outputDir, remainingMs, continuePredicate);
+      let target = targets[index];
+      try {
+        const refreshed = await refreshScopedTarget(page, target, ids, remainingMs, continuePredicate);
+        if (refreshed.target) {
+          target = refreshed.target;
+        } else {
+          const viewer = await evaluate(page, imageDialogStateScript());
+          if (!viewer?.dialog || !target.sourceUrl) {
+            results.push({ kind: 'image-export', method: 'chrome-download', index, downloaded: false, error: refreshed.error || 'image-target-refresh-unavailable' });
+            continue;
+          }
+        }
+        if (!target.sourceUrl) {
+          results.push({ kind: 'image-export', method: 'chrome-download', index, downloaded: false, error: 'image-source-unavailable' });
+          continue;
+        }
+      } catch (error) {
+        results.push({ kind: 'image-export', method: 'chrome-download', index, downloaded: false, error: `image-target-refresh-failed: ${error?.message || error}` });
+        continue;
+      }
+      const result = await downloadOne(page, target, ids, index, outputDir, remainingMs, continuePredicate);
       results.push(result);
       if (result.downloaded) successful.set(key, result);
       if (result.uncertain) {
