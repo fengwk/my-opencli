@@ -91,6 +91,23 @@ describe('read-only new-chat diagnostics', () => {
     }
   });
 
+  // newTab returns an ID without binding Page._page; select it explicitly so
+  // a "cold" probe cannot silently return to a previously reclaimed target.
+  it('selects the newly created target before the cold boot', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false })));
+    const page = {
+      newTab: vi.fn(async () => 'cold-target'),
+      selectTab: vi.fn(async () => {}),
+      evaluate: async () => ({
+        url: 'https://chatgpt.com/', composer: true, messages: 0, errorish: false,
+      }),
+    };
+    const rows = await inspectCommand.func(page, { mode: 'new-chat', 'fresh-tab': true });
+    expect(page.selectTab).toHaveBeenCalledExactlyOnceWith('cold-target');
+    expect(page.selectTab.mock.invocationCallOrder[0]).toBeLessThan(startNewChat.mock.invocationCallOrder[0]);
+    expect(JSON.parse(rows[0].diagnostics).freshTarget).toBe('cold-target');
+  });
+
   it('keeps only explicitly allowed surface fields', () => {
     const result = surfaceMetadata({
       url: 'https://chatgpt.com/c/current-conversation?secret=PRIVATE',

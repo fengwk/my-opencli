@@ -160,7 +160,12 @@ export const inspectCommand = cli({
     }
     if (kwargs['fresh-tab'] && mode !== 'new-chat') throw new ArgumentError('--fresh-tab requires --mode new-chat');
     if (mode === 'new-chat') {
-      if (kwargs['fresh-tab']) await page.newTab();
+      let freshTarget;
+      if (kwargs['fresh-tab']) {
+        freshTarget = await page.newTab();
+        if (!freshTarget) throw new CommandExecutionError('INSPECT_FRESH_TAB_UNAVAILABLE: no target ID returned');
+        await page.selectTab(freshTarget);
+      }
       const captures = [], captured = new Set();
       const onUnready = kwargs['capture-unready'] ? async (_state, phase) => {
         if (captured.has(phase)) return;
@@ -171,7 +176,7 @@ export const inspectCommand = cli({
         captures.push(file);
       } : undefined;
       const diagnostics = await probeNewChat(page, { onUnready });
-      return [{ conversationId: '', diagnostics: JSON.stringify({ ...diagnostics, captures }) }];
+      return [{ conversationId: '', diagnostics: JSON.stringify({ ...diagnostics, freshTarget, captures }) }];
     }
     const id = kwargs.session ? parseChatGPTConversationId(kwargs.session) : '';
     if (id) await openChatGPTConversation(page, id);
