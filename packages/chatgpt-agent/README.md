@@ -17,6 +17,12 @@ authoritative source for text, sources and turn completion; WebSockets stay
 armed for the out-of-band updates (image/file messages). Both are captured
 non-invasively through CDP — the page's own `fetch`/XHR are never patched.
 
+HTTP and WS text patches use independent accumulators. Once the own HTTP stream
+contains displayable text, its text is returned exclusively; WS text is used
+only when the own HTTP stream has no displayable text. This prevents duplicate
+or interleaved transports from merging, without suppressing WS metadata, assets,
+or lifecycle updates.
+
 - Capture is armed before the composer send and disarmed in the turn's `finally`; a missing CLI/extension arm fails before the prompt is sent.
 - The captured bytes are decoded with a streaming UTF-8 decoder and parsed across arbitrary chunk/event boundaries (CRLF, comments, multi-line data).
 - Once the turn's own response has started, only its terminal `[DONE]` frame ends the turn: a quiet or timed-out response is discarded (waiting out `--timeout` first) rather than returned as a truncated answer. A WebSocket-only empty terminal state is ignored for a bounded startup window, so the handshake frame cannot produce `EMPTY_REPLY`. Turns that never stream over HTTP keep their previous classification and timing.

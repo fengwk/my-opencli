@@ -109,6 +109,165 @@ describe('StreamCollector', () => {
     }]);
   });
 
+  // Own HTTP text wins as a whole source, regardless of which duplicate transport arrives first.
+  it('isolates HTTP and WS accumulators for matching text streams in either arrival order', () => {
+    for (const order of ['http-first', 'ws-first']) {
+      const c = new StreamCollector({ guarded: true, conversationId: 'cid-A' });
+      const http = () => c.ingestDirectSseEvent({
+        data: JSON.stringify({
+          conversation_id: 'cid-A',
+          p: '/message/content/parts/0',
+          o: 'append',
+          v: 'same text',
+        }),
+      });
+      const ws = () => c.ingestFramePayload(JSON.stringify([streamItem(
+        `data: ${JSON.stringify({
+          conversation_id: 'cid-A',
+          p: '/message/content/parts/0',
+          o: 'append',
+          v: 'same text',
+        })}\n\n`,
+      )]));
+
+      if (order === 'http-first') {
+        http();
+        ws();
+      } else {
+        ws();
+        http();
+      }
+
+      expect(c.text).toBe('same text');
+      expect(c.httpRawText).toBe('same text');
+      expect(c.wsRawText).toBe('same text');
+    }
+  });
+
+  // Separate accumulators prevent transport interleaving while preserving genuine repeated appends.
+  it('keeps HTTP text exclusive across interleaving and preserves repeated HTTP appends', () => {
+    const c = new StreamCollector({ guarded: true, conversationId: 'cid-A' });
+    const httpAppend = (value) => c.ingestDirectSseEvent({
+      data: JSON.stringify({
+        conversation_id: 'cid-A',
+        p: '/message/content/parts/0',
+        o: 'append',
+        v: value,
+      }),
+    });
+    const wsAppend = (value) => c.ingestFramePayload(JSON.stringify([streamItem(
+      `data: ${JSON.stringify({
+        conversation_id: 'cid-A',
+        p: '/message/content/parts/0',
+        o: 'append',
+        v: value,
+      })}\n\n`,
+    )]));
+
+    httpAppend('ha');
+    wsAppend('ha');
+    httpAppend('ha');
+    expect(c.text).toBe('haha');
+    expect(c.wsRawText).toBe('ha');
+    expect(c.httpRawText).toBe('haha');
+  });
+
+  // Both transports may send the same seed and delta; repeated text within the HTTP stream is legitimate.
+  it('does not merge duplicate HTTP/WS assistant seed-and-append streams', () => {
+    const c = new StreamCollector({ guarded: true, conversationId: 'cid-A' });
+    const seed = {
+      conversation_id: 'cid-A',
+      o: 'add',
+      v: {
+        message: {
+          id: 'assistant-seed',
+          conversation_id: 'cid-A',
+          author: { role: 'assistant' },
+          content: { parts: ['haha'] },
+        },
+      },
+    };
+    const append = {
+      conversation_id: 'cid-A',
+      p: '/message/content/parts/0',
+      o: 'append',
+      v: 'haha',
+    };
+    const sendHttp = (event) => c.ingestDirectSseEvent({ data: JSON.stringify(event) });
+    const sendWs = (event) => c.ingestFramePayload(JSON.stringify([streamItem(
+      `data: ${JSON.stringify(event)}\n\n`,
+    )]));
+
+    sendHttp(seed);
+    sendWs(seed);
+    sendHttp(append);
+    sendWs(append);
+
+    expect(c.text).toBe('hahahaha');
+    expect(c.httpRawText).toBe('hahahaha');
+    expect(c.wsRawText).toBe('hahahaha');
+  });
+
+  // conversation-update snapshots remain WS text; HTTP starts from its own empty patch state.
+  it('does not concatenate a WS snapshot with subsequent HTTP appends', () => {
+    const c = new StreamCollector({ guarded: true, conversationId: 'cid-A' });
+    c.ingestFramePayload(JSON.stringify(conversationUpdate([{
+      id: 'assistant-snapshot',
+      conversation_id: 'cid-A',
+      author: { role: 'assistant' },
+      content: { parts: ['WS snapshot'] },
+    }], 'cid-A')));
+    c.ingestDirectSseEvent({
+      data: JSON.stringify({
+        conversation_id: 'cid-A',
+        p: '/message/content/parts/0',
+        o: 'append',
+        v: 'HTTP answer',
+      }),
+    });
+
+    expect(c.wsRawText).toBe('WS snapshot');
+    expect(c.httpRawText).toBe('HTTP answer');
+    expect(c.text).toBe('HTTP answer');
+  });
+
+  // HTTP text selection must not suppress out-of-band WS image assets or ordinary WS-only answers.
+  it('keeps WS image-final delivery with HTTP text and falls back to normal WS-only text', () => {
+    const withHttpText = new StreamCollector({ guarded: true, conversationId: 'cid-A' });
+    withHttpText.pendingImageGen = true;
+    withHttpText.ingestDirectSseEvent({
+      data: JSON.stringify({
+        conversation_id: 'cid-A',
+        p: '/message/content/parts/0',
+        o: 'append',
+        v: 'HTTP response',
+      }),
+    });
+    withHttpText.ingestFramePayload(JSON.stringify(conversationUpdate([{
+      id: 'tool-image',
+      author: { role: 'tool', name: 't2uay3k.sj1i4kz' },
+      content: {
+        content_type: 'multimodal_text',
+        parts: [{ content_type: 'image_asset_pointer', asset_pointer: 'sediment://file_final' }],
+      },
+      metadata: { ghostrider: { status: 'final' } },
+    }], 'cid-A')));
+    expect(withHttpText.text).toBe('HTTP response');
+    expect(withHttpText.imageGenFinalSeen).toBe(true);
+    expect(withHttpText.imagePointers).toEqual([
+      { type: 'sediment', id: 'file_final', messageId: 'tool-image' },
+    ]);
+
+    const wsOnly = new StreamCollector({ guarded: true, conversationId: 'cid-A' });
+    wsOnly.ingestFramePayload(JSON.stringify(conversationUpdate([{
+      id: 'assistant-ws',
+      author: { role: 'assistant' },
+      content: { parts: ['WS-only response'] },
+    }], 'cid-A')));
+    expect(wsOnly.text).toBe('WS-only response');
+    expect(wsOnly.httpRawText).toBe('');
+  });
+
   it('does not expose image tool arguments as assistant text while image generation is pending', () => {
     const c = new StreamCollector();
     c.pendingImageGen = true;

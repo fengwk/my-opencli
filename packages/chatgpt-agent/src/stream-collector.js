@@ -34,6 +34,8 @@ export class StreamCollector {
 
     this.rawText = '';
     this.text = '';
+    this.httpRawText = '';
+    this.wsRawText = '';
     this.conversationId = this.expectedConversationId;
     this.activeTurnId = null;
     this.activeTopicId = null;
@@ -112,7 +114,7 @@ export class StreamCollector {
     for (const entry of bufferedSse) {
       try {
         this._recordProgress(entry.now);
-        this.ingestSseEvent(entry.sseEvent, entry.now);
+        this.ingestSseEvent(entry.sseEvent, entry.now, 'http');
       } catch {
         // ignore per-item errors
       }
@@ -332,7 +334,7 @@ export class StreamCollector {
     }
 
     this._recordProgress(now);
-    this.ingestSseEvent(sseEvent, now);
+    this.ingestSseEvent(sseEvent, now, 'http');
   }
 
   _ingestGuardedEnvelope(item, now) {
@@ -574,7 +576,7 @@ export class StreamCollector {
     for (const msg of messages) {
       if (!msg || typeof msg !== 'object') continue;
       const messageAdd = { o: 'add', v: { message: msg } };
-      applyProtocolTextState(this, messageAdd, now);
+      applyProtocolTextState(this, messageAdd, now, 'ws');
       collectFileRef(this, messageAdd);
       collectImageFromRawMessage(this, msg);
       collectSourcesFromEvent(this, messageAdd);
@@ -601,7 +603,7 @@ export class StreamCollector {
     }
   }
 
-  ingestSseEvent(sseEvent, now) {
+  ingestSseEvent(sseEvent, now, source = 'ws') {
     const data = sseEvent.data;
     if (!data) return;
     if (data.trim() === '[DONE]') {
@@ -650,7 +652,7 @@ export class StreamCollector {
       else if (typeof parsed.tool_invoked === 'boolean') this.toolInvoked = parsed.tool_invoked;
     }
 
-    applyProtocolTextState(this, parsed, now);
+    applyProtocolTextState(this, parsed, now, source);
     collectFileRef(this, parsed);
     collectImagePointer(this, parsed);
     collectSourcesFromEvent(this, parsed);
@@ -829,17 +831,22 @@ function parseJsonObject(text) {
   }
 }
 
-function applyProtocolTextState(collector, event, now) {
+function applyProtocolTextState(collector, event, now, source = 'ws') {
   if (!event || typeof event !== 'object') return;
+  const sourceField = source === 'http' ? 'httpRawText' : 'wsRawText';
   const nextRaw = assistantRawText(
     event,
-    collector.rawText || '',
+    collector[sourceField] || '',
     collector.pendingImageGen && !collector.imageGenFinalSeen,
   );
-  const nextText = sanitizeOutputText(nextRaw);
-  if (nextRaw === collector.rawText && nextText === collector.text) return;
-  collector.rawText = nextRaw;
-  collector.text = nextText;
+  collector[sourceField] = nextRaw;
+  const httpText = sanitizeOutputText(collector.httpRawText);
+  const hasHttpText = httpText.trim().length > 0;
+  const selectedRaw = hasHttpText ? collector.httpRawText : collector.wsRawText;
+  const selectedText = hasHttpText ? httpText : sanitizeOutputText(collector.wsRawText);
+  if (selectedRaw === collector.rawText && selectedText === collector.text) return;
+  collector.rawText = selectedRaw;
+  collector.text = selectedText;
   collector.lastTextChangeAt = now;
 }
 

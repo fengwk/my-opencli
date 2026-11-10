@@ -561,6 +561,8 @@ describe('conversation binding from the direct HTTP stream', () => {
 
     expect(collector.conversationId).toBe('cid-sse');
     expect(collector.text).toBe('提前到达的正文');
+    expect(collector.httpRawText).toBe('提前到达的正文');
+    expect(collector.wsRawText).toBe('');
     expect(collector.bufferedDirectSseEvents).toHaveLength(0);
     expect(collector.firstProgressAt).not.toBeNull();
   });
