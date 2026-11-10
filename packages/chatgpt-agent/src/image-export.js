@@ -123,11 +123,10 @@ export function imageTargetsScript(messageIds) {
       const rawScope = scope.getAttribute('data-chatgpt-search-message-ids') || '';
       // Use token conjunctions for whitespace scopes; comma legacy scopes are
       // resolved by exact value, never by a broad substring selector.
-      const scopeSelector = mainSelector + ' [data-chatgpt-search-message-ids'
-        + (rawScope.includes(',') ? '=' + JSON.stringify(rawScope) : '~=' + JSON.stringify(matchedTokens[0]))
-        + (rawScope.includes(',') ? '' : matchedTokens.slice(1).map((token) =>
-          '][data-chatgpt-search-message-ids~=' + JSON.stringify(token)).join('')) + ']'
-        + (rawScope.includes(',') ? '' : '[data-chatgpt-search-message-ids=' + JSON.stringify(rawScope) + ']');
+      const scopeSelector = mainSelector + ' ' + (rawScope.includes(',')
+        ? '[data-chatgpt-search-message-ids=' + JSON.stringify(rawScope) + ']'
+        : matchedTokens.map((token) =>
+          '[data-chatgpt-search-message-ids~=' + JSON.stringify(token) + ']').join(''));
       if (document.querySelectorAll(scopeSelector).length !== 1
           || [...scope.querySelectorAll('[data-testid="generated-image-gallery"]')]
             .filter((other) => other.closest('[data-chatgpt-search-message-ids]') === scope).length !== 1) {
@@ -229,7 +228,8 @@ export function imageDialogStateScript() {
     const dialog = dialogs.length === 1 ? dialogs[0] : null;
     const trigger = dialog && [...dialog.querySelectorAll('button,[role="button"]')]
       .find((button) => ['Download', '下载'].includes((button.getAttribute('aria-label') || '').trim()));
-    const menuId = trigger?.getAttribute('aria-controls');
+    const rawMenuId = (trigger?.getAttribute('aria-controls') || '').trim();
+    const menuId = rawMenuId.toLowerCase() === 'null' ? '' : rawMenuId;
     const popup = trigger?.getAttribute('aria-haspopup');
     const expanded = trigger?.getAttribute('aria-expanded') === 'true';
     const controlled = expanded && menuId ? document.getElementById(menuId) : null;
@@ -331,6 +331,21 @@ function isImageBuffer(bytes) {
   return isPng || isJpeg || isGif || isWebp;
 }
 
+async function refreshScopedTarget(page, target, messageIds, remainingMs, canContinue) {
+  let sawKeyWithoutSource = false;
+  for (let attempt = 0; attempt < 4 && isAllowed(canContinue) && remainingMs() > 0; attempt += 1) {
+    const discovery = await evaluate(page, imageTargetsScript(messageIds));
+    const matches = (discovery?.targets || []).filter((item) => item.key === target.key);
+    if (matches.length > 1) return { error: 'ambiguous-image-targets' };
+    if (matches.length === 1 && matches[0].sourceUrl) return { target: matches[0] };
+    if (matches.length === 1) sawKeyWithoutSource = true;
+    if (attempt < 3 && remainingMs() > 0) {
+      await page.sleep(Math.min(0.2, remainingMs() / 1000));
+    }
+  }
+  return { error: sawKeyWithoutSource ? 'image-source-unavailable' : 'image-preview-target-unavailable' };
+}
+
 async function downloadOne(page, target, messageIds, index, outputDir, remainingMs, canContinue) {
   const failed = (error, uncertain = false) => ({
     kind: 'image-export', method: 'chrome-download', index, downloaded: false, error, ...(uncertain ? { uncertain: true } : {}),
@@ -343,12 +358,18 @@ async function downloadOne(page, target, messageIds, index, outputDir, remaining
     let state = await evaluate(page, imageDialogStateScript());
     for (let openAttempt = 0; openAttempt < 2 && !state?.dialog && actionAllowed(); openAttempt += 1) {
       if (state?.blocked) return failed('image-viewer-blocked-by-dialog');
-      // Open once; subsequent images are selected inside this same viewer.
-      // A virtualized preview can ignore the first activation during mount.
-      // Retry only this UI activation after confirming no viewer has opened;
-      // no generation or download action has been submitted at this point.
-      const preview = await page.click(target.previewSelector);
-      if (!(preview?.matches_n > 0)) return failed('image-preview-click-failed');
+      // Resolve a fresh same-key preview immediately before each activation.
+      // A missing virtualized node is rediscovered, never clicked stale.
+      const refreshed = await refreshScopedTarget(page, target, messageIds, remainingMs, canContinue);
+      if (!refreshed.target) return failed(refreshed.error || 'image-preview-target-unavailable');
+      target = refreshed.target;
+      let preview;
+      try {
+        preview = await page.click(target.previewSelector);
+      } catch {
+        preview = null;
+      }
+      if (!(preview?.matches_n > 0)) continue;
       const openDeadline = Date.now() + Math.min(10_000, remainingMs());
       while (actionAllowed() && Date.now() < openDeadline) {
         state = await evaluate(page, imageDialogStateScript());
@@ -394,6 +415,7 @@ async function downloadOne(page, target, messageIds, index, outputDir, remaining
       return failed(`image-download-trigger-click-failed: ${error?.message || error}`, true);
     }
     let waited;
+    let menuSeenWithoutExactItem = false;
     const menuDeadline = Date.now() + Math.min(10_000, remainingMs());
     while (!settled && actionAllowed() && Date.now() < menuDeadline) {
       state = await evaluate(page, imageDialogStateScript());
@@ -414,16 +436,18 @@ async function downloadOne(page, target, messageIds, index, outputDir, remaining
         }
         break;
       }
-      if (state?.menu && matches.length !== 1) {
-        waited = await waiter;
-        waiter = null;
-        return failed('exact-download-image-menuitem-not-found', true);
-      }
+      if (state?.menu && matches.length !== 1) menuSeenWithoutExactItem = true;
       await page.sleep(Math.min(0.2, remainingMs() / 1000));
     }
     waited = waited || await waiter;
     waiter = null;
     if (waited.error) return failed(`image-download-wait-failed: ${waited.error?.message || waited.error}`, true);
+    // A complete direct-trigger receipt remains valid even if the menu never
+    // finished populating. Otherwise do not fail an intermediate empty menu.
+    if (menuSeenWithoutExactItem
+        && (!waited.receipt || waited.receipt.downloaded !== true || waited.receipt.state !== 'complete')) {
+      return failed('exact-download-image-menuitem-not-found', true);
+    }
     if (!waited.receipt || waited.receipt.downloaded !== true || waited.receipt.state !== 'complete') {
       return failed('download-receipt-incomplete', true);
     }
@@ -507,19 +531,13 @@ export async function exportNewImagesLikeOfficial(page, opts = {}) {
       }
       let target = targets[index];
       try {
-        const refreshed = await evaluate(page, imageTargetsScript(ids));
-        if (refreshed?.targets?.length) {
-          const refreshedKeys = refreshed.targets.map((item) => item.key);
-          if (refreshedKeys.length !== targets.length
-              || refreshedKeys.some((refreshedKey, i) => refreshedKey !== targets[i].key)) {
-            results.push({ kind: 'image-export', method: 'chrome-download', index, downloaded: false, error: 'image-target-identity-changed' });
-            break;
-          }
-          target = refreshed.targets[index];
+        const refreshed = await refreshScopedTarget(page, target, ids, remainingMs, continuePredicate);
+        if (refreshed.target) {
+          target = refreshed.target;
         } else {
           const viewer = await evaluate(page, imageDialogStateScript());
           if (!viewer?.dialog || !target.sourceUrl) {
-            results.push({ kind: 'image-export', method: 'chrome-download', index, downloaded: false, error: 'image-target-refresh-unavailable' });
+            results.push({ kind: 'image-export', method: 'chrome-download', index, downloaded: false, error: refreshed.error || 'image-target-refresh-unavailable' });
             continue;
           }
         }

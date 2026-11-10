@@ -1162,6 +1162,17 @@ describe('DOM Regression: Native generated-image target discovery', () => {
     expect(first[0].key).toBe('msg-a,msg-b:1');
     expect(first[0].selector).toContain('[data-chatgpt-search-message-ids~="msg-a"]');
     expect(first[0].selector).toContain('[data-chatgpt-search-message-ids~="msg-b"]');
+
+    // Reuse the discovered selector after the same scope's raw token spelling
+    // changes; it must still resolve without an intervening rediscovery.
+    const changedScope = multiImageFixture.replace(
+      'msg-current msg-current msg-current', 'msg-current',
+    );
+    const [currentTarget] = createDomSandbox(`<main>${multiImageFixture}</main>`)
+      .runScript(imageTargetsScript(['msg-current'])).targets;
+    const selectorMatches = createDomSandbox(`<main>${changedScope}</main>`)
+      .runScript(`document.querySelectorAll(${JSON.stringify(currentTarget.previewSelector)}).length`);
+    expect(selectorMatches).toBe(1);
   });
 
   // Main gallery selection can be ahead of the actual viewer. Only the
@@ -1188,9 +1199,9 @@ describe('DOM Regression: Native generated-image target discovery', () => {
     }
   });
 
-  // Historical and user scopes, plus a matching broad ancestor, cannot widen
-  // the current-turn scope selected from protocol message IDs.
-  it('excludes historical/user galleries and rejects a nonmatching nearest scope', () => {
+  // A broad ancestor that shares tokens makes the token selector ambiguous;
+  // fail closed rather than let it widen scope or rely on raw attribute spelling.
+  it('fails closed when a broader decoy scope shares current message tokens', () => {
     const history = multiImageFixture.replaceAll('msg-current', 'msg-history')
       .replaceAll('/current-', '/history-');
     const user = multiImageFixture.replace('<section ', '<section data-conversation-role="user" ')
@@ -1199,7 +1210,9 @@ describe('DOM Regression: Native generated-image target discovery', () => {
       + '<div data-chatgpt-search-message-ids="other"><div data-testid="generated-image-gallery">'
       + '<button data-testid="generated-image-preview"></button></div></div></div>';
     const { runScript } = createDomSandbox(`<main>${history}${multiImageFixture}${user}${nested}</main>`);
-    expect(runScript(imageTargetsScript(['msg-current'])).targets).toHaveLength(3);
+    expect(runScript(imageTargetsScript(['msg-current']))).toMatchObject({
+      targets: [], reason: 'ambiguous-gallery-scope',
+    });
   });
 
   it('allows one scoped preview without a rail and fails closed for missing IDs', () => {
@@ -1220,10 +1233,12 @@ describe('DOM Regression: Native generated-image target discovery', () => {
     expect(createDomSandbox(html).runScript(imageTargetsScript(['msg-one'])).targets).toEqual([]);
   });
 
-  // A duplicate DOM scope cannot be safely addressed by the same semantic CSS;
-  // stop rather than choose a current/history/user candidate by array position.
-  it('fails closed when another element duplicates the exact message scope', () => {
-    const user = multiImageFixture.replace('<section ', '<section data-conversation-role="user" ');
+  // A decoy with equivalent tokens but different raw spelling still collides
+  // with the semantic token selector and must stop rather than be selected.
+  it('fails closed when another element shares tokens with different raw spelling', () => {
+    const user = multiImageFixture
+      .replace('<section ', '<section data-conversation-role="user" ')
+      .replace('msg-current msg-current msg-current', 'msg-current');
     const { runScript } = createDomSandbox(`<main>${multiImageFixture}${user}</main>`);
     expect(runScript(imageTargetsScript(['msg-current']))).toMatchObject({
       targets: [], reason: 'ambiguous-gallery-scope',
@@ -1272,7 +1287,7 @@ describe('DOM Regression: Native generated-image target discovery', () => {
     expect(control.items.map(({ text }) => text)).toEqual(['下载图像', '下载全部图像']);
 
     const portal = `<div role="dialog" id="viewer"><button aria-label="Download" aria-haspopup="menu"
-      aria-expanded="true"></button></div><div role="menu"><button role="menuitem">Download image</button></div>`;
+      aria-expanded="true" aria-controls="null"></button></div><div role="menu"><button role="menuitem">Download image</button></div>`;
     const portalState = createDomSandbox(portal).runScript(imageDialogStateScript());
     expect(portalState.menu).toBe(true);
     expect(portalState.items[0].text).toBe('Download image');

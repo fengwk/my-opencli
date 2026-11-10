@@ -26,15 +26,17 @@ function pngAt(filePath) {
 }
 
 function makePage({ targets, receipts, clickFailure = null, waiterFailure = null, previewNoOps = 0,
-  direct = false, menuDelay = 0, menuItems = null } = {}) {
+  direct = false, menuDelay = 0, menuItemDelay = 0, menuItems = null } = {}) {
   let menuOpen = false;
   let menuCountdown = 0;
+  let menuItemCountdown = 0;
   let pendingReceipt;
   let viewerOpen = false;
   let selectedViewer = 0;
   let targetRun = 0;
   const page = {
     actions: [],
+    menuEmptyStates: 0,
     waitForDownload: vi.fn((_pattern, timeoutMs) => {
       page.actions.push({ type: 'wait', timeoutMs });
       const receipt = receipts?.shift();
@@ -55,7 +57,11 @@ function makePage({ targets, receipts, clickFailure = null, waiterFailure = null
       }
       if (selector.includes('aria-label=') && selector.includes('Download')) {
         if (direct) pendingReceipt?.();
-        else { menuOpen = true; menuCountdown = menuDelay; }
+        else {
+          menuOpen = true;
+          menuCountdown = menuDelay;
+          menuItemCountdown = menuItemDelay;
+        }
       }
       if (selector.includes('generated-image-preview')) {
         if (previewNoOps > 0) previewNoOps -= 1;
@@ -73,7 +79,7 @@ function makePage({ targets, receipts, clickFailure = null, waiterFailure = null
       return { focused: true };
     }),
     pressKey: vi.fn(async (key) => { page.actions.push({ type: 'key', key }); }),
-    sleep: vi.fn(async () => {}),
+    sleep: vi.fn(async () => new Promise((resolve) => setTimeout(resolve, 0))),
     evaluate: vi.fn(async (script) => {
       if (script.includes("const ids = new Set(") && script.includes("const galleries =")) {
         const current = targets?.runs ? targets.runs[targetRun] || [] : targets || [];
@@ -91,12 +97,17 @@ function makePage({ targets, receipts, clickFailure = null, waiterFailure = null
       if (script.includes('triggerSelector:')) {
         if (menuCountdown > 0) menuCountdown -= 1;
         const showMenu = menuOpen && menuCountdown === 0;
+        if (showMenu && menuItemCountdown > 0) {
+          menuItemCountdown -= 1;
+          page.menuEmptyStates += 1;
+        }
+        const showItems = showMenu && menuItemCountdown === 0;
         return {
           dialog: viewerOpen,
           triggerSelector: viewerOpen ? '[role="dialog"] [aria-label="Download"]' : '',
           menu: showMenu,
           menuSelector: '[role="menu"] [role="menuitem"]',
-          items: showMenu
+          items: showItems
             ? menuItems || [
               { index: 0, text: 'Download 3 images in this series', visible: true },
               { index: 1, text: 'Download image', visible: true },
@@ -224,6 +235,22 @@ describe('native Chrome generated-image export', () => {
     expect(page.actions.filter((action) => action.type === 'click' && action.selector.includes('menuitem'))).toHaveLength(1);
   });
 
+  // React can mount the menu before populating its items. Keep polling under the
+  // original bounded waiter instead of treating an empty intermediate state as final.
+  it('waits for exact menu items to populate after the menu itself mounts', async () => {
+    const dir = makeOutputDir();
+    const page = makePage({
+      targets: [threeRailTargets[0]], menuItemDelay: 3,
+      receipts: [receipt(pngAt(path.join(dir, 'populated.png')))],
+    });
+    const result = await exportNewImagesLikeOfficial(page, {
+      messageIds: MESSAGE_IDS, expectedCount: 1, outputDir: makeOutputDir(),
+    });
+    expect(result[0].downloaded).toBe(true);
+    expect(page.menuEmptyStates).toBeGreaterThan(0);
+    expect(page.actions.filter((action) => action.type === 'click' && action.selector.includes('menuitem'))).toHaveLength(1);
+  });
+
   // A virtualized rerender can replace the preview selector and blob URL while
   // retaining logical scope/order; refresh must replace the stale selector.
   it('refreshes a same-identity target before activating its preview', async () => {
@@ -231,7 +258,7 @@ describe('native Chrome generated-image export', () => {
     const oldTarget = { ...threeRailTargets[0], selector: 'stale-rail', previewSelector: 'button[data-testid="generated-image-preview"].stale' };
     const freshTarget = { ...threeRailTargets[0], selector: 'fresh-rail', previewSelector: 'button[data-testid="generated-image-preview"].fresh', sourceUrl: 'blob:refreshed' };
     const page = makePage({
-      targets: { runs: [[oldTarget], [freshTarget]] },
+      targets: { runs: [[oldTarget], [freshTarget], [freshTarget]] },
       receipts: [receipt(pngAt(path.join(dir, 'fresh.png')))],
     });
     const result = await exportNewImagesLikeOfficial(page, {
@@ -240,6 +267,45 @@ describe('native Chrome generated-image export', () => {
     expect(result[0].downloaded).toBe(true);
     expect(page.actions.some((action) => action.type === 'click' && action.selector === freshTarget.previewSelector)).toBe(true);
     expect(page.actions.some((action) => action.type === 'click' && action.selector === oldTarget.previewSelector)).toBe(false);
+  });
+
+  // A preview can disappear between initial discovery and the click. Poll for
+  // the same logical key and retry with the returned live selector, never stale.
+  it('rediscoveries a missing preview before activating the reappeared same-key target', async () => {
+    const dir = makeOutputDir();
+    const stale = { ...threeRailTargets[0], previewSelector: 'button[data-testid="generated-image-preview"].stale' };
+    const fresh = { ...threeRailTargets[0], previewSelector: 'button[data-testid="generated-image-preview"].fresh', sourceUrl: 'blob:reappeared' };
+    const page = makePage({
+      targets: { runs: [[stale], [stale], [], [fresh]] },
+      receipts: [receipt(pngAt(path.join(dir, 'reappeared.png')))],
+    });
+    const results = await exportNewImagesLikeOfficial(page, {
+      messageIds: MESSAGE_IDS, expectedCount: 1, outputDir: makeOutputDir(),
+    });
+    expect(results[0].downloaded).toBe(true);
+    expect(page.actions.some((action) => action.type === 'click' && action.selector === fresh.previewSelector)).toBe(true);
+    expect(page.actions.some((action) => action.type === 'click' && action.selector === stale.previewSelector)).toBe(false);
+  });
+
+  // If the preview never reappears in the current mount, fail without a stale
+  // click and let the existing single conversation remount retry it once.
+  it('leaves a missing preview to the single remount retry without stale activation', async () => {
+    const dir = makeOutputDir();
+    const stale = { ...threeRailTargets[0], previewSelector: 'button[data-testid="generated-image-preview"].stale' };
+    const fresh = { ...threeRailTargets[0], previewSelector: 'button[data-testid="generated-image-preview"].fresh', sourceUrl: 'blob:after-remount' };
+    const reloadConversation = vi.fn(async () => {});
+    const page = makePage({
+      targets: { runs: [[stale], [stale], [], [], [], [], [fresh], [fresh], [fresh]] },
+      receipts: [receipt(pngAt(path.join(dir, 'after-remount.png')))],
+    });
+    const results = await exportNewImagesLikeOfficial(page, {
+      messageIds: MESSAGE_IDS, expectedCount: 1, outputDir: makeOutputDir(),
+      reloadConversation, canRetry: () => true,
+    });
+    expect(reloadConversation).toHaveBeenCalledTimes(1);
+    expect(results[0].downloaded).toBe(true);
+    expect(page.actions.some((action) => action.type === 'click' && action.selector === stale.previewSelector)).toBe(false);
+    expect(page.actions.some((action) => action.type === 'click' && action.selector === fresh.previewSelector)).toBe(true);
   });
 
   // A bulk/series label is not an image receipt action. Its unconfirmed waiter
@@ -377,8 +443,10 @@ describe('native Chrome generated-image export', () => {
   it('retries one ignored preview activation before arming a single download', async () => {
     vi.useFakeTimers();
     const dir = makeOutputDir();
+    const stale = { ...threeRailTargets[0], previewSelector: 'button[data-testid="generated-image-preview"].stale' };
+    const fresh = { ...threeRailTargets[0], previewSelector: 'button[data-testid="generated-image-preview"].fresh', sourceUrl: 'blob:retry-fresh' };
     const page = makePage({
-      targets: [threeRailTargets[0]],
+      targets: { runs: [[stale], [stale], [stale], [fresh]] },
       receipts: [receipt(pngAt(path.join(dir, 'image.png')))],
       previewNoOps: 1,
     });
@@ -388,6 +456,8 @@ describe('native Chrome generated-image export', () => {
     });
     expect(results[0].downloaded).toBe(true);
     expect(page.actions.filter((a) => a.type === 'click' && a.selector.includes('generated-image-preview'))).toHaveLength(2);
+    expect(page.actions.filter((a) => a.type === 'click' && a.selector.includes('generated-image-preview'))
+      .map(({ selector }) => selector)).toEqual([stale.previewSelector, fresh.previewSelector]);
     expect(page.waitForDownload).toHaveBeenCalledTimes(1);
   });
 
@@ -398,7 +468,7 @@ describe('native Chrome generated-image export', () => {
     const file = pngAt(path.join(dir, 'original.png'));
     const page = makePage({
       targets: { runs: [
-        ...Array.from({ length: 13 }, () => [threeRailTargets[0]]),
+        ...Array.from({ length: 14 }, () => [threeRailTargets[0]]),
         [{ ...threeRailTargets[0], key: 'different:1' }, threeRailTargets[1]],
       ] },
       receipts: [receipt(file)],
