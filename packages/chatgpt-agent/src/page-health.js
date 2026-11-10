@@ -197,7 +197,7 @@ export async function probeChatSurface(page, opts = {}) {
  *   reload?: (page: object) => Promise<void>,
  *   allowReload?: boolean,
  *   settleMs?: number,
- *   onProbe?: (state: object, phase: string) => void,
+ *   onProbe?: (state: object, phase: string) => void | Promise<void>,
  * }} opts
  * @returns {Promise<{ recovered: boolean, before: object, after: object }>}
  */
@@ -207,7 +207,7 @@ export async function ensureHealthyChatSurface(page, opts = {}) {
   const waitForReady = async (phase) => {
     const deadline = Date.now() + settleMs;
     let state = await probeChatSurface(page, { session: opts.session });
-    opts.onProbe?.(state, phase);
+    await opts.onProbe?.(state, phase);
     // The attempt cap also bounds tests and custom pages with non-blocking sleep.
     for (let attempt = 0; attempt < Math.ceil(settleMs / pollMs); attempt += 1) {
       if (!state.broken || state.conversationUnavailable) break;
@@ -215,7 +215,7 @@ export async function ensureHealthyChatSurface(page, opts = {}) {
       if (remaining <= 0) break;
       await page.sleep(Math.min(pollMs, remaining) / 1000);
       state = await probeChatSurface(page, { session: opts.session });
-      opts.onProbe?.(state, phase);
+      await opts.onProbe?.(state, phase);
     }
     return state;
   };

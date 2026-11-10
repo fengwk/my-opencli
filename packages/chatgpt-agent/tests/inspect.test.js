@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 vi.mock('../src/host-chatgpt.js', async (importOriginal) => ({
   ...await importOriginal(),
@@ -56,6 +59,36 @@ describe('read-only new-chat diagnostics', () => {
     await expect(inspectCommand.func({}, { mode: 'new-chat', session: 'conversation-current' }))
       .rejects.toThrow('without a session');
     expect(startNewChat).not.toHaveBeenCalled();
+  });
+
+  // Screenshots are privileged opt-in evidence, never default diagnostics.
+  // An unready phase is captured only once even when many polls fail.
+  it('awaits one opt-in screenshot per unready phase before a reload', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false })));
+    const output = fs.mkdtempSync(path.join(os.tmpdir(), 'chatgpt-unready-probe-'));
+    try {
+      let count = 0;
+      const page = {
+        evaluate: async () => ({
+          url: 'https://chatgpt.com/', composer: ++count > 31, messages: 0,
+          mainLen: 3772, errorish: false, conversationUnavailable: false,
+        }),
+        sleep: async (seconds) => { vi.advanceTimersByTime(seconds * 1000); },
+        screenshot: vi.fn(async () => {}),
+      };
+      const rows = await inspectCommand.func(page, {
+        mode: 'new-chat', 'capture-unready': true, op: output,
+      });
+      const result = JSON.parse(rows[0].diagnostics);
+      expect(result.ready).toBe(true);
+      expect(page.screenshot).toHaveBeenCalledExactlyOnceWith({
+        path: path.join(output, 'unready-initial.png'), fullPage: false, format: 'png',
+      });
+      expect(result.captures).toHaveLength(1);
+    } finally {
+      fs.rmSync(output, { recursive: true, force: true });
+    }
   });
 
   it('keeps only explicitly allowed surface fields', () => {

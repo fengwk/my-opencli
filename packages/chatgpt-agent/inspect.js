@@ -4,6 +4,8 @@
  */
 import { cli, Strategy } from '@jackwener/opencli/registry';
 import { ArgumentError, CommandExecutionError } from '@jackwener/opencli/errors';
+import fs from 'node:fs';
+import path from 'node:path';
 import {
   CHATGPT_DOMAIN, CHATGPT_URL, currentChatGPTUrl, openChatGPTConversation,
   parseChatGPTConversationId, startNewChat, ensureChatGPTLogin, chatGPTHostVersion,
@@ -45,7 +47,7 @@ async function runtimeVersions() {
   return result;
 }
 
-export async function probeNewChat(page) {
+export async function probeNewChat(page, { onUnready } = {}) {
   const startedAt = Date.now(), timeline = [], tabs = [];
   let stage = 'boot';
   const recordTabs = async () => {
@@ -65,8 +67,9 @@ export async function probeNewChat(page) {
     stage = 'health';
     const health = await ensureHealthyChatSurface(page, {
       reload: async () => { stage = 'reload'; await boot(); },
-      onProbe: (state, phase) => {
+      onProbe: async (state, phase) => {
         if (timeline.length < 80) timeline.push({ phase, elapsedMs: Date.now() - startedAt, ...surfaceMetadata(state) });
+        if (!state.composer && state.messages === 0) await onUnready?.(state, phase);
       },
     });
     await recordTabs();
@@ -140,6 +143,9 @@ export const inspectCommand = cli({
     { name: 'session', valueRequired: true, help: 'Existing conversation id or /c/<id> URL; omit to inspect home' },
     { name: 'mode', valueRequired: true, default: 'page', choices: ['page', 'new-chat'],
       help: 'page: inspect existing DOM; new-chat: probe real boot/readiness, never clears, uploads or sends' },
+    { name: 'capture-unready', type: 'bool', default: false,
+      help: 'Explicitly save one unready new-chat screenshot per phase. May contain visible account/draft content; never enabled by default.' },
+    { name: 'op', valueRequired: true, help: 'Managed output directory for opt-in unready screenshots (Hub injects this)' },
   ],
   columns: ['conversationId', 'diagnostics'],
   func: async (page, kwargs) => {
@@ -147,7 +153,22 @@ export const inspectCommand = cli({
     if (!['page', 'new-chat'].includes(mode) || (mode === 'new-chat' && kwargs.session)) {
       throw new ArgumentError('Use --mode page with an optional session, or --mode new-chat without a session');
     }
-    if (mode === 'new-chat') return [{ conversationId: '', diagnostics: JSON.stringify(await probeNewChat(page)) }];
+    if (kwargs['capture-unready'] && (mode !== 'new-chat' || !kwargs.op)) {
+      throw new ArgumentError('--capture-unready requires --mode new-chat and --op');
+    }
+    if (mode === 'new-chat') {
+      const captures = [], captured = new Set();
+      const onUnready = kwargs['capture-unready'] ? async (_state, phase) => {
+        if (captured.has(phase)) return;
+        captured.add(phase);
+        fs.mkdirSync(kwargs.op, { recursive: true, mode: 0o700 });
+        const file = path.join(kwargs.op, `unready-${phase}.png`);
+        await page.screenshot({ path: file, fullPage: false, format: 'png' });
+        captures.push(file);
+      } : undefined;
+      const diagnostics = await probeNewChat(page, { onUnready });
+      return [{ conversationId: '', diagnostics: JSON.stringify({ ...diagnostics, captures }) }];
+    }
     const id = kwargs.session ? parseChatGPTConversationId(kwargs.session) : '';
     if (id) await openChatGPTConversation(page, id);
     else await page.goto(CHATGPT_URL, { settleMs: 2000 });
