@@ -352,6 +352,63 @@ describe('SseCaptureStream fail-closed integrity', () => {
     })).toThrow(/SSE_CAPTURE_UNSUPPORTED/);
   });
 
+  // Browser-provided error text selects only a whitelisted public token.
+  it.each([
+    ['method-not-found', 'Network.streamResourceContent was not found'],
+    ['method-not-found', 'Network.streamResourceContent not found'],
+    ['method-not-found', 'Method not found: streamResourceContent'],
+    ['arm-timeout', 'The operation timed out'],
+    ['arm-timeout', 'timeout while arming stream'],
+    ['resource-gone', 'No resource with given identifier'],
+    ['target-detached', 'Session was closed'],
+    ['target-detached', 'Target detached'],
+    ['unknown', 'unrecognized browser failure'],
+  ])('classifies capture error as %s without exposing its text', (classification, rawError) => {
+    const sse = new SseCaptureStream(new StreamCollector({ guarded: true }));
+    let thrown;
+    try {
+      sse.ingestRead({
+        chunks: [{
+          kind: 'sse-error',
+          url: CHATGPT_CONVERSATION_SSE_URL,
+          requestId: 'req-own-1',
+          error: rawError,
+        }],
+        dropped: 0,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown.code).toBe(SSE_CAPTURE_UNSUPPORTED);
+    expect(thrown.hint).toContain(`classification: ${classification}`);
+    expect(thrown.hint).not.toContain(rawError);
+    expect(thrown.message).not.toContain(rawError);
+  });
+
+  // A diagnostic that also names a class-like token and secret URL must expose neither.
+  it('does not echo adversarial token-like text from a capture error URL', () => {
+    const sse = new SseCaptureStream(new StreamCollector({ guarded: true }));
+    const rawError = 'No resource with given identifier: https://example.test/path?token=SECRET-TOKEN-1234&reason=method-not-found';
+    let thrown;
+    try {
+      sse.ingestRead({
+        chunks: [{
+          kind: 'sse-error',
+          url: CHATGPT_CONVERSATION_SSE_URL,
+          requestId: 'req-own-1',
+          error: rawError,
+        }],
+        dropped: 0,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown.hint).toContain('classification: resource-gone');
+    expect(`${thrown.message}\n${thrown.hint}\n${sse.describe()}`).not.toContain('SECRET-TOKEN-1234');
+    expect(`${thrown.message}\n${thrown.hint}\n${sse.describe()}`).not.toContain('method-not-found');
+    expect(sse.captureErrorText).toBe(rawError);
+  });
+
   // A failed network stream before its own terminal marker remains incomplete
   // even when the page happens to have rendered the full-looking answer.
   it('rejects a network failure before [DONE] without claiming Chrome is unsupported', () => {
@@ -437,8 +494,8 @@ describe('SseCaptureStream fail-closed integrity', () => {
     });
   }
 
-  // CDP errorText can quote the request URL, tokens included: the failure must
-  // stay generic, and the raw text must never reach message/hint/describe().
+  // CDP errorText can quote the request URL, tokens included: only a fixed
+  // classification may reach the hint, while the raw text remains private.
   it('never echoes the raw capture error of our own request', () => {
     const collector = new StreamCollector({ guarded: true });
     const sse = new SseCaptureStream(collector);
@@ -463,6 +520,7 @@ describe('SseCaptureStream fail-closed integrity', () => {
     expect(thrown).toBeTruthy();
     expect(thrown.code).toBe(SSE_CAPTURE_UNSUPPORTED);
     expect(thrown.message).toMatch(/could not stream this response body/);
+    expect(thrown.hint).toContain('classification: unknown');
     const surfaced = `${thrown.message}\n${thrown.hint || ''}\n${sse.describe()}`;
     expect(surfaced).not.toContain('SECRET-TOKEN-1234');
     expect(surfaced).not.toContain('token=');

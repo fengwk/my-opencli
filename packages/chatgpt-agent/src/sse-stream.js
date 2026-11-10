@@ -45,6 +45,39 @@ function incomplete(message, hint) {
   return captureError(SSE_CAPTURE_INCOMPLETE, `SSE_CAPTURE_INCOMPLETE: ${message}`, hint);
 }
 
+/** Map browser error text to a fixed, safe token; never surface the source text. */
+function classifyCaptureError(errorText) {
+  const text = String(errorText || '');
+  if (/streamresourcecontent.*(?:wasn't found|not found)|method not found/i.test(text)) {
+    return 'method-not-found';
+  }
+  if (/timed out|timeout/i.test(text)) {
+    return 'arm-timeout';
+  }
+  if (/no resource with given identifier/i.test(text)) {
+    return 'resource-gone';
+  }
+  if (/(?:session|target).{0,80}(?:closed|detached)|(?:closed|detached).{0,80}(?:session|target)/i.test(text)) {
+    return 'target-detached';
+  }
+  return 'unknown';
+}
+
+function captureErrorGuidance(classification) {
+  switch (classification) {
+    case 'method-not-found':
+      return 'Check that the Browser Bridge extension and CLI are compatible, then retry.';
+    case 'arm-timeout':
+      return 'Retry; if this repeats, check that the browser target is responsive.';
+    case 'resource-gone':
+      return 'The browser resource is no longer available; retry with the conversation open.';
+    case 'target-detached':
+      return 'The browser target closed or detached; reconnect it and retry.';
+    default:
+      return 'Retry; if this repeats, check the Browser Bridge extension, CLI, and active browser target.';
+  }
+}
+
 /**
  * `base64:<bytes>` → Buffer, or null when the host contract is violated.
  * Padding is tolerated in either canonical form, but the bytes must round-trip:
@@ -249,10 +282,11 @@ export class SseCaptureStream {
           'The turn response is incomplete and was discarded. Check the connection before retrying.',
         );
       }
+      const classification = classifyCaptureError(this.captureErrorText);
       throw captureError(
         SSE_CAPTURE_UNSUPPORTED,
         'SSE_CAPTURE_UNSUPPORTED: the browser could not stream this response body',
-        'Update the forked Browser Bridge extension and Chrome, then retry: HTTP stream capture needs a streaming-capable target.',
+        `SSE capture failed (classification: ${classification}). ${captureErrorGuidance(classification)}`,
       );
     }
     if (chunk.kind !== 'sse-chunk') {
