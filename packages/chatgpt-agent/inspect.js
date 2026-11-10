@@ -44,6 +44,9 @@ export function chatDiagnosticsScript() {
       .filter(Boolean))].slice(0, 20);
     return {
       url: location.origin + location.pathname, visibility: document.visibilityState,
+      frames: [...document.querySelectorAll('iframe')].slice(0, 10).map(metadata),
+      shadowHosts: [...document.querySelectorAll('*')].filter((el) => el.shadowRoot).slice(0, 10).map(metadata),
+      totalImages: document.querySelectorAll('img').length,
       composers: [...document.querySelectorAll('textarea,[contenteditable],[role="textbox"]')].slice(0, 20).map(metadata),
       forms: [...document.querySelectorAll('form')].slice(0, 10).map(metadata),
       dialogs: [...document.querySelectorAll('[role="dialog"]')].slice(0, 10).map(metadata),
@@ -70,7 +73,7 @@ export const inspectCommand = cli({
     const id = kwargs.session ? parseChatGPTConversationId(kwargs.session) : '';
     if (id) await openChatGPTConversation(page, id);
     else await page.goto(CHATGPT_URL, { settleMs: 2000 });
-    await page.sleep(2);
+    await page.sleep(10);
     const url = await currentChatGPTUrl(page);
     if (id && parseChatGPTConversationId(url) !== id) {
       throw new CommandExecutionError('INSPECT_SESSION_MISMATCH: requested conversation did not open');
