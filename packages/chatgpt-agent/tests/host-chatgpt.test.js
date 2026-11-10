@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { activateCurrentChatGPTTab } from '../src/host-chatgpt.js';
 
 const hostChatGptSource = fs.readFileSync(
   fileURLToPath(new URL('../src/host-chatgpt.js', import.meta.url)),
@@ -66,5 +67,33 @@ describe('host-chatgpt host package resolution', () => {
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('post-navigation leased tab activation', () => {
+  // The pre-navigation host helper cannot pick a tab until goto binds it.
+  // The later activation must select only the exact leased target, even among
+  // multiple ChatGPT tabs, without mutating a user's unrelated active tab.
+  it('activates only the exact inactive leased target', async () => {
+    const page = {
+      getActivePage: () => 'own-page',
+      tabs: vi.fn(async () => [
+        { page: 'other-chatgpt', active: true },
+        { page: 'own-page', active: false },
+      ]),
+      selectTab: vi.fn(async () => {}),
+    };
+    await activateCurrentChatGPTTab(page);
+    expect(page.selectTab).toHaveBeenCalledExactlyOnceWith('own-page');
+  });
+
+  it.each([
+    { target: undefined, tabs: [{ page: 'other-chatgpt', active: false }] },
+    { target: 'stale-page', tabs: [{ page: 'other-chatgpt', active: false }] },
+    { target: 'own-page', tabs: [{ page: 'own-page', active: true }] },
+  ])('does not guess or reselect an already active target: $target', async ({ target, tabs }) => {
+    const page = { getActivePage: () => target, tabs: async () => tabs, selectTab: vi.fn() };
+    await activateCurrentChatGPTTab(page);
+    expect(page.selectTab).not.toHaveBeenCalled();
   });
 });

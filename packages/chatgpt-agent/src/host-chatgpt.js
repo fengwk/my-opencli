@@ -113,10 +113,33 @@ export const {
   ensureChatGPTComposer,
   ensureChatGPTLogin,
   getChatGPTSendFailureState,
-  openChatGPTConversation,
   parseChatGPTConversationId,
   requireNonEmptyPrompt,
   requirePositiveInt,
   sendChatGPTMessage,
-  startNewChat,
 } = utils;
+
+/**
+ * The host's pre-navigation activation can see no current target (first lease)
+ * or multiple ChatGPT tabs. After goto the Page has the exact leased target,
+ * so only that target may be selected. Never guess by URL/history or steal a
+ * different session's tab when the lease is not represented in the listing.
+ */
+export async function activateCurrentChatGPTTab(page) {
+  const target = page.getActivePage?.();
+  if (!target || typeof page.tabs !== 'function' || typeof page.selectTab !== 'function') return;
+  const tabs = await page.tabs();
+  const own = Array.isArray(tabs) ? tabs.filter((tab) => tab.page === target) : [];
+  if (own.length === 1 && own[0].active === false) await page.selectTab(target);
+}
+
+export async function startNewChat(page) {
+  await utils.startNewChat(page);
+  await activateCurrentChatGPTTab(page);
+}
+
+export async function openChatGPTConversation(page, value) {
+  const id = await utils.openChatGPTConversation(page, value);
+  await activateCurrentChatGPTTab(page);
+  return id;
+}

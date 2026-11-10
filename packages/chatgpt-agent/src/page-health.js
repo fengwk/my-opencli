@@ -4,6 +4,7 @@
  */
 
 import { parseChatGPTConversationId } from './host-chatgpt.js';
+import { unwrapEvaluateResult } from './dom-helpers.js';
 
 export const PAGE_ERRORISH_RE = /something went wrong|出错了|无法加载|try again|重新加载|unable to load|network error/i;
 export const GENERATION_FAILED_RE = /something went wrong while generating the response|生成回复时出错|生成响应时出错/i;
@@ -66,7 +67,8 @@ export async function probeChatSurface(page, opts = {}) {
       const style = window.getComputedStyle(node);
       const rect = node.getBoundingClientRect();
       return style.display !== 'none' && style.visibility !== 'hidden'
-        && rect.width > 0 && rect.height > 0;
+        && rect.width > 0 && rect.height > 0
+        && !node.closest?.('[hidden],[inert],[aria-hidden="true"]');
     });
     // Metadata only: distinguish a missing editor from a mounted but hidden
     // editor without returning draft text or weakening the readiness predicate.
@@ -146,7 +148,7 @@ export async function probeChatSurface(page, opts = {}) {
       conversationUnavailable,
       generating,
     };
-  })()`).catch(() => ({
+  })()`).then(unwrapEvaluateResult).catch(() => ({
     url: '',
     composer: false,
     messages: 0,

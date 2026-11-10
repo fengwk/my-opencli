@@ -143,6 +143,19 @@ describe('probeChatSurface', () => {
     expect(surface.broken).toBe(true);
   });
 
+  // Session envelopes describe the same surface; classify their payload rather
+  // than falsely reporting an absent composer, without relaxing any predicate.
+  it('unwraps a Bridge session envelope before classifying readiness', async () => {
+    const page = evaluatedPage('', () => null, false, true, {
+      messages: 0, url: 'https://chatgpt.com/',
+    });
+    const evaluate = page.evaluate;
+    page.evaluate = async (script) => ({ session: 'lease-current', data: await evaluate(script) });
+    const surface = await probeChatSurface(page);
+    expect(surface.composer).toBe(true);
+    expect(surface.broken).toBe(false);
+  });
+
   // The current UI uses aria-label="Stop" rather than data-testid="stop-button".
   it('recognizes an active turn without the old test id', async () => {
     const surface = await probeChatSurface(evaluatedPage('回答生成中', () => null, true));
