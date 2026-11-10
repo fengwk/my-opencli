@@ -41,6 +41,7 @@ import {
   COMPOSER_IMAGE_FILE_SELECTORS,
 } from '../src/upload-dom.js';
 import { imageDialogStateScript, imageTargetsScript, viewerImageStateScript } from '../src/image-export.js';
+import { chatDiagnosticsScript } from '../inspect.js';
 
 /**
  * Creates an execution environment exposing standard DOM interfaces to node:vm.
@@ -1305,5 +1306,23 @@ describe('DOM Regression: Native generated-image target discovery', () => {
     const portalState = createDomSandbox(portal).runScript(imageDialogStateScript());
     expect(portalState.menu).toBe(true);
     expect(portalState.items[0].text).toBe('Download image');
+  });
+});
+
+describe('DOM Regression: bounded ChatGPT diagnostics', () => {
+  // Diagnostic exports need enough selector evidence to reproduce a mismatch,
+  // but must never include prompt text, input values or inline pixels.
+  it('returns composer/image metadata without conversation content or source bytes', () => {
+    const { runScript, sandbox } = createDomSandbox(`<main>
+      <form data-chatgpt-composer><div role="textbox" contenteditable="plaintext-only">PRIVATE-PROMPT</div></form>
+      <div data-chatgpt-search-message-ids="message-current"><img src="data:image/png;base64,PRIVATE-PIXELS" /></div>
+      <a href="/c/conversation-current">PRIVATE-TITLE</a>
+    </main>`);
+    sandbox.location = new URL('https://chatgpt.com/c/conversation-current?token=PRIVATE-TOKEN');
+    const result = runScript(chatDiagnosticsScript());
+    expect(result.composers[0].editable).toBe('plaintext-only');
+    expect(result.images[0].sourceKind).toBe('data');
+    expect(result.conversationIds).toEqual(['conversation-current']);
+    expect(JSON.stringify(result)).not.toMatch(/PRIVATE-PROMPT|PRIVATE-TITLE|PRIVATE-PIXELS|PRIVATE-TOKEN/);
   });
 });
