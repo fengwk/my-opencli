@@ -140,6 +140,19 @@ export async function probeChatSurface(page, opts = {}) {
       userAgent: typeof navigator === 'object' ? navigator.userAgent : '',
       messages,
       mainLen,
+      shell: {
+        mainTag: main?.tagName || '',
+        formCount: document.querySelectorAll('form').length,
+        frameCount: document.querySelectorAll('iframe').length,
+        scriptCount: document.querySelectorAll('script').length,
+        roots: Array.from(main?.children || []).slice(0, 8).map((node) => ({
+          tag: node.tagName, id: node.id, role: node.getAttribute?.('role'),
+          testid: node.getAttribute?.('data-testid'),
+        })),
+        clientError: /application error|client-side exception/i.test(mainText),
+        challenge: /just a moment|verify you are human|checking your browser/i.test(mainText),
+        notFound: /page not found|404.*not found|could not be found/i.test(mainText),
+      },
       // Keep the latest text for diagnostics, but classify the full non-user
       // surface above so long threads are covered without treating prompts as UI.
       mainText: mainText.slice(-8000),

@@ -143,12 +143,16 @@ export async function resolvePreSendConversationId(page, session) {
 
 function requireReadyChatSurface(surface, recovered = false, stage = 'unknown') {
   if (surface?.broken === false) return;
+  let route = '';
+  try { const url = new URL(surface?.url); route = url.origin + url.pathname; } catch { /* unreadable page */ }
   throw new CommandExecutionError(
     'PAGE_BROKEN: ChatGPT composer or thread did not become ready before send',
     `stage=${stage} reloadAttempted=${!!recovered} composer=${!!surface?.composer} errorish=${!!surface?.errorish} `
       + `messages=${surface?.messages ?? 'unknown'} mainLen=${surface?.mainLen ?? 'unknown'} `
       + `blankThread=${!!surface?.blankThread} sessionMismatch=${!!surface?.sessionMismatch} `
       + `conversationUnavailable=${!!surface?.conversationUnavailable} visibility=${surface?.visibility || 'unknown'} `
+      + `route=${route} readyState=${surface?.readyState || 'unknown'} `
+      + `shell=${JSON.stringify(surface?.shell || {})} `
       + `composerCandidates=${JSON.stringify(surface?.composerCandidates || [])}. `
       + 'Verify the requested conversation is accessible in this browser profile and finish any login or interstitial before retrying.',
   );

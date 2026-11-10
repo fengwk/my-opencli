@@ -21,7 +21,7 @@ function safeUrl(value) {
 export function surfaceMetadata(state) {
   const keys = [
     'composer', 'composerCandidates', 'visibility', 'documentHasFocus', 'readyState', 'userAgent',
-    'messages', 'mainLen', 'errorish', 'generationFailed', 'conversationUnavailable',
+    'messages', 'mainLen', 'shell', 'errorish', 'generationFailed', 'conversationUnavailable',
     'generating', 'conversationId', 'onConversation', 'sessionMismatch', 'blankThread', 'broken',
   ];
   return { url: safeUrl(state?.url), ...Object.fromEntries(keys
@@ -145,6 +145,8 @@ export const inspectCommand = cli({
       help: 'page: inspect existing DOM; new-chat: probe real boot/readiness, never clears, uploads or sends' },
     { name: 'capture-unready', type: 'bool', default: false,
       help: 'Explicitly save one unready new-chat screenshot per phase. May contain visible account/draft content; never enabled by default.' },
+    { name: 'fresh-tab', type: 'bool', default: false,
+      help: 'Start new-chat diagnosis in a new owned blank tab rather than a reused tab' },
     { name: 'op', valueRequired: true, help: 'Managed output directory for opt-in unready screenshots (Hub injects this)' },
   ],
   columns: ['conversationId', 'diagnostics'],
@@ -156,7 +158,9 @@ export const inspectCommand = cli({
     if (kwargs['capture-unready'] && (mode !== 'new-chat' || !kwargs.op)) {
       throw new ArgumentError('--capture-unready requires --mode new-chat and --op');
     }
+    if (kwargs['fresh-tab'] && mode !== 'new-chat') throw new ArgumentError('--fresh-tab requires --mode new-chat');
     if (mode === 'new-chat') {
+      if (kwargs['fresh-tab']) await page.newTab();
       const captures = [], captured = new Set();
       const onUnready = kwargs['capture-unready'] ? async (_state, phase) => {
         if (captured.has(phase)) return;
